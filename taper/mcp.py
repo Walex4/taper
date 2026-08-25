@@ -221,6 +221,10 @@ def serve(root_pub: Optional[Ed25519PublicKey] = None,
             owner = socket_path.stat().st_uid
             whose = f"uid {owner}" + (" — same uid as this process, no separation"
                                       if owner == os.getuid() else "")
+        except PermissionError:
+            # Cannot traverse the broker's runtime directory. That is the
+            # boundary working, not the socket missing — do not say "missing".
+            whose = "owner unreadable from here — directory not traversable"
         except OSError:
             whose = "not present yet"
         print(f"taper mcp server ready on stdio (socket mode) -> broker at "

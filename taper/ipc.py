@@ -219,18 +219,29 @@ class BrokerClient:
         self.timeout = timeout
 
     def call(self, token: str, operation: str, request: dict) -> dict:
-        if not self.path.exists():
-            return {"allowed": False,
-                    "reason": f"broker socket not found at {self.path}; is taper-broker "
-                              f"running? (systemctl status taper-broker)"}
+        # No exists() pre-check. The broker's runtime directory is 0750 and owned
+        # by the broker's group precisely so this user cannot traverse it, and
+        # Path.exists() reports EACCES as False — so the check answered "no
+        # socket" for a broker that was running fine, and sent the operator to
+        # restart a healthy service. connect() tells the two apart honestly.
         try:
             conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             conn.settimeout(self.timeout)
             conn.connect(str(self.path))
+        except FileNotFoundError:
+            return {"allowed": False,
+                    "reason": f"broker socket not found at {self.path}; is taper-broker "
+                              f"running? (systemctl status taper-broker)"}
         except PermissionError:
             return {"allowed": False,
-                    "reason": f"permission denied connecting to {self.path}; is your "
-                              f"user in the broker's group?"}
+                    "reason": f"permission denied reaching {self.path} — the socket may "
+                              f"well exist. Is this user in the broker's group? "
+                              f"(stat -c '%G' {self.path.parent}; id)"}
+        except ConnectionRefusedError:
+            return {"allowed": False,
+                    "reason": f"{self.path} exists but nothing is listening — a stale "
+                              f"socket from a broker that died (systemctl status "
+                              f"taper-broker)"}
         except OSError as exc:
             return {"allowed": False, "reason": f"cannot reach broker: {exc}"}
         try:

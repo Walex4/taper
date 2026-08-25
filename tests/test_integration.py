@@ -8,6 +8,7 @@ over a pipe and the executor is pointed at harmless local binaries.
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -267,6 +268,46 @@ class TestMCP:
         assert isinstance(built[0].backend, BrokerClient)
         # The reason the whole file exists: this half cannot reach a credential.
         assert not hasattr(built[0].backend, "broker")
+
+    def test_an_unreachable_directory_is_not_reported_as_a_missing_socket(
+            self, tmp_path):
+        """A 0750 runtime directory is the boundary working, not a dead broker.
+
+        Path.exists() reports EACCES as False, so the old pre-check told the
+        operator to go restart a service that was running fine. The distinction
+        is the whole value of the message.
+        """
+        run = tmp_path / "run"
+        run.mkdir()
+        sock = run / "broker.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(sock))
+        listener.listen(1)
+        os.chmod(run, 0o000)                   # cannot traverse, as the agent user
+        try:
+            reply = BrokerClient(sock).call("tok", "ssh.exec", {})
+        finally:
+            os.chmod(run, 0o700)
+            listener.close()
+
+        assert reply["allowed"] is False
+        assert "permission denied" in reply["reason"]
+        assert "not found" not in reply["reason"]
+        assert "group" in reply["reason"]      # says what to actually fix
+
+    def test_a_genuinely_absent_socket_still_says_so(self, tmp_path):
+        reply = BrokerClient(tmp_path / "nope.sock").call("tok", "ssh.exec", {})
+        assert reply["allowed"] is False
+        assert "not found" in reply["reason"]
+
+    def test_a_stale_socket_names_the_dead_broker(self, tmp_path):
+        sock = tmp_path / "stale.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(sock))               # bound but never listen(): refused
+        listener.close()                       # file stays behind, nobody home
+        reply = BrokerClient(sock).call("tok", "ssh.exec", {})
+        assert reply["allowed"] is False
+        assert "nothing is listening" in reply["reason"]
 
     def test_unknown_method_is_a_protocol_error(self, mcp):
         reply = mcp.handle({"jsonrpc": "2.0", "id": 5, "method": "tools/frobnicate"})
