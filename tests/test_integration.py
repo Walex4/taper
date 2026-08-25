@@ -20,7 +20,7 @@ from taper.broker import Broker
 from taper.caps import OneOf, Range, Subset
 from taper.chain import Token
 from taper.execute import Executor
-from taper.mcp import Server
+from taper.mcp import LocalBackend, Server
 from taper.secrets import ChainProvider, EnvProvider, FileProvider, SecretNotFound
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -190,7 +190,8 @@ def mcp(tmp_path):
                     adapters={"ssh.exec": SSHAdapter(), "pg.query": PostgresAdapter()},
                     audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW)
     executor = Executor(ChainProvider(FileProvider(tmp_path)))
-    return Server(broker, executor, token.serialize())
+    backend = LocalBackend(broker, executor)
+    return Server(backend, token.serialize(), operations=backend.operations())
 
 
 class TestMCP:

@@ -108,6 +108,8 @@ taper/ops.py          typed operation schemas (rule 1)
 taper/adapters/       ssh, postgres, http — build argv, never strings
 taper/broker.py       verify → validate → derive → check → plan → audit
 taper/audit.py        hash-chained tamper-evident log
+taper/ipc.py          unix socket + SO_PEERCRED — the uid boundary
+taper/mcp.py          MCP on stdio; talks to a local or socket backend
 ```
 
 `Broker.execute()` is deliberately unimplemented. Everything above it is pure and
@@ -125,6 +127,25 @@ taper doctor                            # is this machine set up correctly?
 TAPER_TOKEN="$TOKEN" taper serve        # MCP server on stdio
 ```
 
+That last line runs the broker inside the agent's own process, which is fine for
+development and is **not** a trust boundary: the same uid that runs the model can
+read the vault. The real shape is two users and a socket.
+
+```bash
+# as the broker user — holds the vault, decides, executes
+taper broker --allow-uid "$(id -u agent)"
+
+# as the agent user — holds a token and nothing else
+TAPER_TOKEN="$TOKEN" taper serve --socket /run/taper/broker.sock
+```
+
+The agent half never loads the root key and never opens the vault; it could not
+if it tried, because the kernel owns that decision rather than the code. The
+broker reads the caller's uid from `SO_PEERCRED`, so the audit log records who
+asked rather than who claimed to be asking, and `--allow-uid` refuses anyone else
+before a token is even parsed. Set the socket's group to the agent's and leave it
+`0660`: mode and group are what decide who may connect at all.
+
 ## Tests and validation
 
 ```bash
@@ -140,9 +161,14 @@ Four layers, and they check different things:
 | `bash scripts/preflight.sh` | this machine can host a broker safely | nothing |
 | `python validate/check_postgres.py <dsn>` | **the database refuses on its own** | a real Postgres |
 | `bash validate/check_ssh.sh <host> <key>` | **sshd refuses on its own** | a real target host |
+| `python validate/check_isolation.py` | **the agent's uid cannot reach the vault** | a running broker |
 
-The bottom two are the ones that matter most, because they prove the boundary
-holds with the broker removed from the path. `TestCannotWiden` is the unit-test
+The bottom three are the ones that matter most, because they prove the boundary
+holds with the broker removed from the path. Run `check_isolation.py` **as the
+agent user** — it asks what the model's own account can reach, so running it as
+yourself answers a different and much friendlier question. It exits 2, not 0, when
+there is no socket to test: a missing boundary and a passing one are not the same
+answer. `TestCannotWiden` is the unit-test
 class that matters: if anything in it fails, the design is broken, not the code.
 
 The red team is not decoration. On its first run it found four live bypasses —

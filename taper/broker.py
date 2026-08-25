@@ -71,7 +71,12 @@ class Broker:
 
     # ------------------------------------------------------------------ deciding
 
-    def decide(self, token_text: str, operation: str, request: dict) -> Decision:
+    def decide(self, token_text: str, operation: str, request: dict,
+               peer: Optional[dict] = None) -> Decision:
+        """`peer` is the calling process's identity as reported by the kernel
+        (see ipc.peer_of), or None when the caller is in-process. It is passed
+        down to the audit record so the log names who asked, not who claimed to.
+        """
         now = self.clock()
 
         # 1. The chain. Any failure here is terminal and unlogged-as-allowed.
@@ -80,7 +85,7 @@ class Broker:
             caps = verify(token, self.root_pub, revoked=self.revoked, now=now)
         except (ChainError, ValueError, KeyError) as exc:
             decision = Decision(False, f"token rejected: {exc}", operation, {})
-            self._record(decision)
+            self._record(decision, peer)
             return decision
 
         token_ids = token.revocation_ids()
@@ -91,14 +96,14 @@ class Broker:
             clean = op.validate(request)
         except ops.OperationError as exc:
             decision = Decision(False, str(exc), operation, {}, token_ids=token_ids)
-            self._record(decision)
+            self._record(decision, peer)
             return decision
 
         adapter = self.adapters.get(operation)
         if adapter is None:
             decision = Decision(False, f"no adapter for {operation}", operation, {},
                                 token_ids=token_ids)
-            self._record(decision)
+            self._record(decision, peer)
             return decision
 
         # 3 + 4. Derive attributes and check each against the effective grant.
@@ -107,7 +112,7 @@ class Broker:
         if granted is None:
             decision = Decision(False, f"token does not grant {operation}",
                                 operation, attributes, token_ids=token_ids)
-            self._record(decision)
+            self._record(decision, peer)
             return decision
 
         for name, value in attributes.items():
@@ -120,7 +125,7 @@ class Broker:
                     f"{operation}.{name} is unconstrained in this token; "
                     f"grants must name every attribute",
                     operation, attributes, token_ids=token_ids)
-                self._record(decision)
+                self._record(decision, peer)
                 return decision
             if not constraint.allows(value):
                 decision = Decision(
@@ -128,14 +133,14 @@ class Broker:
                     f"{operation}.{name}={value!r} not permitted by "
                     f"{constraint.to_json()}",
                     operation, attributes, token_ids=token_ids)
-                self._record(decision)
+                self._record(decision, peer)
                 return decision
 
         # 5. Plan.
         plan = adapter.plan(clean, granted)
         decision = Decision(True, "ok", operation, attributes, plan=plan,
                             token_ids=token_ids)
-        self._record(decision)
+        self._record(decision, peer)
         return decision
 
     # ----------------------------------------------------------------- executing
@@ -158,9 +163,10 @@ class Broker:
 
     # ------------------------------------------------------------------- auditing
 
-    def _record(self, decision: Decision) -> None:
+    def _record(self, decision: Decision, peer: Optional[dict] = None) -> None:
         self.audit.append({
             "t": round(self.clock(), 3),
+            "peer": peer,
             "allowed": decision.allowed,
             "reason": decision.reason,
             "operation": decision.operation,

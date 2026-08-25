@@ -7,7 +7,13 @@
     taper inspect <token>           show what a token actually permits
     taper doctor                    check the local setup
     taper audit [--verify]          read or verify the audit log
+    taper broker                    run the broker daemon on a unix socket
     taper serve                     run the MCP server on stdio
+
+The two halves are meant to run as DIFFERENT USERS. `taper broker` holds the
+vault and decides; `taper serve --socket` is what the agent runs and holds
+nothing. Running `taper serve` without --socket puts the broker in the agent's
+own process, which is fine for development and is not a boundary.
 """
 
 from __future__ import annotations
@@ -32,6 +38,10 @@ ROOT_KEY = HOME / "root.key"
 ROOT_PUB = HOME / "root.pub"
 SECRETS = HOME / "secrets"
 AUDIT = HOME / "audit.jsonl"
+# Default under TAPER_HOME so a single-user checkout works with no root. A real
+# deployment sets TAPER_SOCKET=/run/taper/broker.sock, where the directory is
+# owned by the broker user and the socket's group is the agent's.
+SOCKET = Path(os.environ.get("TAPER_SOCKET", str(HOME / "broker.sock"))).expanduser()
 
 GREEN, RED, YELLOW, DIM, BOLD, OFF = (
     "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[1m", "\033[0m")
@@ -210,6 +220,19 @@ def cmd_doctor(args) -> int:
 
     check(os.geteuid() != 0, "not running as root", "running as root — do not")
 
+    # The socket only exists while the broker runs; its absence is not a fault.
+    if SOCKET.exists():
+        mode = SOCKET.stat().st_mode & 0o777
+        check(not (mode & 0o007), f"broker socket is {oct(mode)}",
+              f"broker socket is world-accessible ({oct(mode)}) — any local user "
+              f"can spend your capabilities")
+        if SOCKET.stat().st_uid == os.getuid():
+            print(f"  {YELLOW}!{OFF} the broker runs as you — same uid as the agent, "
+                  f"so the vault is not actually out of reach")
+    else:
+        print(f"  {DIM}no broker socket at {SOCKET} (not running, or in-process "
+              f"mode){OFF}")
+
     print("─" * 56)
     if problems:
         print(f"{RED}{problems} problems{OFF}")
@@ -218,8 +241,50 @@ def cmd_doctor(args) -> int:
     return 0
 
 
+def cmd_broker(args) -> int:
+    """The trusted half. Run this as the broker user, not as the agent."""
+    from .adapters import HTTPAdapter, PostgresAdapter, SSHAdapter
+    from .broker import Broker
+    from .execute import Executor
+    from .ipc import BrokerServer
+    from .secrets import default_provider
+
+    socket_path = Path(args.socket).expanduser()
+    allowed = set(args.allow_uid) if args.allow_uid else None
+
+    secrets = default_provider()
+    broker = Broker(
+        root_pub=load_root_public(),
+        adapters={"ssh.exec": SSHAdapter(), "pg.query": PostgresAdapter(),
+                  "http.request": HTTPAdapter()},
+        audit_path=AUDIT,
+        secrets=secrets.get,
+    )
+    server = BrokerServer(
+        broker, Executor(secrets), socket_path,
+        allowed_uids=allowed,
+        socket_mode=int(args.socket_mode, 8),
+        log=lambda message: print(message, file=sys.stderr, flush=True),
+    )
+    server.start()
+    if allowed is None:
+        print(f"{YELLOW}!{OFF} no --allow-uid given: anyone who can open the "
+              f"socket may ask. The socket mode is the only gate.", file=sys.stderr)
+    print(f"{GREEN}broker ready{OFF} — ^C to stop", file=sys.stderr)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.close()
+        print("\nstopped", file=sys.stderr)
+    return 0
+
+
 def cmd_serve(args) -> int:
     from .mcp import serve
+    if args.socket:
+        # Deliberately does not load the root key: this half should not be able to.
+        return serve(token_env=args.token_env,
+                     socket_path=Path(args.socket).expanduser())
     return serve(root_pub=load_root_public(), audit_path=AUDIT,
                  token_env=args.token_env)
 
@@ -262,8 +327,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("doctor", help="check the local setup")
     p.set_defaults(func=cmd_doctor)
 
+    p = sub.add_parser("broker", help="run the broker daemon on a unix socket")
+    p.add_argument("--socket", default=str(SOCKET))
+    p.add_argument("--socket-mode", default="660",
+                   help="octal mode for the socket (default 660: owner and group)")
+    p.add_argument("--allow-uid", type=int, action="append", metavar="UID",
+                   help="only accept connections from this uid; repeatable. "
+                        "Checked against SO_PEERCRED, which cannot be forged.")
+    p.set_defaults(func=cmd_broker)
+
     p = sub.add_parser("serve", help="run the MCP server on stdio")
     p.add_argument("--token-env", default="TAPER_TOKEN")
+    p.add_argument("--socket", nargs="?", const=str(SOCKET), default=None,
+                   help="reach the broker over this unix socket instead of "
+                        "running it in-process (the real trust boundary)")
     p.set_defaults(func=cmd_serve)
 
     return parser

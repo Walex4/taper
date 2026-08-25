@@ -13,6 +13,20 @@ A model that picks its own credentials has no permission system.
 No SDK dependency: MCP is JSON-RPC 2.0 over newline-delimited JSON, and hand-
 rolling ~150 lines keeps the trusted computing base small. Swap in the official
 SDK when you need the parts you are not using yet.
+
+TWO BACKENDS, ONE SERVER
+The JSON-RPC layer never touches a broker directly. It calls a backend with
+(token, operation, request) and gets a result dict back:
+
+  * BrokerClient (ipc.py) — the real shape. This process runs as the agent user
+    and reaches the broker over a Unix socket. It cannot read the vault, because
+    the kernel will not let it. Selected with `taper serve --socket`.
+  * LocalBackend — broker in-process, same uid, no boundary at all. Convenient
+    for development and for the tests; it says so out loud on startup.
+
+The seam is what makes the boundary optional-to-deploy but not optional-to-
+respect: nothing above it can tell the difference, so nothing above it can be
+written to depend on sharing a process with the vault.
 """
 
 from __future__ import annotations
@@ -21,7 +35,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -29,6 +43,7 @@ from . import ops
 from .adapters import HTTPAdapter, PostgresAdapter, SSHAdapter
 from .broker import Broker
 from .execute import Executor
+from .ipc import BrokerClient
 from .secrets import default_provider
 
 PROTOCOL_VERSION = "2026-07-28"
@@ -69,11 +84,41 @@ TOOL_SCHEMAS = {
 }
 
 
-class Server:
-    def __init__(self, broker: Broker, executor: Executor, token: str):
+class LocalBackend:
+    """Broker in this same process, under this same uid.
+
+    Speaks BrokerClient's dialect so the server above cannot tell which it has.
+    There is no trust boundary here: whatever can run this can read the vault.
+    The peer recorded in the audit log is honestly reported as this process.
+    """
+
+    def __init__(self, broker: Broker, executor: Executor):
         self.broker = broker
         self.executor = executor
+        self._peer = {"uid": os.getuid(), "gid": os.getgid(), "pid": os.getpid()}
+
+    def operations(self) -> list[str]:
+        return list(self.broker.adapters)
+
+    def call(self, token: str, operation: str, request: dict) -> dict:
+        decision = self.broker.decide(token, operation, request, peer=self._peer)
+        if not decision.allowed:
+            return {"allowed": False, "reason": decision.reason}
+        result = self.executor.run(decision.plan)
+        return {"allowed": True, "reason": "ok", "ok": result.ok,
+                "exit_code": result.exit_code, "stdout": result.stdout,
+                "stderr": result.stderr, "truncated": result.truncated}
+
+
+class Server:
+    def __init__(self, backend, token: str, operations=None):
+        self.backend = backend
         self.token = token
+        # Which tools to advertise. Over the socket the agent cannot enumerate the
+        # broker's adapters — the IPC protocol carries a request, not a catalogue —
+        # so it offers all known schemas and lets the broker refuse by name. That
+        # fails closed and the denial says which operation is missing.
+        self._operations = list(operations) if operations is not None else list(TOOL_SCHEMAS)
 
     # -------------------------------------------------------------- dispatch
 
@@ -110,7 +155,7 @@ class Server:
     def _tools(self) -> list[dict]:
         tools = []
         for name, schema in TOOL_SCHEMAS.items():
-            if name not in self.broker.adapters:
+            if name not in self._operations:
                 continue
             tools.append({
                 "name": name.replace(".", "_"),            # MCP names avoid dots
@@ -123,23 +168,25 @@ class Server:
         name = (params.get("name") or "").replace("_", ".", 1)
         arguments = params.get("arguments") or {}
 
-        decision = self.broker.decide(self.token, name, arguments)
-        if not decision.allowed:
+        reply = self.backend.call(self.token, name, arguments)
+        if not reply.get("allowed"):
             # isError, not a JSON-RPC error: the model should see the reason and
             # adapt. A transport-level error would just look like a broken tool.
+            # A socket that is down arrives here too, phrased as a denial — the
+            # agent gets nothing either way, which is the correct failure mode.
             return self._reply(request_id, {
                 "content": [{"type": "text",
-                             "text": f"DENIED: {decision.reason}"}],
+                             "text": f"DENIED: {reply.get('reason', 'refused')}"}],
                 "isError": True,
             })
 
-        result = self.executor.run(decision.plan)
-        text = result.stdout if result.ok else (result.stderr or result.stdout)
-        if result.truncated:
+        ok = reply.get("ok", False)
+        text = reply.get("stdout", "") if ok else (reply.get("stderr") or reply.get("stdout", ""))
+        if reply.get("truncated"):
             text += "\n[output truncated]"
         return self._reply(request_id, {
             "content": [{"type": "text", "text": text or "(no output)"}],
-            "isError": not result.ok,
+            "isError": not ok,
         })
 
     @staticmethod
@@ -152,25 +199,39 @@ class Server:
                 "error": {"code": code, "message": message}}
 
 
-def serve(root_pub: Ed25519PublicKey, audit_path: Path,
-          token_env: str = "TAPER_TOKEN") -> int:
+def serve(root_pub: Optional[Ed25519PublicKey] = None,
+          audit_path: Optional[Path] = None,
+          token_env: str = "TAPER_TOKEN",
+          socket_path: Optional[Path] = None) -> int:
     token = os.environ.get(token_env, "").strip()
     if not token:
         print(f"no capability token in ${token_env}", file=sys.stderr)
         print("issue one with: taper grant policy.json --ttl 1h", file=sys.stderr)
         return 2
 
-    secrets = default_provider()
-    broker = Broker(
-        root_pub=root_pub,
-        adapters={"ssh.exec": SSHAdapter(), "pg.query": PostgresAdapter(),
-                  "http.request": HTTPAdapter()},
-        audit_path=audit_path,
-        secrets=secrets.get,
-    )
-    server = Server(broker, Executor(secrets), token)
-
-    print("taper mcp server ready on stdio", file=sys.stderr)
+    if socket_path is not None:
+        # The real shape. Note what this branch does NOT do: no root key, no vault
+        # provider, no audit handle. This process could not reach a credential if
+        # it tried, and that is the whole point of running it as its own user.
+        server = Server(BrokerClient(socket_path), token)
+        print(f"taper mcp server ready on stdio -> broker at {socket_path}",
+              file=sys.stderr)
+    else:
+        if root_pub is None or audit_path is None:
+            print("in-process mode needs root_pub and audit_path", file=sys.stderr)
+            return 2
+        secrets = default_provider()
+        broker = Broker(
+            root_pub=root_pub,
+            adapters={"ssh.exec": SSHAdapter(), "pg.query": PostgresAdapter(),
+                      "http.request": HTTPAdapter()},
+            audit_path=audit_path,
+            secrets=secrets.get,
+        )
+        backend = LocalBackend(broker, Executor(secrets))
+        server = Server(backend, token, operations=backend.operations())
+        print("taper mcp server ready on stdio (in-process broker: no uid "
+              "separation, development only)", file=sys.stderr)
     for line in sys.stdin:
         line = line.strip()
         if not line:
