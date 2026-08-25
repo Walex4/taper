@@ -1,8 +1,7 @@
 name: ci
 
 on:
-  push:
-    branches: [main]
+  push:          # every branch, not just main
   pull_request:
   schedule:
     # Weekly. Dependencies drift and OpenSSH ships security fixes; a suite that
