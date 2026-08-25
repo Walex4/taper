@@ -35,7 +35,6 @@ CASES = [
     ("truncate granted table",         "TRUNCATE public.events",                True),
     ("read ungranted table",           "SELECT * FROM public.users",            True),
     ("create a new table",             "CREATE TABLE public.pwn (x int)",       True),
-    ("grant yourself more",            "GRANT ALL ON public.events TO taper_agent", True),
     ("become superuser",               "ALTER ROLE taper_agent SUPERUSER",      True),
     ("read a file from disk",          "SELECT pg_read_file('/etc/passwd')",    True),
     ("list a directory",               "SELECT pg_ls_dir('/')",                 True),
@@ -45,13 +44,30 @@ CASES = [
     ("reach another server",
      "SELECT * FROM dblink('host=127.0.0.1','SELECT 1') AS t(x int)",           True),
     ("switch role to escape RLS",      "SET ROLE postgres",                     True),
-    ("turn RLS off",                   "SET row_security = off",                True),
     ("terminate other sessions",
      "SELECT pg_terminate_backend(pid) FROM pg_stat_activity",                  True),
     ("stacked statement smuggling",
      "SELECT 1; DROP TABLE public.events",                                      True),
     ("the pgAdmin payload, at the database",
      r"SELECT 'a\'; COMMIT; DROP TABLE public.events; --",                      True),
+]
+
+# (label, [setup statements], probe)
+# Two of the statements above used to live in CASES, testing for an error that
+# never comes. A GRANT by a non-owner without grant option emits a WARNING and
+# succeeds as a no-op; SET row_security = off is permitted for any role and only
+# errors when a query would actually be filtered. Testing for an error is a
+# proxy; testing for effect is the boundary. So: let the setup run, ignore
+# whatever it says, and assert the probe it was meant to unlock still fails.
+EFFECT_CASES = [
+    ("granting yourself privileges changes nothing",
+     ["GRANT ALL ON public.events TO taper_agent",
+      "GRANT ALL ON SCHEMA public TO taper_agent"],
+     "INSERT INTO public.events DEFAULT VALUES"),
+
+    ("disabling row security does not expose rows",
+     ["SET row_security = off"],
+     "SELECT * FROM public.events"),
 ]
 
 
@@ -104,6 +120,37 @@ def main() -> int:
                 failures.append(f"{label} (should have been allowed)")
                 print(f"  {RED}✗ REFUSED{OFF} {label}   {RED}<-- OVER-LOCKED{OFF}")
                 print(f"            {error}")
+
+    # Statements that succeed but must not take effect.
+    print(f"\n{BOLD}Statements that succeed but must not take effect{OFF}\n" + "─" * 60)
+    for label, setup, probe in EFFECT_CASES:
+        # One connection for the whole case: the setup has to still be in force
+        # when the probe runs, or the probe proves nothing.
+        try:
+            with psycopg.connect(dsn, connect_timeout=10, autocommit=True) as conn:
+                for statement in setup:
+                    try:
+                        with conn.cursor() as cur:
+                            cur.execute(statement)
+                    except Exception:                  # noqa: BLE001
+                        pass                           # succeed or fail, we don't care
+                with conn.cursor() as cur:
+                    cur.execute(probe)
+                    if cur.description:
+                        cur.fetchall()
+            succeeded = True
+            error = ""
+        except Exception as exc:                       # noqa: BLE001
+            succeeded = False
+            error = f"{type(exc).__name__}: {str(exc).splitlines()[0][:90]}"
+
+        if succeeded:
+            failures.append(label)
+            print(f"  {RED}✗ TOOK EFFECT{OFF} {label}   {RED}<-- THE SETUP WORKED{OFF}")
+        else:
+            passed += 1
+            print(f"  {GREEN}✓ no effect{OFF}  {label}")
+            print(f"            {DIM}{error}{OFF}")
 
     # Role attributes: the two that silently void every policy above.
     print(f"\n{BOLD}Role attributes{OFF}\n" + "─" * 60)
