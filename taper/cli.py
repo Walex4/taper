@@ -7,7 +7,7 @@
     taper inspect <token>           show what a token actually permits
     taper doctor                    check the local setup
     taper audit [--verify]          read or verify the audit log
-    taper broker                    run the broker daemon on a unix socket
+    taper broker | daemon           run the broker daemon on a unix socket
     taper serve                     run the MCP server on stdio
 
 The two halves are meant to run as DIFFERENT USERS. `taper broker` holds the
@@ -241,6 +241,14 @@ def cmd_doctor(args) -> int:
     return 0
 
 
+def _username(uid: int) -> str:
+    try:
+        import pwd
+        return pwd.getpwuid(uid).pw_name
+    except (KeyError, ImportError):
+        return "?"
+
+
 def cmd_broker(args) -> int:
     """The trusted half. Run this as the broker user, not as the agent."""
     from .adapters import HTTPAdapter, PostgresAdapter, SSHAdapter
@@ -249,8 +257,22 @@ def cmd_broker(args) -> int:
     from .ipc import BrokerServer
     from .secrets import default_provider
 
+    import pwd
+
     socket_path = Path(args.socket).expanduser()
-    allowed = set(args.allow_uid) if args.allow_uid else None
+
+    # Names are resolved here, once, at startup — never per connection. The gate
+    # itself compares uids, because SO_PEERCRED reports a uid and a name is only
+    # ever a lookup away from it. Resolving early also means a typo'd username is
+    # a startup error rather than a silent deny-everything at 3am.
+    allowed = set(args.allow_uid or ())
+    for name in args.allow_user or ():
+        try:
+            allowed.add(pwd.getpwnam(name).pw_uid)
+        except KeyError:
+            sys.exit(f"no such user: {name!r} — --allow-user takes an account "
+                     f"name that exists on this machine")
+    allowed = allowed or None
 
     secrets = default_provider()
     broker = Broker(
@@ -268,8 +290,12 @@ def cmd_broker(args) -> int:
     )
     server.start()
     if allowed is None:
-        print(f"{YELLOW}!{OFF} no --allow-uid given: anyone who can open the "
-              f"socket may ask. The socket mode is the only gate.", file=sys.stderr)
+        print(f"{YELLOW}!{OFF} no --allow-uid/--allow-user given: anyone who can "
+              f"open the socket may ask. The socket mode is the only gate.",
+              file=sys.stderr)
+    else:
+        who = ", ".join(f"{_username(uid)}({uid})" for uid in sorted(allowed))
+        print(f"{DIM}accepting: {who}{OFF}", file=sys.stderr)
     print(f"{GREEN}broker ready{OFF} — ^C to stop", file=sys.stderr)
     try:
         server.serve_forever()
@@ -327,13 +353,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("doctor", help="check the local setup")
     p.set_defaults(func=cmd_doctor)
 
-    p = sub.add_parser("broker", help="run the broker daemon on a unix socket")
+    # "daemon" because that is what it is in a unit file, "broker" because that
+    # is what it is in the design. Same command.
+    p = sub.add_parser("broker", aliases=["daemon"],
+                       help="run the broker daemon on a unix socket")
     p.add_argument("--socket", default=str(SOCKET))
     p.add_argument("--socket-mode", default="660",
                    help="octal mode for the socket (default 660: owner and group)")
     p.add_argument("--allow-uid", type=int, action="append", metavar="UID",
                    help="only accept connections from this uid; repeatable. "
                         "Checked against SO_PEERCRED, which cannot be forged.")
+    p.add_argument("--allow-user", action="append", metavar="NAME",
+                   help="same, by account name; repeatable. Resolved to a uid at "
+                        "startup, so it survives nothing — if the account is "
+                        "recreated with a new uid, restart the service.")
     p.set_defaults(func=cmd_broker)
 
     p = sub.add_parser("serve", help="run the MCP server on stdio")

@@ -133,7 +133,7 @@ read the vault. The real shape is two users and a socket.
 
 ```bash
 # as the broker user — holds the vault, decides, executes
-taper broker --allow-uid "$(id -u agent)"
+taper broker --allow-user agent          # or: taper daemon, same command
 
 # as the agent user — holds a token and nothing else
 TAPER_TOKEN="$TOKEN" taper serve --socket /run/taper/broker.sock
@@ -142,8 +142,8 @@ TAPER_TOKEN="$TOKEN" taper serve --socket /run/taper/broker.sock
 The agent half never loads the root key and never opens the vault; it could not
 if it tried, because the kernel owns that decision rather than the code. The
 broker reads the caller's uid from `SO_PEERCRED`, so the audit log records who
-asked rather than who claimed to be asking, and `--allow-uid` refuses anyone else
-before a token is even parsed. Set the socket's group to the agent's and leave it
+asked rather than who claimed to be asking, and `--allow-user`/`--allow-uid`
+refuses anyone else before a token is even parsed. Set the socket's group to the agent's and leave it
 `0660`: mode and group are what decide who may connect at all.
 
 ## Tests and validation
