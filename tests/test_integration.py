@@ -5,6 +5,7 @@ stop looking. No network, no real SSH, no real database — the shim is driven
 over a pipe and the executor is pointed at harmless local binaries.
 """
 
+import io
 import json
 import os
 import subprocess
@@ -20,6 +21,7 @@ from taper.broker import Broker
 from taper.caps import OneOf, Range, Subset
 from taper.chain import Token
 from taper.execute import Executor
+from taper.ipc import BrokerClient
 from taper.mcp import LocalBackend, Server
 from taper.secrets import ChainProvider, EnvProvider, FileProvider, SecretNotFound
 
@@ -233,6 +235,38 @@ class TestMCP:
                                                      "token": "attacker-supplied"}}})
         assert reply["result"]["isError"] is True
         assert "unknown fields" in reply["result"]["content"][0]["text"]
+
+    def test_taper_socket_alone_selects_socket_mode_through_the_cli(
+            self, tmp_path, monkeypatch):
+        """Covers cmd_serve, not Server.
+
+        Constructing a client-mode Server by hand proves nothing about which
+        one the CLI builds. The bug this pins is a mode selected in the wrong
+        place: env set, socket mode expected, in-process broker served instead.
+        """
+        from taper import mcp as mcp_module
+
+        monkeypatch.setenv("TAPER_SOCKET", str(tmp_path / "broker.sock"))
+        monkeypatch.setenv("TAPER_TOKEN", "x")     # not verified in this process
+        monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+
+        def forbidden(*_args, **_kwargs):          # fails loudly, not silently
+            raise AssertionError("socket mode must not build a broker locally")
+
+        monkeypatch.setattr(mcp_module, "Broker", forbidden)
+        monkeypatch.setattr(mcp_module, "Executor", forbidden)
+        monkeypatch.setattr(mcp_module, "default_provider", forbidden)
+
+        built = []
+        real = mcp_module.Server
+        monkeypatch.setattr(mcp_module, "Server", lambda *a, **k: built.append(
+            real(*a, **k)) or built[-1])
+
+        assert cli.main(["serve"]) == 0
+        assert len(built) == 1
+        assert isinstance(built[0].backend, BrokerClient)
+        # The reason the whole file exists: this half cannot reach a credential.
+        assert not hasattr(built[0].backend, "broker")
 
     def test_unknown_method_is_a_protocol_error(self, mcp):
         reply = mcp.handle({"jsonrpc": "2.0", "id": 5, "method": "tools/frobnicate"})

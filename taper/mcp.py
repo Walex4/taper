@@ -214,8 +214,17 @@ def serve(root_pub: Optional[Ed25519PublicKey] = None,
         # provider, no audit handle. This process could not reach a credential if
         # it tried, and that is the whole point of running it as its own user.
         server = Server(BrokerClient(socket_path), token)
-        print(f"taper mcp server ready on stdio -> broker at {socket_path}",
-              file=sys.stderr)
+        # Name the socket's owner. If it is this uid the boundary is decorative,
+        # and the operator should be able to see that from the first line of
+        # output rather than from a diagram.
+        try:
+            owner = socket_path.stat().st_uid
+            whose = f"uid {owner}" + (" — same uid as this process, no separation"
+                                      if owner == os.getuid() else "")
+        except OSError:
+            whose = "not present yet"
+        print(f"taper mcp server ready on stdio (socket mode) -> broker at "
+              f"{socket_path} [{whose}]", file=sys.stderr)
     else:
         if root_pub is None or audit_path is None:
             print("in-process mode needs root_pub and audit_path", file=sys.stderr)

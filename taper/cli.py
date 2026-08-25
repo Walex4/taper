@@ -307,10 +307,15 @@ def cmd_broker(args) -> int:
 
 def cmd_serve(args) -> int:
     from .mcp import serve
-    if args.socket:
+    # TAPER_SOCKET selects socket mode on its own, not just the path: a unit file
+    # that exports it for the broker gets the same boundary here without also
+    # remembering a flag, and the safer mode is the one you fall into. An
+    # explicit --socket still wins, so a one-off can override the environment.
+    socket = args.socket or os.environ.get("TAPER_SOCKET", "").strip()
+    if socket:
         # Deliberately does not load the root key: this half should not be able to.
         return serve(token_env=args.token_env,
-                     socket_path=Path(args.socket).expanduser())
+                     socket_path=Path(socket).expanduser())
     return serve(root_pub=load_root_public(), audit_path=AUDIT,
                  token_env=args.token_env)
 
