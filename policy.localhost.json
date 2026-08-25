@@ -1,0 +1,10 @@
+{
+  "note": "daily driver — localhost build box",
+  "capabilities": {
+    "ssh.exec": {
+      "host":    {"kind": "one_of", "values": ["localhost"]},
+      "program": {"kind": "one_of", "values": ["git", "echo"]},
+      "args":    {"kind": "subset", "values": ["status", "--version", "hello"]}
+    }
+  }
+}

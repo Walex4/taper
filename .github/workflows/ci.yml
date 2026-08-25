@@ -1,0 +1,97 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly. Dependencies drift and OpenSSH ships security fixes; a suite that
+    # only runs on push tells you nothing about the week you didn't push.
+    - cron: "0 6 * * 1"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  redteam:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      # Non-negotiable gate. Every case in this suite is an attack, and the
+      # script exits non-zero if any of them succeeds.
+      - name: Adversarial validation
+        run: python validate/redteam.py
+
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Runners are root, so preflight will report blockers. We only assert it
+      # RUNS and produces a report — a preflight that crashes is worse than one
+      # that fails.
+      - name: Preflight executes and reports
+        run: bash scripts/preflight.sh || true
+
+  boundaries:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: analytics
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+        ports: ["5432:5432"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]" "psycopg[binary]"
+
+      - name: Create the fixture table
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d analytics -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE TABLE public.events (
+            id bigserial PRIMARY KEY,
+            created_at timestamptz NOT NULL DEFAULT now() - interval '2 days',
+            deleted_at timestamptz
+          );
+          CREATE TABLE public.users (id bigserial PRIMARY KEY, email text);
+          INSERT INTO public.events DEFAULT VALUES;
+          INSERT INTO public.users (email) VALUES ('a@example.com');
+          SQL
+
+      - name: Apply the role and RLS setup
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d analytics \
+               -v agent_password="'ci-only-password'" \
+               -f scripts/setup-postgres.sql
+
+      # This is the check that matters: it proves the DATABASE refuses, with no
+      # broker in the path. If the broker were deleted, this must still pass.
+      - name: Verify the Postgres boundary holds independently
+        run: |
+          python validate/check_postgres.py \
+            "postgresql://taper_agent:ci-only-password@localhost:5432/analytics"

@@ -1,0 +1,21 @@
+{
+  "note": "developer session — read-only build box + analytics events",
+  "capabilities": {
+    "ssh.exec": {
+      "host":    {"kind": "one_of", "values": ["build-1.internal"]},
+      "program": {"kind": "one_of", "values": ["git", "make"]},
+      "args":    {"kind": "subset", "values": ["status", "log", "--oneline", "build", "test"]}
+    },
+    "pg.query": {
+      "database":       {"kind": "one_of", "values": ["analytics"]},
+      "statement_kind": {"kind": "one_of", "values": ["select"]},
+      "tables":         {"kind": "subset", "values": ["public.events"]},
+      "max_rows":       {"kind": "range", "lo": 0, "hi": 1000}
+    },
+    "http.request": {
+      "method": {"kind": "one_of", "values": ["GET"]},
+      "host":   {"kind": "one_of", "values": ["api.example.com"]},
+      "path":   {"kind": "prefix", "prefix": "/v1/"}
+    }
+  }
+}

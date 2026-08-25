@@ -1,0 +1,187 @@
+"""The broker: the only process that holds real credentials.
+
+Request lifecycle, in order, failing closed at every step:
+
+    1. verify the capability chain against the root public key
+    2. validate the request against the operation's typed schema
+    3. derive the policy attributes from the request
+    4. check every attribute against the effective (intersected) capabilities
+    5. build an execution plan — an argv array, never a command string
+    6. write a tamper-evident audit record
+    7. resolve secrets and execute
+
+Steps 1–6 are pure and testable. Step 7 is deliberately small and is the only
+place a real credential is ever in scope.
+
+What this design assumes, stated plainly:
+
+  * The agent process is UNTRUSTED. It may be prompt-injected, buggy, or hostile.
+    It never receives a credential, only a capability token.
+  * The broker process is TRUSTED. If it is compromised, everything is lost. It
+    should run as a different user from the agent, with the vault unlocked only
+    while it runs.
+  * Policy is DETERMINISTIC. No model is consulted to decide whether a request is
+    allowed. A model deciding its own permissions is not a permission system.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+from . import ops
+from .adapters import Adapter, ExecPlan
+from .audit import AuditLog
+from .caps import Constraint
+from .chain import ChainError, Token, verify
+
+
+class Denied(Exception):
+    """The request was well-formed but not permitted. Includes the reason."""
+
+
+@dataclass
+class Decision:
+    allowed: bool
+    reason: str
+    operation: str
+    attributes: dict
+    plan: Optional[ExecPlan] = None
+    token_ids: list[str] = field(default_factory=list)
+
+
+class Broker:
+    def __init__(self,
+                 root_pub: Ed25519PublicKey,
+                 adapters: dict[str, Adapter],
+                 audit_path: str | Path = "~/.taper/audit.jsonl",
+                 secrets: Optional[Callable[[str], str]] = None,
+                 revoked: Optional[set[str]] = None,
+                 clock: Callable[[], float] = time.time):
+        self.root_pub = root_pub
+        self.adapters = adapters
+        self.audit = AuditLog(Path(str(audit_path)).expanduser())
+        self._secrets = secrets or (lambda ref: "")
+        self.revoked = revoked if revoked is not None else set()
+        self.clock = clock
+
+    # ------------------------------------------------------------------ deciding
+
+    def decide(self, token_text: str, operation: str, request: dict) -> Decision:
+        now = self.clock()
+
+        # 1. The chain. Any failure here is terminal and unlogged-as-allowed.
+        try:
+            token = Token.deserialize(token_text)
+            caps = verify(token, self.root_pub, revoked=self.revoked, now=now)
+        except (ChainError, ValueError, KeyError) as exc:
+            decision = Decision(False, f"token rejected: {exc}", operation, {})
+            self._record(decision)
+            return decision
+
+        token_ids = token.revocation_ids()
+
+        # 2. The typed schema. Unknown fields and wrong types fail closed.
+        try:
+            op = ops.get(operation)
+            clean = op.validate(request)
+        except ops.OperationError as exc:
+            decision = Decision(False, str(exc), operation, {}, token_ids=token_ids)
+            self._record(decision)
+            return decision
+
+        adapter = self.adapters.get(operation)
+        if adapter is None:
+            decision = Decision(False, f"no adapter for {operation}", operation, {},
+                                token_ids=token_ids)
+            self._record(decision)
+            return decision
+
+        # 3 + 4. Derive attributes and check each against the effective grant.
+        attributes = adapter.derive(clean)
+        granted = caps.get(operation)
+        if granted is None:
+            decision = Decision(False, f"token does not grant {operation}",
+                                operation, attributes, token_ids=token_ids)
+            self._record(decision)
+            return decision
+
+        for name, value in attributes.items():
+            constraint: Constraint | None = granted.get(name)
+            if constraint is None:
+                # An attribute nobody constrained is an attribute nobody thought
+                # about. Fail closed and make the operator write it down.
+                decision = Decision(
+                    False,
+                    f"{operation}.{name} is unconstrained in this token; "
+                    f"grants must name every attribute",
+                    operation, attributes, token_ids=token_ids)
+                self._record(decision)
+                return decision
+            if not constraint.allows(value):
+                decision = Decision(
+                    False,
+                    f"{operation}.{name}={value!r} not permitted by "
+                    f"{constraint.to_json()}",
+                    operation, attributes, token_ids=token_ids)
+                self._record(decision)
+                return decision
+
+        # 5. Plan.
+        plan = adapter.plan(clean, granted)
+        decision = Decision(True, "ok", operation, attributes, plan=plan,
+                            token_ids=token_ids)
+        self._record(decision)
+        return decision
+
+    # ----------------------------------------------------------------- executing
+
+    def execute(self, decision: Decision) -> Any:
+        """Resolve secrets and run. The ONLY place a credential is in scope.
+
+        Left unimplemented on purpose: wiring this to real subprocesses, database
+        connections and HTTP clients is the easy, environment-specific part, and
+        leaving it out keeps the test suite side-effect free. What matters is
+        that everything above this line has already decided, and this function
+        gets no say.
+        """
+        if not decision.allowed:
+            raise Denied(decision.reason)
+        raise NotImplementedError(
+            "wire your executor here; resolve decision.plan.secret_refs via "
+            "self._secrets and run decision.plan.argv with shell=False"
+        )
+
+    # ------------------------------------------------------------------- auditing
+
+    def _record(self, decision: Decision) -> None:
+        self.audit.append({
+            "t": round(self.clock(), 3),
+            "allowed": decision.allowed,
+            "reason": decision.reason,
+            "operation": decision.operation,
+            "attributes": _jsonable(decision.attributes),
+            "token": decision.token_ids[-1] if decision.token_ids else None,
+            "chain": decision.token_ids,
+            "plan": decision.plan.redacted() if decision.plan else None,
+        })
+
+    def revoke(self, revocation_id: str) -> None:
+        """Revoking any block id kills that token and every token derived from it,
+        because verification matches ANY id in the chain.
+        """
+        self.revoked.add(revocation_id)
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, (set, frozenset)):
+        return sorted(value, key=repr)
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    return value
