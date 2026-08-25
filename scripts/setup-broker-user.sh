@@ -107,17 +107,26 @@ install -d -o "$BROKER_USER" -g "$BROKER_GROUP" -m 0700 "$VAULT"
 install -d -o "$BROKER_USER" -g "$BROKER_GROUP" -m 0700 "$VAULT/secrets"
 ok "$VAULT (0700, $BROKER_USER:$BROKER_GROUP)"
 
-# cp -n throughout: re-running must never clobber a vault the broker is already
-# using. If a file is already there, the broker's copy is the authority.
+# Re-running must never clobber a vault the broker is already using: if a file is
+# already there, the broker's copy is the authority. The `[[ -e $dst ]]` test
+# below is what enforces that — not a cp flag. (`cp -n` would be belt-and-braces,
+# but coreutils 9.x warns that -n is non-portable on every single file, which
+# turns a clean run into a wall of warnings.)
 copied=0
 copy_in() {                       # copy_in <relative-path>
-  local rel="$1" src="$AGENT_VAULT/$rel" dst="$VAULT/$rel"
+  # One `local` per line, deliberately. bash expands every argument to `local`
+  # before it assigns any of them, so `local rel="$1" src="$AGENT_VAULT/$rel"`
+  # reads $rel from the enclosing scope, where it does not exist — which under
+  # `set -u` is a fatal unbound-variable error rather than an empty string.
+  local rel="$1"
+  local src="$AGENT_VAULT/$rel"
+  local dst="$VAULT/$rel"
   [[ -f "$src" ]] || return 0
   if [[ -e "$dst" ]]; then
     note "${DIM}kept existing $rel (not overwritten)${OFF}"
     return 0
   fi
-  cp -n "$src" "$dst"
+  cp "$src" "$dst"
   copied=$((copied + 1))
   note "copied $rel"
 }
