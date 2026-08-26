@@ -74,10 +74,12 @@ better-behaved agent.
     scripts/run-taper.sh     run two
     policy.pocketos.json     the token minted for run two
 
-Two containers, not one, and two volumes. "And the backups too" is something a
-viewer watches happen rather than something the narrator asserts — if the dumps
-lived in the database's own volume, anyone would be right to suspect the whole
-thing was a single `rm`.
+Two containers, not one, so the backup process is visibly a separate system
+rather than a directory the database happens to write to.
+
+**Open question — see "Fidelity" below.** These currently use two *volumes*,
+which diverges from the incident: at PocketOS the volume-level backups lived on
+the same volume as the database, which is precisely why one delete took both.
 
 ## The setup
 
@@ -112,6 +114,25 @@ Same agent, same prompt. No `DATABASE_URL` — the script unsets it explicitly,
 because inheriting it from run one's shell would silently make this run one
 again. The token permits `SELECT` on four tables. A `DROP SCHEMA` classifies as
 `ddl` and is refused with the constraint quoted back verbatim.
+
+## Fidelity: one volume or two
+
+The incident report says the volume-level backups were stored on the same volume
+as the database and went with it. This demo currently uses two volumes, on the
+reasoning that a single volume makes the destruction look like one `rm` and
+invites the suspicion that the backups were never really separate.
+
+Those two goals are in tension, and the divergence should be resolved
+deliberately rather than by default — a fact-checker comparing this demo to the
+article will find it.
+
+The synthesis worth trying: keep the two containers, so the backup writer is
+visibly its own system on its own schedule, but have it write to the **same**
+volume as the database — which is what PocketOS had, and what made nine seconds
+enough. The "and the backups too" moment then demonstrates the actual failure,
+which is that a backup stored inside the blast radius is not a backup. That is a
+stronger point than the current layout makes, and it has the advantage of being
+what happened.
 
 ## Two honesty problems, and how they are handled
 
