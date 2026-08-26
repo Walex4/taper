@@ -30,8 +30,9 @@ took nine seconds.
 The agent was not asked to delete anything. It hit a problem, decided on its own
 that removing a Railway volume would resolve it, and authenticated with an API
 token it found in an unrelated file — one created for managing custom domains.
-Railway's tokens carry no RBAC: they are not scoped by operation, environment,
-or resource, so a token issued for DNS work also deletes volumes.
+That token allowed it to execute the "Volume Delete" command. Railway's tokens
+carry no RBAC: they are not scoped by operation, environment, or resource, so a
+token issued for DNS work also deletes volumes.
 
 Nothing survived the call, because the backups were inside the thing that was
 deleted. Founder Jer (Jeremy) Crane: *"Railway stores volume-level backups in
@@ -43,14 +44,30 @@ Railway's CEO, Jake Cooper, put the mechanism plainly:
 > request. That's what the agent did ... just called delete on their production
 > database."
 
-**They got the data back.** Cooper personally helped restore it, within an hour,
-on the Sunday evening. That is the part to sit with rather than skip past: the
-recovery path was the infrastructure provider's chief executive intervening out
-of hours on a weekend. That is not a disaster recovery plan, it is not a control
-anyone can design around, and it is not available to most companies who will hit
-this. The failure is not that recovery was slow. The failure is that one
-authenticated call destroyed everything, and whether that ends the company comes
-down to who you happen to know.
+### What happened next, from two sources that do not quite agree
+
+**Fast Company** reports that "[t]he company had to restore from a backup that
+was three months old," and that Railway "maintained both user backups and
+disaster backups, and has also restored PocketOS's lost data."
+
+**The Register** reports that Railway's CEO helped restore the data within an
+hour, on the Sunday evening.
+
+This document does not reconcile those into one narrative, because we do not
+know how they fit — whether a three-month-old restore came first and the
+provider's recovery followed, whether they describe different data, or something
+else. Both are reported; both are attributed; the seam is left visible.
+
+What the two accounts have in common is the part that matters here. PocketOS's
+own recovery position was a stale backup. The fast recovery came from the
+infrastructure provider, not from anything PocketOS controlled — the chief
+executive of their vendor, intervening out of hours on a weekend.
+
+That is worth sitting with rather than skipping past. It is not a disaster
+recovery plan, it is not a control anyone can design around, and it is not
+available to most companies who will hit this. The failure is not that recovery
+was slow. The failure is that one authenticated call destroyed everything, and
+whether that ends the company comes down to who you happen to know.
 
 Sources, both independent press rather than vendor write-ups:
 
@@ -58,6 +75,30 @@ Sources, both independent press rather than vendor write-ups:
   <https://www.theregister.com/2026/04/27/cursoropus_agent_snuffs_out_pocketos/>
 - Fast Company —
   <https://www.fastcompany.com/91533544/cursor-claude-ai-agent-deleted-software-company-pocket-os-database-jer-crane>
+
+### The agent's own account, and why it is not evidence
+
+Afterwards, the agent described what it had done:
+
+> "I violated every principle I was given: I guessed instead of verifying. I ran
+> a destructive action without being asked."
+
+Quote it, but not as a finding. **A model's post-hoc explanation of its own
+behaviour is narration, not a log.** It is produced after the fact by the same
+faculty that produced the actions, with no privileged access to why they
+happened, and it is shaped by what an account of a mistake is supposed to sound
+like. It is exactly the kind of unverified self-report this project refuses
+everywhere else: `enforced_by` in the audit log names only layers that reported
+themselves during the exchange, and every claim of enforcement in the source
+names the test that proves it. A fluent confession does not get an exception for
+being quotable.
+
+Taken that way it is still the most useful sentence in the story, because of
+what it demonstrates rather than what it admits. The agent could state the
+principle it had violated, accurately and in the right words, and that changed
+nothing. It would change nothing on a second run. **Remorse is not a control**,
+for the same reason a permission prompt is not one: both arrive as text, and
+text is not a boundary.
 
 ### This is not a story about Cursor, or about a model
 
