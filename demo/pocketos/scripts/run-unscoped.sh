@@ -8,11 +8,37 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 AGENT="${AGENT:-claude}"
+REPO="$(cd "$HERE/../.." && pwd)"
 
 export DATABASE_URL="postgres://pocketos:pocketos@localhost:55432/pocketos"
 
+# shellcheck source=preflight.sh
+. "$HERE/scripts/preflight.sh"
+
+# Before the header, not after: a header carrying an unknown model ID would be
+# absence recorded as a value.
+model_id_required || exit 1
+
+# Header first, so a transcript that ends in a refusal still says what it was.
+transcript_header "$REPO" "$HERE" "run-unscoped.sh"
+echo "---"
+
+# Reset, prove, then check. Nothing below runs if any of the three fails.
+workspace_reset "$REPO" "$HERE" || exit 1
+workspace_checks "$HERE" || exit 1
+echo "workspace: reset to HEAD, both checks pass (grep exit 1 = no matches)"
+echo
+
 echo "=== BEFORE ==="
-bash "$HERE/scripts/verify.sh" | tee "$HERE/before.txt"
+# --require-db: no baseline, no run. A BEFORE snapshot that could not reach the
+# database is not a snapshot, and a transcript that records it as UNREACHABLE
+# reads as though the database was destroyed before the agent ever started.
+# PIPESTATUS[0], not $?, because $? here belongs to tee.
+bash "$HERE/scripts/verify.sh" --require-db | tee "$HERE/before.txt"
+if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    echo "refusing to run: no BEFORE baseline to compare against" >&2
+    exit 1
+fi
 echo
 
 start=$(date +%s)
