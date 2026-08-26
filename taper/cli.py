@@ -358,7 +358,36 @@ def cmd_cert_renew(args) -> int:
         # The vault is meant to be the only copy that persists.
         shutil.rmtree(workdir, ignore_errors=True)
 
-    start, end = cert_validity(SECRETS / "ssh.cert.pub")
+    # Read back what actually landed rather than trusting the exit statuses
+    # above. A renewal that reports success while leaving the vault unchanged is
+    # exactly the failure the timer exists to prevent, and it is the one a
+    # functional check cannot see — the old certificate keeps working until it
+    # does not. Anything wrong here exits non-zero so systemd marks the unit
+    # failed and OnFailure fires.
+    # verified-by: tests/test_integration.py::TestRenewalFailsLoudly::test_a_certificate_that_cannot_be_read_back_exits_non_zero
+    # verified-by: tests/test_integration.py::TestRenewalFailsLoudly::test_a_vault_left_group_readable_exits_non_zero
+    # verified-by: tests/test_integration.py::TestRenewalFailsLoudly::test_an_unwritable_vault_exits_non_zero
+    # verified-by: tests/test_integration.py::TestRenewalFailsLoudly::test_a_ca_that_is_not_a_key_exits_non_zero
+    cert = SECRETS / "ssh.cert.pub"
+    key_path = SECRETS / "ssh.cert"
+    start, end = cert_validity(cert)
+    if end is None:
+        print(f"{RED}renewal wrote a certificate that cannot be read back{OFF} "
+              f"at {cert}", file=sys.stderr)
+        return 1
+    if end <= datetime.now():
+        print(f"{RED}renewed certificate is already expired{OFF} (valid until "
+              f"{end})", file=sys.stderr)
+        return 1
+    for path in (cert, key_path):
+        if not path.is_file():
+            print(f"{RED}missing after renewal:{OFF} {path}", file=sys.stderr)
+            return 1
+        if path.stat().st_mode & 0o077:
+            print(f"{RED}{path} is readable by others{OFF} "
+                  f"({oct(path.stat().st_mode & 0o777)})", file=sys.stderr)
+            return 1
+
     print(f"{GREEN}certificate renewed{OFF}")
     print(f"  principal  {args.principal}")
     print(f"  command    {args.shim}")
@@ -420,6 +449,37 @@ def cmd_doctor(args) -> int:
         check(intact, "audit chain intact", f"audit chain broken at record {index}")
 
     check(os.geteuid() != 0, "not running as root", "running as root — do not")
+
+    # Certificate validity, read from the certificate itself. Deliberately
+    # independent of the renewal timer: two signals, so a timer that silently
+    # stops firing is still caught by the thing an operator runs by hand. Only
+    # meaningful where the vault is — run it as the broker user to see this.
+    # verified-by: tests/test_integration.py::TestCertRenew::test_status_reports_remaining_life_and_exits_nonzero_when_absent
+    cert = SECRETS / "ssh.cert.pub"
+    if cert.is_file():
+        _, expires = cert_validity(cert)
+        if expires is None:
+            check(False, "", f"{cert} is not a readable certificate")
+        else:
+            left = (expires - datetime.now()).total_seconds()
+            check(left > 0,
+                  f"certificate valid for {int(left // 60)}m more",
+                  f"certificate EXPIRED {int(-left // 60)}m ago ({expires}) — "
+                  f"run: taper cert renew")
+            if 0 < left < 900:
+                print(f"  {YELLOW}!{OFF} certificate expires in "
+                      f"{int(left // 60)}m — is taper-cert-renew.timer running?")
+    else:
+        print(f"  {DIM}no certificate at {cert} — this is the agent's home, not "
+              f"the broker's vault{OFF}")
+
+    # The renewal timer's failure marker. Not a substitute for the check above:
+    # that one asks the certificate, this one reports that a renewal already
+    # failed. It lives in /run and is cleared when the broker restarts.
+    marker = Path("/run/taper/cert-renew-FAILED")
+    if marker.exists():
+        check(False, "", f"certificate renewal FAILED (marker at {marker}) — "
+                         f"run: systemctl status taper-cert-renew.service")
 
     # The socket only exists while the broker runs; its absence is not a fault.
     if SOCKET.exists():

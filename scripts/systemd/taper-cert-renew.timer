@@ -1,0 +1,17 @@
+[Unit]
+Description=taper: keep the broker's SSH certificate valid
+Documentation=https://github.com/Walex4/taper
+
+[Timer]
+Unit=taper-cert-renew.service
+# Once shortly after boot, then every five minutes. The service decides whether
+# anything needs doing, so a frequent tick costs a process spawn and a file read.
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+# Catch up after the machine was off or asleep, rather than waiting a full
+# interval while holding an expired certificate.
+Persistent=yes
+
+[Install]
+WantedBy=timers.target

@@ -76,6 +76,29 @@ install -m 0644 -o root -g root "$ALLOWLIST_SRC" "$ALLOWLIST_DST" || exit 1
 # question this script exists to answer is "does the installed copy match the
 # repo", and only reading the installed copy answers it.
 
+# ------------------------------------------------------------------ renewal timer
+#
+# Strictly speaking these belong to the BROKER host and the shim belongs to the
+# TARGET host; on a single-box install they are the same machine. If you ever
+# split them, this section is the part that moves.
+
+UNITS="$REPO/scripts/systemd"
+timer_installed=0
+
+if [ -d /run/systemd/system ] && [ -d "$UNITS" ]; then
+    for unit in taper-cert-renew.service taper-cert-renew.timer \
+                taper-cert-renew-failed.service; do
+        install -m 0644 -o root -g root "$UNITS/$unit" "/etc/systemd/system/$unit" || exit 1
+    done
+    systemctl daemon-reload
+    systemctl enable --now taper-cert-renew.timer >/dev/null 2>&1 || {
+        bad "could not enable taper-cert-renew.timer"; exit 1; }
+    timer_installed=1
+    ok "certificate renewal timer installed and enabled"
+else
+    printf "  %sno systemd here — skipping the renewal timer%s\n" "$DIM" "$OFF"
+fi
+
 printf "\n%sVerification%s\n" "$BOLD" "$OFF"
 failed=0
 
@@ -102,6 +125,27 @@ else
     bad "allowlist has no landlock block — the shim will run unconfined"; failed=1
 fi
 
+if [ "$timer_installed" -eq 1 ]; then
+    # Ask systemd what it actually has, not what we just copied.
+    if systemctl is-enabled --quiet taper-cert-renew.timer; then
+        ok "taper-cert-renew.timer is enabled"
+    else
+        bad "taper-cert-renew.timer is NOT enabled"; failed=1
+    fi
+    if systemctl is-active --quiet taper-cert-renew.timer; then
+        next="$(systemctl show taper-cert-renew.timer -p NextElapseUSecRealtime --value)"
+        ok "taper-cert-renew.timer is active ${DIM}(next: ${next:-unknown})${OFF}"
+    else
+        bad "taper-cert-renew.timer is NOT active"; failed=1
+    fi
+    # A renewal already sitting in the failed state must not be papered over by
+    # a fresh install reporting DEPLOY-OK.
+    if systemctl is-failed --quiet taper-cert-renew.service; then
+        bad "taper-cert-renew.service is in the failed state — "\
+"systemctl status taper-cert-renew.service"; failed=1
+    fi
+fi
+
 if [ "$failed" -ne 0 ]; then
     printf "\n%sDEPLOY-FAILED%s\n" "$RED" "$OFF"; exit 1
 fi
@@ -109,3 +153,8 @@ fi
 printf "\n%sDEPLOY-OK%s\n" "$GREEN" "$OFF"
 printf "%sNo sshd restart needed — Subsystem execs the binary per connection.%s\n" "$DIM" "$OFF"
 printf "%sConfirm end to end with: python scripts/live_check.py%s\n" "$DIM" "$OFF"
+if [ "$timer_installed" -eq 1 ]; then
+    printf "%sWatch the timer fail on purpose before trusting it:%s\n" "$DIM" "$OFF"
+    printf "%s  systemd-run --uid=taper-broker -E TAPER_HOME=/nonexistent \\%s\n" "$DIM" "$OFF"
+    printf "%s      %s cert renew   # must exit non-zero%s\n" "$DIM" "$REPO/.venv/bin/taper" "$OFF"
+fi

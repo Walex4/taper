@@ -156,7 +156,7 @@ Four layers, and they check different things:
 
 | Command | Checks | Needs |
 |---|---|---|
-| `pytest` | the code does what you meant — 155 tests | nothing |
+| `pytest` | the code does what you meant — 167 tests | nothing |
 | `python validate/redteam.py` | the system refuses what someone *else* meant — 59 attacks | nothing |
 | `bash scripts/preflight.sh` | this machine can host a broker safely | nothing |
 | `python validate/check_postgres.py <dsn>` | **the database refuses on its own** | a real Postgres |

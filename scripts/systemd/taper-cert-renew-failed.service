@@ -1,0 +1,23 @@
+[Unit]
+Description=taper: SSH certificate renewal FAILED
+Documentation=https://github.com/Walex4/taper
+
+[Service]
+Type=oneshot
+User=taper-broker
+Group=taper
+
+# Two plain ExecStart lines rather than `sh -c` with a redirect. Same rule as
+# the rest of this repo: no command strings anywhere, so there is nothing for
+# anything to be smuggled into. touch's mtime is the timestamp, which is why no
+# redirection is needed in the first place.
+ExecStart=/usr/bin/touch /run/taper/cert-renew-FAILED
+ExecStart=/usr/bin/systemd-cat -t taper-cert-renew -p alert /usr/bin/echo "taper: SSH CERTIFICATE RENEWAL FAILED. The broker stops authenticating when the current certificate expires. Run: systemctl status taper-cert-renew.service"
+
+# Deliberately NOT RuntimeDirectory=taper. That directive would make systemd
+# REMOVE /run/taper when this unit stops, taking the broker's live socket with
+# it — a failure handler that breaks the thing it is reporting on. The directory
+# is created and owned by taper-broker.service; this unit only writes into it.
+ProtectSystem=strict
+ReadWritePaths=/run/taper
+NoNewPrivileges=yes

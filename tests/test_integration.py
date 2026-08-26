@@ -902,3 +902,131 @@ class TestCertRenew:
         capsys.readouterr()
         assert cli.main(["cert", "status"]) == 0
         assert "remaining" in capsys.readouterr().out
+
+
+# ------------------------------------------------------- the renewal timer
+
+UNITS = ROOT / "scripts" / "systemd"
+HAS_ANALYZE = shutil.which("systemd-analyze") is not None
+
+
+class TestRenewalFailsLoudly:
+    """systemd marks a unit failed if and only if the process exits non-zero.
+
+    So every failure path of `taper cert renew` must exit non-zero — a renewal
+    that logs a problem and returns 0 leaves OnFailure unfired and the operator
+    believing they are covered, which is worse than having no timer at all.
+    """
+
+    @needs_ssh_keygen
+    def test_a_missing_ca_exits_non_zero(self, vault):
+        assert cli.main(["cert", "renew"]) != 0
+
+    @needs_ssh_keygen
+    def test_a_ca_that_is_not_a_key_exits_non_zero(self, vault, capsys):
+        (vault / "ca").write_text("this is not a private key\n")
+        (vault / "ca").chmod(0o600)
+        assert cli.main(["cert", "renew"]) != 0
+        assert "signing failed" in capsys.readouterr().err
+
+    @needs_ssh_keygen
+    def test_an_unwritable_vault_exits_non_zero(self, vault):
+        """The mistyped-ReadWritePaths case: under ProtectSystem=strict the
+        vault is read-only unless it is carved out, and renewal must not report
+        success against a filesystem it could not write."""
+        _make_ca(vault)
+        vault.chmod(0o500)
+        try:
+            with pytest.raises((SystemExit, PermissionError, OSError)):
+                cli.main(["cert", "renew"])
+        finally:
+            vault.chmod(0o700)
+
+    @needs_ssh_keygen
+    def test_a_certificate_that_cannot_be_read_back_exits_non_zero(
+            self, vault, monkeypatch, capsys):
+        """The failure a functional check cannot see: the command ran, the old
+        certificate still works, and nothing renewed."""
+        _make_ca(vault)
+        monkeypatch.setattr(cli, "cert_validity", lambda path: (None, None))
+        assert cli.main(["cert", "renew"]) == 1
+        assert "cannot be read back" in capsys.readouterr().err
+
+    @needs_ssh_keygen
+    def test_a_vault_left_group_readable_exits_non_zero(
+            self, vault, monkeypatch, capsys):
+        _make_ca(vault)
+        real = cli.cert_validity
+
+        def loosen(path):
+            # Something else widened the mode between write and check.
+            (vault / "secrets" / "ssh.cert").chmod(0o640)
+            return real(path)
+
+        monkeypatch.setattr(cli, "cert_validity", loosen)
+        assert cli.main(["cert", "renew"]) == 1
+        assert "readable by others" in capsys.readouterr().err
+
+
+def _directives(unit: Path) -> list[tuple[str, str]]:
+    """(key, value) for real settings only — comments and blanks dropped."""
+    out = []
+    for line in unit.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", ";", "[")) or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        out.append((key.strip(), value.strip()))
+    return out
+
+
+class TestRenewalUnits:
+    @pytest.mark.skipif(not HAS_ANALYZE, reason="no systemd-analyze")
+    @pytest.mark.parametrize("unit", [
+        "taper-cert-renew.service", "taper-cert-renew.timer",
+        "taper-cert-renew-failed.service"])
+    def test_the_units_are_valid(self, unit):
+        result = subprocess.run(["systemd-analyze", "verify", str(UNITS / unit)],
+                                capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        assert not result.stderr.strip(), result.stderr
+
+    def test_the_renewal_runs_as_the_broker_and_never_as_root(self):
+        directives = _directives(UNITS / "taper-cert-renew.service")
+        assert ("User", "taper-broker") in directives
+        assert "root" not in [v for k, v in directives if k == "User"]
+        assert ("Environment", "TAPER_HOME=/home/taper-broker/.taper") in directives
+        assert ("NoNewPrivileges", "yes") in directives
+
+    def test_failure_is_wired_to_something_that_leaves_a_mark(self):
+        assert ("OnFailure", "taper-cert-renew-failed.service") in _directives(
+            UNITS / "taper-cert-renew.service")
+        execs = [v for k, v in _directives(UNITS / "taper-cert-renew-failed.service")
+                 if k == "ExecStart"]
+        assert any("/run/taper/cert-renew-FAILED" in e for e in execs)
+        assert any("systemd-cat" in e and "-p alert" in e for e in execs)
+
+    def test_the_failure_handler_cannot_delete_the_brokers_runtime_directory(self):
+        """RuntimeDirectory=taper would make systemd REMOVE /run/taper when this
+        unit stops, taking the broker's live socket with it — a failure handler
+        that breaks the thing it reports on.
+
+        Checked against parsed directives rather than the file text, because the
+        comment in that unit explaining the trap says "RuntimeDirectory=taper"
+        and prose must not fail the test that forbids the setting.
+        """
+        directives = _directives(UNITS / "taper-cert-renew-failed.service")
+        assert not [k for k, _ in directives if k == "RuntimeDirectory"]
+        assert ("ReadWritePaths", "/run/taper") in directives
+
+    def test_the_timer_ticks_well_inside_the_renewal_window(self):
+        """The cadence has to give more than one attempt before expiry, or a
+        single transient failure is an outage."""
+        import re
+
+        service = (UNITS / "taper-cert-renew.service").read_text()
+        timer = (UNITS / "taper-cert-renew.timer").read_text()
+        window = int(re.search(r"--if-expiring-within (\d+)", service).group(1))
+        cadence = int(re.search(r"OnUnitActiveSec=(\d+)min", timer).group(1))
+        assert window // cadence >= 3, (
+            f"{window}m window on a {cadence}m tick leaves too few attempts")

@@ -1,0 +1,46 @@
+[Unit]
+Description=taper: renew the broker's SSH certificate
+Documentation=https://github.com/Walex4/taper
+# A renewal timer that fails silently is worse than no timer, because you would
+# believe you were covered. This fires the moment the unit exits non-zero, and
+# `taper cert renew` is written so that every failure path does exit non-zero —
+# including "wrote a certificate that cannot be read back", which is the one a
+# functional check cannot see.
+OnFailure=taper-cert-renew-failed.service
+
+[Service]
+Type=oneshot
+
+# Never root. This is the most frequently running unit on the box; it needs the
+# CA private key in the broker's vault and nothing else, so it runs as the user
+# that already owns that key and at no higher privilege.
+User=taper-broker
+Group=taper
+Environment=TAPER_HOME=/home/taper-broker/.taper
+
+# --if-expiring-within is what makes a frequent tick cheap: it compares against
+# the certificate already in the vault and exits 0 having done nothing while
+# there is time left. Renewing at 20 minutes remaining, on a 5-minute cadence,
+# leaves four attempts before expiry — so one transient failure is not an outage,
+# and the OnFailure above still fires on the first one.
+ExecStart=/home/oooye/taper/.venv/bin/taper cert renew --if-expiring-within 20 --minutes 60
+
+# The same hardening as taper-broker.service, and for the same reasons.
+# ProtectHome makes /home read-only; ReadWritePaths carves out the vault, which
+# is the only thing this unit writes.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/taper-broker/.taper
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# Matches the broker's proven set rather than the narrowest one that might work.
+# Renewal is entirely local — ssh-keygen and files in the vault — so AF_UNIX
+# alone is probably sufficient, but that has not been tested on this host and a
+# restriction that breaks the unit belongs behind a test, not behind a guess.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
