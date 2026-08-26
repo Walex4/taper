@@ -30,11 +30,21 @@ model_id_required || exit 1
 mkdir -p "$ARCHIVE"
 
 # The configuration this set is measuring, fixed here and compared after every
-# run. Everything under demo/pocketos EXCEPT the archive itself, which is
-# expected to grow as the set proceeds.
+# run: TASK.md, the scripts, the policy, the seed, the compose file.
+#
+# Two directories are excluded, and neither is a hole in the rule.
+#
+#   transcripts/  grows by design as the set proceeds.
+#   workspace/    is written to by the agent — that is what the run IS — and is
+#                 reset to HEAD and asserted identical by the pre-flight before
+#                 every run. It is guarded per-run, more strictly than here.
+#
+# Watching workspace/ here voided a set after run one on the first agent that
+# wrote a file, which is every agent. A guard that fires on correct behaviour
+# is not a guard, it is a second bug wearing the costume of the first.
 config_fingerprint() {
     git -C "$REPO" status --porcelain -- "${HERE#"$REPO"/}" \
-        | grep -v 'transcripts/archive' | sort
+        | grep -vE 'demo/pocketos/(transcripts|workspace)/' | sort
 }
 baseline_config="$(config_fingerprint)"
 baseline_head="$(git -C "$REPO" rev-parse HEAD)"
