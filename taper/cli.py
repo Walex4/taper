@@ -38,6 +38,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from .audit import AuditLog
 from .caps import caps_from_json, caps_to_json
 from .chain import ChainError, Token, verify
+from .hints import broker_socket, broker_vault, mint_procedure
 
 HOME = Path(os.environ.get("TAPER_HOME", "~/.taper")).expanduser()
 ROOT_KEY = HOME / "root.key"
@@ -56,7 +57,21 @@ GREEN, RED, YELLOW, DIM, BOLD, OFF = (
 
 def load_root_private() -> Ed25519PrivateKey:
     if not ROOT_KEY.is_file():
-        sys.exit(f"no root key at {ROOT_KEY} — run: taper init")
+        vault = broker_vault()
+        if vault is None:
+            sys.exit(f"no root key at {ROOT_KEY} — run: taper init")
+        # On a split install `taper init` is the one thing that must not be
+        # done here: it would mint a SECOND root keypair under this uid and
+        # fork the trust root. Tokens signed by it verify against a public key
+        # the running broker has never seen, so every request comes back a
+        # signature failure that says nothing about the cause. This branch
+        # exists because the generic message above sent people there.
+        # verified-by: tests/test_integration.py::TestMintHint::test_grant_refuses_without_sending_you_to_taper_init
+        # verified-by: tests/test_integration.py::TestMintHint::test_a_box_with_no_broker_still_says_taper_init
+        sys.exit(f"no root key at {ROOT_KEY} — and it is not yours to hold: "
+                 f"the root key is in the broker's vault at {vault}.\n"
+                 f"Do NOT run `taper init` here; it would fork the trust "
+                 f"root.\n\n" + mint_procedure())
     if ROOT_KEY.stat().st_mode & 0o077:
         sys.exit(f"{ROOT_KEY} is readable by others — run: chmod 600 {ROOT_KEY}")
     return serialization.load_pem_private_key(ROOT_KEY.read_bytes(), password=None)
@@ -433,7 +448,21 @@ def cmd_doctor(args) -> int:
     if HOME.is_dir():
         check(not (HOME.stat().st_mode & 0o077), f"{HOME} is 0700",
               f"{HOME} is world/group readable — chmod 700 {HOME}")
-    check(ROOT_KEY.is_file(), "root key present", "no root key — run: taper init")
+    vault = broker_vault()
+    if not ROOT_KEY.is_file() and vault is not None:
+        # Not a fault: this is exactly what a correctly split install looks
+        # like from the agent's side. It gets its own branch because the
+        # generic "run: taper init" below is actively wrong here, and doctor
+        # is where an operator looks before they go hunting in error strings.
+        # verified-by: tests/test_integration.py::TestMintHint::test_doctor_names_the_state_instead_of_calling_it_a_fault
+        print(f"  {GREEN}✓{OFF} no root key here — it is in the broker's vault "
+              f"at {vault}, which is correct")
+        print(f"  {DIM}to mint a token, run the two-step mint "
+              f"(`taper init` would fork the trust root):{OFF}")
+        print(f"{DIM}{mint_procedure(indent='    ')}{OFF}")
+    else:
+        check(ROOT_KEY.is_file(), "root key present",
+              "no root key — run: taper init")
     if ROOT_KEY.is_file():
         check(not (ROOT_KEY.stat().st_mode & 0o077), "root key is 0600",
               f"root key readable by others — chmod 600 {ROOT_KEY}")
@@ -482,16 +511,17 @@ def cmd_doctor(args) -> int:
                          f"run: systemctl status taper-cert-renew.service")
 
     # The socket only exists while the broker runs; its absence is not a fault.
-    if SOCKET.exists():
-        mode = SOCKET.stat().st_mode & 0o777
+    sock = broker_socket()
+    if sock.exists():
+        mode = sock.stat().st_mode & 0o777
         check(not (mode & 0o007), f"broker socket is {oct(mode)}",
               f"broker socket is world-accessible ({oct(mode)}) — any local user "
               f"can spend your capabilities")
-        if SOCKET.stat().st_uid == os.getuid():
+        if sock.stat().st_uid == os.getuid():
             print(f"  {YELLOW}!{OFF} the broker runs as you — same uid as the agent, "
                   f"so the vault is not actually out of reach")
     else:
-        print(f"  {DIM}no broker socket at {SOCKET} (not running, or in-process "
+        print(f"  {DIM}no broker socket at {sock} (not running, or in-process "
               f"mode){OFF}")
 
     print("─" * 56)
@@ -663,7 +693,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("serve", help="run the MCP server on stdio")
     p.add_argument("--token-env", default="TAPER_TOKEN")
-    p.add_argument("--socket", nargs="?", const=str(SOCKET), default=None,
+    # Bare `--socket` means "the deployed one", not one under this user's home:
+    # connecting is a find-side question. `daemon --socket` below keeps SOCKET,
+    # which is bind-side and deliberately dev-friendly.
+    p.add_argument("--socket", nargs="?", const=str(broker_socket()), default=None,
                    help="reach the broker over this unix socket instead of "
                         "running it in-process (the real trust boundary)")
     p.set_defaults(func=cmd_serve)

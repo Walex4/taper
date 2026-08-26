@@ -222,7 +222,8 @@ def serve(root_pub: Optional[Ed25519PublicKey] = None,
     token = os.environ.get(token_env, "").strip()
     if not token:
         print(f"no capability token in ${token_env}", file=sys.stderr)
-        print("issue one with: taper grant policy.json --ttl 1h", file=sys.stderr)
+        from .hints import mint_hint
+        print(mint_hint(), file=sys.stderr)
         return 2
 
     if socket_path is not None:

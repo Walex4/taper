@@ -212,19 +212,42 @@ def write_proving_key(key: Ed25519PrivateKey, path: Path) -> Path:
     `taper grant ... --key-file /dev/stdout` would undo it in one keystroke
     while looking like it worked.
 
+    Refuses a destination that already exists, which is a disclosure vector and
+    not merely untidy. The mode argument to open(2) applies only when the call
+    creates the file: opening an existing path leaves its owner and its mode
+    exactly as they were, so a file planted at a predictable destination by
+    another user receives the key, readable by them, and the chmod that would
+    have caught it fails afterwards — after the write. O_EXCL closes that, and
+    closes symlink following with it, since O_CREAT|O_EXCL refuses a symlink
+    even when it dangles. The caller mints to a fresh path or not at all.
+
     verified-by: tests/test_integration.py::TestProvingKeyDelivery::test_the_key_cannot_be_aimed_at_a_stream
+    verified-by: tests/test_integration.py::TestProvingKeyDelivery::test_an_existing_key_file_is_refused_not_overwritten
+    verified-by: tests/test_integration.py::TestProvingKeyDelivery::test_a_planted_file_does_not_receive_the_key
+    verified-by: tests/test_integration.py::TestProvingKeyDelivery::test_a_symlinked_destination_is_refused
     """
     path = Path(path)
     if str(path) in {"-", "/dev/stdout", "/dev/stderr", "/dev/fd/1", "/dev/fd/2"}:
         raise PopError(f"refusing to write the proving key to {path}: it must go "
                        f"to a file of its own, not to a stream the token shares")
-    if path.exists() and not path.is_file():
-        raise PopError(f"refusing to write the proving key to {path}: not a file")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     # Create at 0600 rather than chmod after: between write and chmod there is a
-    # window in which the key is readable, and that is the whole asset.
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # window in which the key is readable, and that is the whole asset. O_EXCL
+    # for the reason in the docstring — an existing path is refused outright.
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        raise PopError(
+            f"refusing to write the proving key to {path}: it already exists. "
+            f"A key is never written over a file this process did not create — "
+            f"an existing path may be owned by someone else, or be a symlink "
+            f"somewhere else, and either way the key would land where it can be "
+            f"read. Mint to a fresh path (mktemp -d), or remove that one "
+            f"deliberately.") from None
+    except (IsADirectoryError, OSError) as exc:
+        raise PopError(
+            f"refusing to write the proving key to {path}: {exc}") from None
     try:
         os.write(fd, key.private_bytes(
             encoding=serialization.Encoding.PEM,
@@ -247,8 +270,10 @@ def load_proving_key(path) -> Ed25519PrivateKey:
     """
     path = Path(str(path)).expanduser()
     if not path.is_file():
-        raise PopError(f"no proving key at {path}; mint one with "
-                       f"`taper grant <policy> --key-file {path}`")
+        from .hints import mint_hint
+        raise PopError(f"no proving key at {path} — the token alone cannot be "
+                       f"used, which is the point.\n"
+                       + mint_hint(key=str(path)))
     if path.stat().st_mode & 0o077:
         raise PopError(
             f"{path} is readable by others (mode "

@@ -127,6 +127,12 @@ taper doctor                            # is this machine set up correctly?
 TAPER_TOKEN="$TOKEN" taper serve        # MCP server on stdio
 ```
 
+Those are the single-uid shapes. Once the broker runs as its own user the root
+key is in its vault and `taper grant` above stops working from your uid — the
+mint becomes two steps, and `taper doctor` prints them for the machine it is
+run on.
+
+
 That last line runs the broker inside the agent's own process, which is fine for
 development and is **not** a trust boundary: the same uid that runs the model can
 read the vault. The real shape is two users and a socket.

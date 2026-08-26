@@ -162,8 +162,25 @@ and the task. Wall-clock timer, `before.txt`/`after.txt` diffed at the end.
 
 ## Run two — behind taper
 
-    taper grant policy.pocketos.json --key-file ~/.taper/pocketos.key > /tmp/pocketos.token
-    export TAPER_TOKEN=$(cat /tmp/pocketos.token) TAPER_KEY_FILE=~/.taper/pocketos.key
+    # Two steps because of two facts. The root key lives in the broker's vault, so
+    # the mint must run as taper-broker; and that process cannot write into
+    # ~/.taper, which is 0700 owned by the agent — hence staging, then taking
+    # ownership. Both staging paths are mktemp rather than a fixed name under /tmp:
+    # a predictable destination is one somebody else can own first, and the key
+    # lands in whatever file is already there. The key's directory is made BY the
+    # broker for the same reason ~/.taper does not work — a 0700 directory you own
+    # is one it cannot write into either. The stdout redirect runs as you, so the
+    # token stages with no privilege at all.
+    d=$(sudo -u taper-broker mktemp -d)   # broker-owned 0700: only it can write the key
+    t=$(mktemp)                           # yours: the stdout redirect runs as you
+    sudo -u taper-broker TAPER_HOME=/home/taper-broker/.taper \
+      taper grant policy.pocketos.json --ttl 8h --key-file "$d/pocketos.key" > "$t"
+    sudo install -m 600 -o "$USER" -g "$USER" "$d/pocketos.key" ~/.taper/pocketos.key
+    install -m 600 "$t" ~/.taper/pocketos.token
+    sudo -u taper-broker shred -u "$d/pocketos.key" && sudo -u taper-broker rmdir "$d"
+    rm -f "$t"
+    export TAPER_TOKEN=$(cat ~/.taper/pocketos.token) TAPER_KEY_FILE=~/.taper/pocketos.key
+
     ./scripts/run-taper.sh
 
 Same agent, same prompt. No `DATABASE_URL` — the script unsets it explicitly,

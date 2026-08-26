@@ -82,7 +82,8 @@ def resolve_socket(argv: list[str]) -> Path:
     env = os.environ.get("TAPER_SOCKET")
     if env:
         return Path(env).expanduser()
-    return Path(os.environ.get("TAPER_HOME", "~/.taper")).expanduser() / "broker.sock"
+    from taper.hints import BROKER_SOCKET
+    return BROKER_SOCKET
 
 
 def connect(socket_path: Path, timeout: float = 10.0) -> socket.socket:

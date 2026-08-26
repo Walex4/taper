@@ -19,7 +19,11 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import argparse
+import types
+
 from taper import cli
+from taper import hints
 from taper.adapters import PostgresAdapter, SSHAdapter
 from taper.broker import Broker
 from taper.caps import OneOf, Range, Subset
@@ -723,6 +727,49 @@ class TestProvingKeyDelivery:
         with pytest.raises(SystemExit):
             cli.main(["grant", str(policy)])
 
+    # ---------------------------------------------- the destination is the asset
+    #
+    # open(2)'s mode argument applies only when the call creates the file. Aimed
+    # at a path that already exists, the old O_CREAT|O_TRUNC wrote the proving
+    # key into whatever was there — keeping that file's owner and mode — and only
+    # then tried to chmod it, which fails when the owner is somebody else. By
+    # then the key is on disk in a file they can read. The published procedure
+    # staged the key at a predictable /tmp path, so planting one took no race.
+
+    def test_an_existing_key_file_is_refused_not_overwritten(
+            self, tmp_path, monkeypatch, capsys):
+        key_file = tmp_path / "agent.key"
+        key_file.write_text("not a key")
+        with pytest.raises(SystemExit) as exit:
+            _grant(tmp_path, monkeypatch, capsys, key_file)
+        assert "already exists" in str(exit.value)
+        assert key_file.read_text() == "not a key"      # untouched, not truncated
+
+    def test_a_planted_file_does_not_receive_the_key(
+            self, tmp_path, monkeypatch, capsys):
+        """The disclosure itself: a world-readable file waiting at the path."""
+        planted = tmp_path / "agent.key"
+        planted.write_text("")
+        planted.chmod(0o666)
+        with pytest.raises(SystemExit):
+            _grant(tmp_path, monkeypatch, capsys, planted)
+        assert "PRIVATE KEY" not in planted.read_text()
+        # And the refusal did not quietly repair the mode either, which would
+        # have made a planted file look like a file we had created.
+        assert planted.stat().st_mode & 0o777 == 0o666
+
+    def test_a_symlinked_destination_is_refused(
+            self, tmp_path, monkeypatch, capsys):
+        """O_EXCL refuses a symlink even when it dangles, so the key cannot be
+        aimed through one at a file it would truncate."""
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.write_text("someone else's file")
+        link = tmp_path / "agent.key"
+        link.symlink_to(elsewhere)
+        with pytest.raises(SystemExit):
+            _grant(tmp_path, monkeypatch, capsys, link)
+        assert elsewhere.read_text() == "someone else's file"
+
     @pytest.mark.parametrize("target", ["-", "/dev/stdout", "/dev/stderr"])
     def test_the_key_cannot_be_aimed_at_a_stream(self, tmp_path, monkeypatch,
                                                  capsys, target):
@@ -1046,3 +1093,117 @@ class TestRenewalUnits:
         cadence = int(re.search(r"OnUnitActiveSec=(\d+)min", timer).group(1))
         assert window // cadence >= 3, (
             f"{window}m window on a {cadence}m tick leaves too few attempts")
+
+
+# ------------------------------------------------- the mint, on a split install
+#
+# The instruction these tests pin had been wrong in six files at once: it told
+# people to run `taper grant` from their own uid, which stopped being possible
+# the day the broker got its own. Worse, the error they hit when they tried
+# said "run: taper init" — which on this shape of install forks the trust root
+# and produces signature failures that name nothing. What follows is a test per
+# message, because a message is exactly the kind of thing that rots unwatched.
+
+class TestMintHint:
+    def test_a_single_uid_box_still_gets_the_one_liner(self, monkeypatch):
+        """No broker, no two-step. The old instruction was never wrong here."""
+        monkeypatch.setattr(hints, "broker_vault", lambda *a, **k: None)
+        text = hints.mint_hint()
+        assert "taper grant" in text
+        assert "sudo -u taper-broker" not in text
+
+    def test_a_split_install_gets_the_two_step(self, monkeypatch):
+        monkeypatch.setattr(hints, "broker_vault",
+                            lambda *a, **k: Path("/home/taper-broker/.taper"))
+        text = hints.mint_hint()
+        assert "sudo -u taper-broker" in text          # names the uid that can mint
+        assert "TAPER_HOME=/home/taper-broker/.taper" in text
+        # The handoff is the half that is easy to leave out, and a key the agent
+        # cannot read is indistinguishable from a broker that is refusing it.
+        assert "sudo install -m 600" in text
+        assert "shred -u" in text
+
+    def test_the_broker_is_not_told_to_mint_for_itself(self, monkeypatch):
+        """Running as the broker means the root key is already local."""
+        monkeypatch.setattr(hints.os, "geteuid", lambda: 999)
+        monkeypatch.setattr(hints.pwd, "getpwnam", lambda _: types.SimpleNamespace(
+            pw_uid=999, pw_dir="/home/taper-broker"))
+        assert hints.broker_vault() is None
+
+    def test_no_broker_user_is_not_a_split_install(self, monkeypatch):
+        def absent(_):
+            raise KeyError("taper-broker")
+        monkeypatch.setattr(hints.pwd, "getpwnam", absent)
+        assert hints.broker_vault() is None
+
+    def test_grant_refuses_without_sending_you_to_taper_init(
+            self, tmp_path, monkeypatch):
+        """The regression that cost the afternoon: `taper init` here is the
+        one command that must not be run, and it was the one being suggested."""
+        monkeypatch.setattr(cli, "ROOT_KEY", tmp_path / "absent" / "root.key")
+        monkeypatch.setattr(cli, "broker_vault",
+                            lambda *a, **k: Path("/home/taper-broker/.taper"))
+        with pytest.raises(SystemExit) as exit:
+            cli.load_root_private()
+        message = str(exit.value)
+        assert "sudo -u taper-broker" in message
+        assert "Do NOT run `taper init`" in message
+
+    def test_a_box_with_no_broker_still_says_taper_init(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli, "ROOT_KEY", tmp_path / "absent" / "root.key")
+        monkeypatch.setattr(cli, "broker_vault", lambda *a, **k: None)
+        with pytest.raises(SystemExit) as exit:
+            cli.load_root_private()
+        assert "run: taper init" in str(exit.value)
+
+    def test_doctor_names_the_state_instead_of_calling_it_a_fault(
+            self, tmp_path, monkeypatch, capsys):
+        """A missing root key is correct on the agent's box. Doctor is where an
+        operator looks first, so it prints the procedure rather than leaving it
+        to be discovered in an error string."""
+        home = tmp_path / "home"
+        (home / "secrets").mkdir(parents=True)
+        monkeypatch.setattr(cli, "HOME", home)
+        monkeypatch.setattr(cli, "ROOT_KEY", home / "root.key")
+        monkeypatch.setattr(cli, "SECRETS", home / "secrets")
+        monkeypatch.setattr(cli, "AUDIT", home / "audit.jsonl")
+        monkeypatch.setattr(cli, "SOCKET", home / "broker.sock")
+        monkeypatch.setattr(cli, "broker_vault",
+                            lambda *a, **k: Path("/home/taper-broker/.taper"))
+
+        cli.cmd_doctor(argparse.Namespace())
+        out = capsys.readouterr().out
+        assert "it is in the broker's vault" in out
+        assert "sudo -u taper-broker" in out
+        assert "no root key — run: taper init" not in out
+
+    def test_doctor_looks_where_the_broker_actually_listens(
+            self, tmp_path, monkeypatch, capsys):
+        """cli.py alone defaulted the socket under TAPER_HOME, so doctor
+        reported "no broker socket" on a machine whose broker was running."""
+        home = tmp_path / "home"
+        (home / "secrets").mkdir(parents=True)
+        for name, value in [("HOME", home), ("ROOT_KEY", home / "root.key"),
+                            ("SECRETS", home / "secrets"),
+                            ("AUDIT", home / "audit.jsonl")]:
+            monkeypatch.setattr(cli, name, value)
+        monkeypatch.setattr(cli, "broker_vault", lambda *a, **k: None)
+        # A sentinel that cannot exist, so the report names the path it looked
+        # at. Pointing at the real /run/taper would make this pass or fail on
+        # whether a broker happens to be running on the build machine.
+        sentinel = tmp_path / "run" / "taper" / "broker.sock"
+        monkeypatch.setattr(cli, "broker_socket", lambda: sentinel)
+
+        cli.cmd_doctor(argparse.Namespace())
+        out = capsys.readouterr().out
+        assert str(sentinel) in out                 # asked the resolver
+        assert str(home / "broker.sock") not in out  # not TAPER_HOME
+
+    def test_the_deployed_socket_is_the_default(self, monkeypatch):
+        """The constant itself — /run/taper, as the unit file creates it."""
+        monkeypatch.delenv("TAPER_SOCKET", raising=False)
+        assert hints.broker_socket() == Path("/run/taper/broker.sock")
+
+    def test_taper_socket_still_wins(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TAPER_SOCKET", str(tmp_path / "custom.sock"))
+        assert hints.broker_socket() == tmp_path / "custom.sock"

@@ -34,6 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from taper.hints import broker_socket, mint_hint   # noqa: E402
 from taper.ipc import BrokerClient           # noqa: E402
 
 GREEN, RED, YELLOW, DIM, BOLD, OFF = (
@@ -53,7 +54,7 @@ def main(argv: list[str]) -> int:
     args = argv[2:] if len(argv) > 2 else ["status"]
     request = {"host": host, "program": program, "args": args}
 
-    socket_path = os.environ.get("TAPER_SOCKET", "/run/taper/broker.sock")
+    socket_path = str(broker_socket())
     key_file = os.environ.get("TAPER_KEY_FILE", "")
     token = os.environ.get("TAPER_TOKEN", "").strip()
     if not token:
@@ -70,16 +71,17 @@ def main(argv: list[str]) -> int:
     if not token:
         return fail("no token",
                     "set TAPER_TOKEN, or put one in ~/.taper/token",
-                    "taper grant <policy>.json --key-file ~/.taper/agent.key "
-                    "> ~/.taper/token")
+                    *mint_hint().splitlines())
     if not key_file:
         return fail("TAPER_KEY_FILE is not set",
                     "The token alone is not enough to use it — that is the point.",
                     "export TAPER_KEY_FILE=~/.taper/agent.key")
     if not Path(key_file).expanduser().is_file():
         return fail(f"no proving key at {key_file}",
-                    "A token minted before proof-of-possession has no key.",
-                    "Mint both together with: taper grant ... --key-file <path>")
+                    "A token minted before proof-of-possession has no key —",
+                    "mint both together, and mind that the key is the half that",
+                    "needs the install:",
+                    *mint_hint().splitlines())
 
     problems = 0
 
