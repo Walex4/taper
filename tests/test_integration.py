@@ -1079,11 +1079,36 @@ class TestRenewalUnits:
     @pytest.mark.parametrize("unit", [
         "taper-cert-renew.service", "taper-cert-renew.timer",
         "taper-cert-renew-failed.service"])
-    def test_the_units_are_valid(self, unit):
-        result = subprocess.run(["systemd-analyze", "verify", str(UNITS / unit)],
+    def test_the_units_are_valid(self, unit, tmp_path):
+        """Verified as INSTALLED, not as committed.
+
+        taper-cert-renew.service ships with __TAPER_BIN__ where the absolute
+        path to the taper executable goes — install-shim.sh substitutes it,
+        because that path belongs to a checkout rather than to the repository,
+        and hardcoding one machine's home directory leaked whose it was. So the
+        substitution happens here too: verifying the raw template would only
+        prove that a placeholder is not an executable.
+        """
+        text = (UNITS / unit).read_text().replace("__TAPER_BIN__", sys.executable)
+        staged = tmp_path / unit
+        staged.write_text(text)
+
+        result = subprocess.run(["systemd-analyze", "verify", str(staged)],
                                 capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
         assert not result.stderr.strip(), result.stderr
+
+    def test_no_unit_hardcodes_a_home_directory(self):
+        """The leak this placeholder exists to prevent, pinned so it cannot
+        come back the next time someone edits a unit on their own machine."""
+        for unit in UNITS.iterdir():
+            if unit.suffix not in (".service", ".timer"):
+                continue
+            for line in unit.read_text().splitlines():
+                if line.lstrip().startswith("#"):
+                    continue
+                assert "/home/" not in line or "/home/taper-broker" in line, (
+                    f"{unit.name} hardcodes a home directory: {line!r}")
 
     def test_the_renewal_runs_as_the_broker_and_never_as_root(self):
         directives = _directives(UNITS / "taper-cert-renew.service")

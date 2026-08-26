@@ -171,8 +171,9 @@ echo
 # is the same defect as a check that can never fail.
 db_section() { sed -n '/^=== database ===$/,/^=== backups ===$/p' "$1" | sed '$d'; }
 
-if diff -u <(db_section "$HERE/before-taper.txt") \
-           <(db_section "$HERE/after-taper.txt"); then
+if diff -u --label before.txt --label after.txt \
+        <(db_section "$HERE/before-taper.txt") \
+        <(db_section "$HERE/after-taper.txt"); then
     echo "no change — row counts and schemas are as they were"
 else
     echo "CHANGED — run two altered the database" >&2

@@ -1,13 +1,20 @@
 #!/bin/bash
 set -euo pipefail
-cd /home/oooye/taper
 
-export TAPER_TOKEN=$(cat /home/oooye/.taper/token)
+# Derived, never hardcoded: this script used to name one machine's home
+# directory four times, which leaked whose machine it was and made it useless
+# to anyone who cloned the repo. TAPER_HOME is honoured so a broker-side copy
+# can point at its own vault.
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VAULT="${TAPER_HOME:-$HOME/.taper}"
+cd "$REPO"
+
+export TAPER_TOKEN=$(cat "$VAULT/token")
 # A PATH, never key material — the path is fine in an environment, the key it
 # points at is not. Token and proving key are read from two separate files on
 # purpose: capturing one must not hand over the other, which is the whole of
 # what proof-of-possession buys (DESIGN.md §5).
-export TAPER_KEY_FILE=/home/oooye/.taper/agent.key
+export TAPER_KEY_FILE="$VAULT/agent.key"
 export TAPER_SOCKET=/run/taper/broker.sock
 
 if [ ! -f "$TAPER_KEY_FILE" ]; then
@@ -41,4 +48,4 @@ MINT
   exit 2
 fi
 
-exec /home/oooye/taper/.venv/bin/taper serve
+exec "$REPO/.venv/bin/taper" serve

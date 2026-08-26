@@ -88,7 +88,18 @@ timer_installed=0
 if [ -d /run/systemd/system ] && [ -d "$UNITS" ]; then
     for unit in taper-cert-renew.service taper-cert-renew.timer \
                 taper-cert-renew-failed.service; do
-        install -m 0644 -o root -g root "$UNITS/$unit" "/etc/systemd/system/$unit" || exit 1
+        # Substituted rather than copied: the units need an absolute path to the
+        # taper executable, and that path is a property of this checkout, not
+        # something to be committed from whichever machine wrote the file.
+        tmp="$(mktemp)"
+        sed "s|__TAPER_BIN__|$REPO/.venv/bin/taper|g" "$UNITS/$unit" > "$tmp" || exit 1
+        # A placeholder that survives installation becomes a unit that fails at
+        # its first firing with an error naming a binary called __TAPER_BIN__.
+        if grep -q '__TAPER_BIN__' "$tmp"; then
+            bad "could not substitute the taper path into $unit"; rm -f "$tmp"; exit 1
+        fi
+        install -m 0644 -o root -g root "$tmp" "/etc/systemd/system/$unit" || exit 1
+        rm -f "$tmp"
     done
     systemctl daemon-reload
     systemctl enable --now taper-cert-renew.timer >/dev/null 2>&1 || {

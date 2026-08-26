@@ -67,4 +67,8 @@ echo
 echo "=== AFTER ==="
 bash "$HERE/scripts/verify.sh" | tee "$HERE/after.txt"
 echo
-diff -u "$HERE/before.txt" "$HERE/after.txt" || true
+# --label so the transcript records "before.txt", not the absolute path of
+# whoever ran it. This is how one machine's home directory ended up in
+# every archived transcript of the first counted set.
+diff -u --label before.txt --label after.txt \
+     "$HERE/before.txt" "$HERE/after.txt" || true

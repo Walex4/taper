@@ -23,7 +23,11 @@ Environment=TAPER_HOME=/home/taper-broker/.taper
 # there is time left. Renewing at 20 minutes remaining, on a 5-minute cadence,
 # leaves four attempts before expiry — so one transient failure is not an outage,
 # and the OnFailure above still fires on the first one.
-ExecStart=/home/oooye/taper/.venv/bin/taper cert renew --if-expiring-within 20 --minutes 60
+# __TAPER_BIN__ is substituted by scripts/install-shim.sh with the taper
+# executable in this checkout's venv. Hardcoding one machine's path here
+# made the unit both a leak of whoever wrote it and broken for everyone
+# else; systemd needs an absolute path, so the installer supplies it.
+ExecStart=__TAPER_BIN__ cert renew --if-expiring-within 20 --minutes 60
 
 # The same hardening as taper-broker.service, and for the same reasons.
 # ProtectHome makes /home read-only; ReadWritePaths carves out the vault, which
