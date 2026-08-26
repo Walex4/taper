@@ -229,11 +229,13 @@ No proof-of-possession binding
 
 The token is a bearer credential. Steal the chain and the current ephemeral private key and you hold the authority. Biscuit has the same property; Tenuo's invariant I6 exists specifically to fix it, by requiring the holder to prove key possession at use. Taper should adopt an equivalent. Until it does, "narrowing-only" bounds what a *delegate* can do, not what a *thief* can do.
 
-Landlock is available and not applied
+Landlock is applied only where the host allowlist asks for it
 
-\[unfinished\]
+\[partially closed\]
 
-The shim reports `available(abi=7) NOT_APPLIED`. Policy governs which program runs; nothing governs what that program touches once running. Constraining `program` to `git` is worth much less than it appears while `git` retains the shim user's full filesystem access.
+Was: the shim reported `available(abi=7) NOT_APPLIED`, so policy governed which program ran and nothing governed what it touched. `shim.py` now builds a real ruleset — every access right the running ABI defines, `path_beneath` rules from the allowlist's `landlock` block, `PR_SET_NO_NEW_PRIVS`, then `landlock_restrict_self` before the exec. It fails closed: configured and unappliable refuses the request rather than running unconfined.
+
+What remains. An allowlist with no `landlock` key still runs the program with the shim user's full filesystem access, and says so in its reply rather than pretending otherwise. Writing that block is a deployment step, and until an install has done it this gap is open for that install. `enforced_by` in the audit log distinguishes the two cases without anyone having to ask, which is the point of deriving it — see `taper/attest.py`.
 
 Operations name classes, not object handles
 

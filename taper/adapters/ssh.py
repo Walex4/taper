@@ -9,9 +9,12 @@ What is actually enforced, and by whom:
                          `force-command` critical option pointing at a typed shim;
                          plus `restrict` as the deny-all baseline, source-address,
                          and a short certificate validity window.
-  KERNEL (target host)   nothing, currently. The shim probes for Landlock and
-                         reports what it found, but applies no ruleset, so a bug
-                         in the shim is NOT contained. See DESIGN.md "Known gaps".
+  KERNEL (target host)   a Landlock ruleset the shim applies to itself before
+                         exec, so the program reaches only the paths the host's
+                         allowlist names. Inherited and irreversible, so a bug in
+                         the shim is contained rather than fatal. Only when the
+                         host allowlist configures it — an allowlist with no
+                         "landlock" key runs the program unconfined and says so.
 
 None of the above is asserted by this file. Each layer is named in the audit
 record only if it reported itself during the exchange — see taper/attest.py.

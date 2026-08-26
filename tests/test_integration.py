@@ -8,6 +8,7 @@ over a pipe and the executor is pointed at harmless local binaries.
 import io
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -426,3 +427,114 @@ class TestEnforcedByIsLoggedFromTheResult:
         assert not reply["allowed"]
         bodies = [r["body"] for r in broker.audit.read()]
         assert [b["record"] for b in bodies] == ["decision"]
+
+
+# ------------------------------------------------------------------- landlock
+
+def _sys_paths():
+    """The read/execute paths a dynamically linked binary needs, minus the ones
+    this distribution does not have — a missing path is refused, by design."""
+    return [p for p in ("/usr", "/lib", "/lib64", "/bin", "/etc") if Path(p).exists()]
+
+
+HAS_LANDLOCK = __import__("taper.shim", fromlist=["shim"]).landlock_abi() > 0
+TOUCH = shutil.which("touch")
+
+needs_landlock = pytest.mark.skipif(not HAS_LANDLOCK, reason="kernel has no Landlock")
+needs_touch = pytest.mark.skipif(TOUCH is None, reason="no touch(1) on this host")
+
+
+def _touch_allowlist(targets, landlock):
+    return {"programs": {"touch": {"path": TOUCH, "args": [str(t) for t in targets]}},
+            "landlock": landlock}
+
+
+class TestLandlock:
+    """These all drive the shim as a subprocess, never in-process.
+
+    apply_landlock() is irreversible and inherited: calling it inside pytest
+    would confine the test runner for the rest of the session.
+    """
+
+    def test_an_unconfigured_shim_claims_nothing(self, tmp_path):
+        out = run_shim(json.dumps({"program": "echo", "args": ["hello"]}),
+                       ECHO_ALLOWLIST, tmp_path)
+        assert out["ok"] is True
+        assert out["landlock"].startswith("not_configured")
+        # and the broker must not record a layer for it
+        from taper.execute import Result
+        from taper.attest import confirmed_layers
+        plan = SSHAdapter().plan(
+            {"host": "build-1.internal", "program": "git", "args": ["status"]}, {})
+        assert "kernel:landlock" not in confirmed_layers(
+            plan, Result(True, 0, json.dumps(out), ""))
+
+    @needs_landlock
+    @needs_touch
+    def test_a_write_outside_the_ruleset_is_refused_by_the_kernel(self, tmp_path):
+        allowed, forbidden = tmp_path / "allowed", tmp_path / "forbidden"
+        allowed.mkdir()
+        forbidden.mkdir()
+        allowlist = _touch_allowlist(
+            [allowed / "ok", forbidden / "nope"],
+            {"execute": _sys_paths(), "read_write": [str(allowed)]})
+
+        inside = run_shim(json.dumps({"program": "touch",
+                                      "args": [str(allowed / "ok")]}),
+                          allowlist, tmp_path)
+        assert inside["ok"] is True, inside
+        assert (allowed / "ok").exists()
+
+        outside = run_shim(json.dumps({"program": "touch",
+                                       "args": [str(forbidden / "nope")]}),
+                           allowlist, tmp_path)
+        # The shim's own allowlist permits this argument. The kernel is what
+        # refuses it, which is the entire point of the layer.
+        assert outside["ok"] is False
+        assert "Permission denied" in outside["stderr"]
+        assert not (forbidden / "nope").exists()
+
+    @needs_landlock
+    @needs_touch
+    def test_the_list_shorthand_grants_no_write_anywhere(self, tmp_path):
+        target = tmp_path / "nope"
+        allowlist = _touch_allowlist([target], _sys_paths() + [str(tmp_path)])
+        out = run_shim(json.dumps({"program": "touch", "args": [str(target)]}),
+                       allowlist, tmp_path)
+        assert out["ok"] is False and not target.exists()
+
+    @needs_landlock
+    def test_enforced_by_picks_up_landlock_with_no_further_change(self, tmp_path):
+        """The handoff. attest.py was written against a shim that could only say
+        NOT_APPLIED; nothing in it changed to make this work."""
+        from taper.execute import Result
+        from taper.attest import confirmed_layers
+
+        out = run_shim(json.dumps({"program": "echo", "args": ["hello"]}),
+                       {**ECHO_ALLOWLIST, "landlock": _sys_paths()}, tmp_path)
+        assert out["ok"] is True, out
+        assert out["landlock"].startswith("applied("), out["landlock"]
+
+        plan = SSHAdapter().plan(
+            {"host": "build-1.internal", "program": "git", "args": ["status"]}, {})
+        assert confirmed_layers(plan, Result(True, 0, json.dumps(out), "")) == [
+            "broker:argv", "target:shim-allowlist", "kernel:landlock"]
+
+    def test_a_ruleset_that_cannot_be_applied_refuses_the_request(self, tmp_path):
+        """Fail closed. Configured-but-broken must never mean unconfined."""
+        out = run_shim(json.dumps({"program": "echo", "args": ["hello"]}),
+                       {**ECHO_ALLOWLIST,
+                        "landlock": [str(tmp_path / "does-not-exist")]}, tmp_path)
+        assert out["ok"] is False
+        assert "cannot be opened" in out["error"]
+
+    def test_an_unknown_grant_is_refused_rather_than_ignored(self, tmp_path):
+        out = run_shim(json.dumps({"program": "echo", "args": ["hello"]}),
+                       {**ECHO_ALLOWLIST,
+                        "landlock": {"read_only_maybe": ["/usr"]}}, tmp_path)
+        assert out["ok"] is False and "unknown landlock grant" in out["error"]
+
+    def test_an_empty_ruleset_is_refused(self, tmp_path):
+        out = run_shim(json.dumps({"program": "echo", "args": ["hello"]}),
+                       {**ECHO_ALLOWLIST, "landlock": []}, tmp_path)
+        assert out["ok"] is False and "no paths" in out["error"]
