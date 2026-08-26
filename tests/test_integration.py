@@ -369,6 +369,22 @@ class TestMCP:
         assert "not found" not in reply["reason"]
         assert "group" in reply["reason"]      # says what to actually fix
 
+    def test_an_explicit_no_key_does_not_fall_back_to_the_environment(
+            self, monkeypatch, tmp_path):
+        """key_file=None must mean NO key.
+
+        Collapsing "unspecified" and "explicitly none" into one falsy check made
+        live_check.py's thief simulation sign a proof from TAPER_KEY_FILE and
+        report that possession was not being enforced — against a broker that
+        was enforcing it. A check that cries wolf is worse than no check.
+        """
+        monkeypatch.setenv("TAPER_KEY_FILE", str(tmp_path / "agent.key"))
+        assert BrokerClient(tmp_path / "s.sock", key_file=None).key_file is None
+        assert BrokerClient(tmp_path / "s.sock").key_file == str(
+            tmp_path / "agent.key")
+        monkeypatch.delenv("TAPER_KEY_FILE")
+        assert BrokerClient(tmp_path / "s.sock").key_file is None
+
     def test_a_genuinely_absent_socket_still_says_so(self, tmp_path):
         reply = BrokerClient(tmp_path / "nope.sock").call("tok", "ssh.exec", {})
         assert reply["allowed"] is False

@@ -219,13 +219,24 @@ class BrokerServer:
 class BrokerClient:
     """Runs as the AGENT user. Holds no secrets and can reach no vault."""
 
-    def __init__(self, socket_path, timeout: float = 120.0, key_file=None):
+    # Sentinel so that "not specified" and "explicitly no key" are different
+    # answers. `key_file or os.environ.get(...)` collapses them, which means a
+    # caller that deliberately wants to send NO proof — a live check simulating
+    # a thief, say — silently signs one anyway whenever TAPER_KEY_FILE happens
+    # to be exported. That produced a false "possession is not enforced" alarm
+    # against a broker that was enforcing it perfectly well.
+    # verified-by: tests/test_integration.py::TestMCP::test_an_explicit_no_key_does_not_fall_back_to_the_environment
+    _FROM_ENV = object()
+
+    def __init__(self, socket_path, timeout: float = 120.0, key_file=_FROM_ENV):
         self.path = Path(str(socket_path))
         self.timeout = timeout
         # A PATH, never key material. The path is fine in an environment or a
         # command line; the key it points at is not, which is why the file is
         # 0600 and read here rather than passed through.
-        self.key_file = key_file or os.environ.get("TAPER_KEY_FILE")
+        if key_file is BrokerClient._FROM_ENV:
+            key_file = os.environ.get("TAPER_KEY_FILE")
+        self.key_file = key_file or None
 
     def call(self, token: str, operation: str, request: dict) -> dict:
         # No exists() pre-check. The broker's runtime directory is 0750 and owned
