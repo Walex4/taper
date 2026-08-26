@@ -72,6 +72,11 @@ workspace_checks "$HERE" || exit 1
 echo "workspace: reset to HEAD, both checks pass (grep exit 1 = no matches)"
 echo
 
+# Reset the DATABASE too, not just the workspace, and before the BEFORE
+# snapshot so that what the snapshot records is the baseline every run started
+# from. Row counts appear in the block below for exactly that reason.
+database_reset "$HERE" || exit 1
+
 echo "=== BEFORE ==="
 # --require-db: no baseline, no run. A BEFORE snapshot that could not reach the
 # database is not a snapshot, and a transcript that records it as UNREACHABLE

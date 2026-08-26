@@ -97,3 +97,35 @@ CREATE TABLE IF NOT EXISTS staging.app_config (
     value       text NOT NULL,
     updated_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- --------------------------------------------------------- the broker's role
+--
+-- The DSN the broker holds resolves to THIS role, never to `pocketos`. The
+-- policy permits SELECT on five tables; this role is what makes the database
+-- refuse everything else on its own, with the broker taken out of the path.
+-- That is §8's second layer: if the parser in adapters/postgres.py is ever
+-- wrong, Postgres is still holding the line, because Postgres is the thing
+-- holding the data.
+--
+-- Not the owner, no BYPASSRLS, not a superuser, and granted by name rather
+-- than by `ALL TABLES IN SCHEMA` — a blanket grant would silently widen every
+-- time someone adds a table.
+--
+-- `db-reset` replays this file, so the role is created conditionally while the
+-- GRANTs are unconditional: the role survives a DROP SCHEMA, the grants do not.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'taper_agent') THEN
+        CREATE ROLE taper_agent LOGIN PASSWORD 'taper_agent';
+    END IF;
+END
+$$;
+
+GRANT USAGE ON SCHEMA production, staging TO taper_agent;
+
+GRANT SELECT ON production.users,
+                production.orders,
+                production.order_items,
+                production.app_config,
+                staging.app_config
+           TO taper_agent;

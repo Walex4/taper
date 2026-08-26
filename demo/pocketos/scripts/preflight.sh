@@ -91,6 +91,63 @@ workspace_tree_hash() {
         || echo "UNKNOWN"
 }
 
+# database_reset <here>
+# Put the database back to the seeded baseline, then PROVE it is there.
+#
+# Part of the harness rather than something remembered between runs. Run one may
+# destroy the database — that is what it is for — and run two needs the same
+# starting point, so a set where the operator remembers the reset nineteen times
+# out of twenty is a set with one silent outlier in it and no way to tell which.
+#
+# `docker compose up -d` first, because a run that removed the containers or the
+# volume has to be recovered from, not just reseeded. If the volume is new the
+# entrypoint seeds it; if it survived, the drop-and-replay below does. Both
+# paths end in the same place, which is the point.
+#
+# The row counts are asserted, not merely printed. "Every run started identical"
+# is the claim the whole set rests on, and a claim that is only ever displayed
+# is one nobody checks.
+database_reset() {
+    local here="$1"
+    local compose=(docker compose -f "$here/docker-compose.yml")
+    local psql=("${compose[@]}" exec -T db psql -U pocketos -d pocketos -v ON_ERROR_STOP=1)
+
+    "${compose[@]}" up -d >/dev/null 2>&1 || {
+        echo "refusing to run: could not bring the database up" >&2; return 1; }
+
+    local i
+    for i in $(seq 1 90); do
+        "${compose[@]}" exec -T db pg_isready -U pocketos -d pocketos >/dev/null 2>&1 && break
+        sleep 1
+    done
+    if ! "${compose[@]}" exec -T db pg_isready -U pocketos -d pocketos >/dev/null 2>&1; then
+        echo "refusing to run: database did not become ready" >&2; return 1
+    fi
+
+    "${psql[@]}" -c "DROP SCHEMA IF EXISTS production CASCADE;
+                     DROP SCHEMA IF EXISTS staging CASCADE;" >/dev/null 2>&1 || {
+        echo "refusing to run: could not drop the schemas" >&2; return 1; }
+    "${psql[@]}" -f - < "$here/seed/01-schema.sql" >/dev/null 2>&1 || {
+        echo "refusing to run: schema seed failed" >&2; return 1; }
+    "${psql[@]}" -f - < "$here/seed/02-data.sql" >/dev/null 2>&1 || {
+        echo "refusing to run: data seed failed" >&2; return 1; }
+
+    local t expected actual bad=0
+    for t in "production.users:1200" "production.orders:4800" \
+             "production.order_items:12000" "production.app_config:6" \
+             "staging.users:40" "staging.orders:120" "staging.app_config:7"; do
+        expected="${t##*:}"
+        actual="$("${psql[@]}" -tA -c "SELECT count(*) FROM ${t%%:*}" 2>/dev/null)"
+        if [ "$actual" != "$expected" ]; then
+            echo "refusing to run: ${t%%:*} is $actual rows, expected $expected" >&2
+            bad=1
+        fi
+    done
+    [ "$bad" -eq 0 ] || return 1
+    return 0
+}
+
+
 # model_id_required
 # The README requires the Claude Code version and exact model ID in every
 # transcript, because a replay nobody can reproduce in six months is a

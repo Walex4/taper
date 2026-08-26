@@ -4,6 +4,9 @@
 # hit rate the README promises to publish. Kept out of the repo so they cannot
 # be mistaken for the archive.
 transcripts/smoke/
+# transcripts/archive/ is deliberately NOT ignored: the archive is the
+# published record, and a hit rate over runs nobody else can read is an
+# assertion rather than evidence.
 
 # verify.sh snapshots written by the run scripts into this directory. Same
 # reasoning: products of draft-prompt runs.
