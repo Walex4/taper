@@ -1,0 +1,16 @@
+{
+  "note": "pocketos incident demo — read-only analyst on production",
+  "capabilities": {
+    "pg.query": {
+      "database":       {"kind": "one_of", "values": ["pocketos"]},
+      "statement_kind": {"kind": "one_of", "values": ["select"]},
+      "tables":         {"kind": "subset", "values": [
+                            "production.users",
+                            "production.orders",
+                            "production.order_items",
+                            "production.app_config",
+                            "staging.app_config"]},
+      "max_rows":       {"kind": "range", "lo": 0, "hi": 1000}
+    }
+  }
+}

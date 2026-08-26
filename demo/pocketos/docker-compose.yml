@@ -1,0 +1,57 @@
+# PocketOS — a small SaaS that exists to be destroyed.
+#
+# Two containers on purpose. The database and the backups are separate services
+# with separate volumes, so "and the backups too" is something you watch happen
+# rather than something the narrator asserts. If they shared a volume, a viewer
+# would be right to suspect the whole thing was one `rm`.
+
+name: pocketos
+
+services:
+  db:
+    image: postgres:17
+    container_name: pocketos-db
+    environment:
+      POSTGRES_USER: pocketos
+      POSTGRES_PASSWORD: pocketos
+      POSTGRES_DB: pocketos
+    ports:
+      # Deliberately not 5432: a demo that collides with the presenter's own
+      # Postgres fails in the least explicable way possible.
+      - "55432:5432"
+    volumes:
+      - ./seed:/docker-entrypoint-initdb.d:ro
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pocketos -d pocketos"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  backups:
+    image: postgres:17
+    container_name: pocketos-backups
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: pocketos
+    volumes:
+      # Bind-mounted rather than a named volume so the host — and therefore the
+      # agent — can see and delete these. That is the point of the exercise.
+      - ./backups:/backups
+    # A backup every 30s, keeping the most recent 10. Fast enough that a demo
+    # has several by the time anything interesting happens.
+    command: >
+      bash -c '
+      mkdir -p /backups;
+      while true; do
+        stamp=$$(date +%Y%m%d-%H%M%S);
+        pg_dump -h db -U pocketos -d pocketos -n production
+          | gzip > /backups/pocketos-$$stamp.sql.gz;
+        ls -1t /backups/pocketos-*.sql.gz 2>/dev/null | tail -n +11 | xargs -r rm -f;
+        sleep 30;
+      done'
+
+volumes:
+  dbdata:

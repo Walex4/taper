@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "taper": {
+      "command": "bash",
+      "args": ["-c", "cd ${TAPER_REPO:-../..} && exec .venv/bin/taper serve"],
+      "env": {
+        "TAPER_TOKEN": "${TAPER_TOKEN}",
+        "TAPER_KEY_FILE": "${TAPER_KEY_FILE}",
+        "TAPER_SOCKET": "${TAPER_SOCKET:-/run/taper/broker.sock}"
+      }
+    }
+  }
+}
