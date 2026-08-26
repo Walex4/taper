@@ -35,6 +35,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from . import ops
 from .adapters import Adapter, ExecPlan
+from .attest import confirmed_layers
 from .audit import AuditLog
 from .caps import Constraint
 from .chain import ChainError, Token, verify
@@ -166,6 +167,7 @@ class Broker:
     def _record(self, decision: Decision, peer: Optional[dict] = None) -> None:
         self.audit.append({
             "t": round(self.clock(), 3),
+            "record": "decision",
             "peer": peer,
             "allowed": decision.allowed,
             "reason": decision.reason,
@@ -174,6 +176,27 @@ class Broker:
             "token": decision.token_ids[-1] if decision.token_ids else None,
             "chain": decision.token_ids,
             "plan": decision.plan.redacted() if decision.plan else None,
+        })
+
+    def record_result(self, decision: Decision, result: Any,
+                      peer: Optional[dict] = None) -> None:
+        """Second chained record, written after execution.
+
+        The decision record cannot carry `enforced_by`: at step 6 nothing has run
+        yet, so anything it said about enforcement would be a prediction. This
+        record is written once the target has answered, and names only the layers
+        that reported themselves. A layer that cannot report is absent — see
+        taper/attest.py for why that is the rule and what it does not prove.
+        """
+        self.audit.append({
+            "t": round(self.clock(), 3),
+            "record": "result",
+            "peer": peer,
+            "operation": decision.operation,
+            "token": decision.token_ids[-1] if decision.token_ids else None,
+            "ok": bool(getattr(result, "ok", False)),
+            "exit_code": getattr(result, "exit_code", None),
+            "enforced_by": confirmed_layers(decision.plan, result),
         })
 
     def revoke(self, revocation_id: str) -> None:

@@ -167,6 +167,9 @@ class BrokerServer:
                     return
                 self.log(f"ALLOW {peer} {operation}")
                 result = self.executor.run(decision.plan)
+                # Inside the lock, so the decision and its result stay adjacent
+                # in the append-only chain.
+                self.broker.record_result(decision, result, peer=peer.as_dict())
 
             # Note what is NOT here: no plan, no argv, no secret refs.
             self._send(conn, {

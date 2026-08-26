@@ -13,6 +13,9 @@ What is actually enforced, and by whom:
                          reports what it found, but applies no ruleset, so a bug
                          in the shim is NOT contained. See DESIGN.md "Known gaps".
 
+None of the above is asserted by this file. Each layer is named in the audit
+record only if it reported itself during the exchange — see taper/attest.py.
+
 Note `restrict` is the deny-all baseline and you should still not assume it is
 complete: OpenSSH 10.5 (2026-08-11) fixed `restrict` not applying to tunnel
 forwarding, and 10.4 fixed the internal SFTP server dropping security options
@@ -91,6 +94,8 @@ class SSHAdapter(Adapter):
                 "program": program,
                 "args": args,
                 "stdin_json": payload,
-                "enforced_by": ["broker:argv", "sshd:force-command"],
+                # No enforced_by here on purpose. What was enforced is not known
+                # until the exchange has happened; taper/attest.py derives it
+                # from the result and the broker writes it to the audit log.
             },
         )

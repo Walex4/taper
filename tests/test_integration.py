@@ -339,3 +339,90 @@ class TestCLI:
         ("30s", 30), ("15m", 900), ("2h", 7200), ("1d", 86400), ("45", 45)])
     def test_duration_parsing(self, text, seconds):
         assert cli.parse_duration(text) == seconds
+
+
+# ---------------------------------------------------- enforced_by, end to end
+
+class _StubExecutor:
+    """Returns a canned shim reply without touching ssh. What the target said is
+    the whole input to the attestation, so that is the only thing worth faking."""
+
+    def __init__(self, payload):
+        self.payload = payload
+
+    def run(self, plan):
+        from taper.execute import Result
+        return Result(True, 0, json.dumps(self.payload), "")
+
+
+def _run_once(tmp_path, payload):
+    """Drive one allowed ssh.exec through LocalBackend; return the audit records."""
+    root = Ed25519PrivateKey.generate()
+    token = Token.issue(root, CAPS, ttl_seconds=3600, now=NOW)
+    broker = Broker(root_pub=root.public_key(),
+                    adapters={"ssh.exec": SSHAdapter()},
+                    audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW)
+    backend = LocalBackend(broker, _StubExecutor(payload))
+    reply = backend.call(token.serialize(), "ssh.exec",
+                         {"host": "build-1.internal", "program": "git",
+                          "args": ["status"]})
+    assert reply["allowed"], reply
+    return [r["body"] for r in broker.audit.read()]
+
+
+class TestEnforcedByIsLoggedFromTheResult:
+    @pytest.mark.parametrize("landlock, expected", [
+        ("available(abi=7) NOT_APPLIED", False),
+        ("unavailable",                  False),
+        ("applied(abi=7, paths=4)",      True),
+    ])
+    def test_the_log_agrees_with_what_the_target_reported(
+            self, tmp_path, landlock, expected):
+        """The load-bearing assertion, checked against the shim's own words
+        rather than by re-running the derivation that produced the record."""
+        payload = {"ok": True, "exit_code": 0, "stdout": "", "stderr": "",
+                   "landlock": landlock}
+        bodies = _run_once(tmp_path, payload)
+        results = [b for b in bodies if b.get("record") == "result"]
+        assert len(results) == 1
+        claimed = results[0]["enforced_by"]
+
+        reported = payload["landlock"].startswith("applied")
+        assert reported is expected                       # the fixture is honest
+        assert ("kernel:landlock" in claimed) is reported
+
+    def test_the_decision_record_claims_nothing_about_enforcement(self, tmp_path):
+        """It is written before anything runs, so it cannot know."""
+        bodies = _run_once(tmp_path, {"ok": True, "exit_code": 0, "stdout": "",
+                                      "stderr": "", "landlock": "unavailable"})
+        decision = [b for b in bodies if b.get("record") == "decision"][0]
+        assert "enforced_by" not in json.dumps(decision["plan"])
+
+    def test_both_records_stay_in_one_chain(self, tmp_path):
+        root = Ed25519PrivateKey.generate()
+        token = Token.issue(root, CAPS, ttl_seconds=3600, now=NOW)
+        broker = Broker(root_pub=root.public_key(),
+                        adapters={"ssh.exec": SSHAdapter()},
+                        audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW)
+        backend = LocalBackend(broker, _StubExecutor(
+            {"ok": True, "exit_code": 0, "stdout": "", "stderr": "",
+             "landlock": "available(abi=7) NOT_APPLIED"}))
+        backend.call(token.serialize(), "ssh.exec",
+                     {"host": "build-1.internal", "program": "git",
+                      "args": ["status"]})
+        assert broker.audit.verify() == (True, None)
+        assert len(list(broker.audit.read())) == 2
+
+    def test_a_denial_writes_no_result_record(self, tmp_path):
+        root = Ed25519PrivateKey.generate()
+        token = Token.issue(root, CAPS, ttl_seconds=3600, now=NOW)
+        broker = Broker(root_pub=root.public_key(),
+                        adapters={"ssh.exec": SSHAdapter()},
+                        audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW)
+        backend = LocalBackend(broker, _StubExecutor({}))
+        reply = backend.call(token.serialize(), "ssh.exec",
+                             {"host": "prod-db.internal", "program": "git",
+                              "args": ["status"]})
+        assert not reply["allowed"]
+        bodies = [r["body"] for r in broker.audit.read()]
+        assert [b["record"] for b in bodies] == ["decision"]

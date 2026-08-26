@@ -105,6 +105,7 @@ class LocalBackend:
         if not decision.allowed:
             return {"allowed": False, "reason": decision.reason}
         result = self.executor.run(decision.plan)
+        self.broker.record_result(decision, result, peer=self._peer)
         return {"allowed": True, "reason": "ok", "ok": result.ok,
                 "exit_code": result.exit_code, "stdout": result.stdout,
                 "stderr": result.stderr, "truncated": result.truncated}

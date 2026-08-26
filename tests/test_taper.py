@@ -13,6 +13,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from taper import adapters, ops
+from taper.attest import confirmed_layers
 from taper.adapters import HTTPAdapter, PostgresAdapter, SSHAdapter
 from taper.audit import AuditLog
 from taper.broker import Broker
@@ -568,3 +569,100 @@ class TestAudit:
         log.path.write_text("\n".join(lines) + "\n")
         intact, _ = log.verify()
         assert not intact
+
+
+# ------------------------------------------------------------------- enforced_by
+
+SHIM_OK = {"ok": True, "exit_code": 0, "stdout": "on branch main\n", "stderr": ""}
+
+
+def _shim(**overrides):
+    """A Result carrying a shim reply, as the executor would return it."""
+    from taper.execute import Result
+    payload = {**SHIM_OK, **overrides}
+    return Result(True, 0, json.dumps(payload), "")
+
+
+class TestEnforcedBy:
+    """The audit log may name a layer only if that layer reported itself.
+
+    This exists because `enforced_by` was a hardcoded literal that claimed
+    `kernel:landlock` in the same exchange where the shim replied `NOT_APPLIED`.
+    """
+
+    def test_no_adapter_hardcodes_enforced_by(self):
+        """The regression guard. AST, not grep, so prose about it stays legal."""
+        import ast
+
+        for source_file in Path(adapters.__file__).parent.glob("*.py"):
+            tree = ast.parse(source_file.read_text(), filename=str(source_file))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and node.value == "enforced_by":
+                    pytest.fail(
+                        f"{source_file.name}: enforced_by is set in an adapter. "
+                        f"It must be derived in taper/attest.py from the result.")
+
+    def test_landlock_is_absent_while_the_shim_reports_not_applied(self):
+        plan = SSHAdapter().plan(
+            {"host": "build-1.internal", "program": "git", "args": ["status"]}, {})
+        layers = confirmed_layers(
+            plan, _shim(landlock="available(abi=7) NOT_APPLIED"))
+        assert layers == ["broker:argv", "target:shim-allowlist"]
+        assert "kernel:landlock" not in layers
+
+    def test_landlock_appears_only_once_the_shim_reports_applied(self):
+        plan = SSHAdapter().plan(
+            {"host": "build-1.internal", "program": "git", "args": ["status"]}, {})
+        layers = confirmed_layers(plan, _shim(landlock="applied(abi=7, paths=4)"))
+        assert "kernel:landlock" in layers
+
+    @pytest.mark.parametrize("status", [
+        "unavailable",
+        "available(abi=7) NOT_APPLIED",
+        "",
+        "APPLIED",              # not lowercase "applied" — not our format, not a claim
+        "not applied",          # substring "applied" must not be enough
+    ])
+    def test_only_an_explicit_applied_counts(self, status):
+        plan = SSHAdapter().plan(
+            {"host": "build-1.internal", "program": "git", "args": ["status"]}, {})
+        assert "kernel:landlock" not in confirmed_layers(plan, _shim(landlock=status))
+
+    def test_a_target_that_never_answered_confirms_nothing_remote(self):
+        from taper.execute import Result
+        plan = SSHAdapter().plan(
+            {"host": "build-1.internal", "program": "git", "args": ["status"]}, {})
+        for result in (Result(False, -1, "", "timed out after 60s"),
+                       Result(False, -1, "", "executable not found: ssh"),
+                       Result(False, 255, "ssh: connect to host port 22: refused", "")):
+            assert confirmed_layers(plan, result) == ["broker:argv"]
+
+    def test_a_shim_refusal_still_confirms_the_host_allowlist(self):
+        """A refusal is the host layer working, so it counts — but only for the
+        layer that spoke. It says nothing about Landlock."""
+        from taper.execute import Result
+        plan = SSHAdapter().plan(
+            {"host": "build-1.internal", "program": "git", "args": ["status"]}, {})
+        refusal = Result(False, 2, json.dumps(
+            {"ok": False, "error": "program 'curl' not in this host's allowlist"}), "")
+        layers = confirmed_layers(plan, refusal)
+        assert "target:shim-allowlist" in layers
+        assert "kernel:landlock" not in layers
+
+    def test_a_forged_reply_that_is_not_the_shims_shape_confirms_nothing(self):
+        from taper.execute import Result
+        plan = SSHAdapter().plan(
+            {"host": "build-1.internal", "program": "git", "args": ["status"]}, {})
+        for stdout in ("", "not json", "[]", "null", '{"landlock": "applied"}',
+                       '{"ok": "yes", "exit_code": 0, "landlock": "applied"}'):
+            assert confirmed_layers(plan, Result(True, 0, stdout, "")) == ["broker:argv"]
+
+    def test_plans_with_no_argv_claim_nothing(self):
+        """sql and http plans confirm no layer. That is the honest answer for
+        them, not a gap: nothing in either path reports an enforcement boundary.
+        """
+        for plan in (PostgresAdapter().plan(
+                        {"database": "analytics", "statement": "SELECT 1"}, {}),
+                     HTTPAdapter().plan(
+                        {"method": "GET", "host": "api.example.com", "path": "/v1"}, {})):
+            assert confirmed_layers(plan, _shim()) == []
