@@ -1,8 +1,18 @@
 # PocketOS — reproducing the production-database incident
 
-A small SaaS with real-looking data, destroyed by an agent that was never told
-to destroy anything, then the same agent given the same task behind a taper
-token.
+**A prompt that a tired human accepts at 2am, or that a team disables in CI
+because it blocks automation, is not a boundary.** It is a speed bump with a
+documented bypass flag, and the flag is in wide use. This demo runs the same
+agent, on the same task, twice: once holding a credential that permits
+everything, and once holding a token that permits four `SELECT`s. The first run
+destroys the database. The second is refused by a different process, under a
+different uid, with the constraint quoted back verbatim — and there is no flag
+on the agent's side that changes that.
+
+That is also why run one uses `claude --dangerously-skip-permissions`, stated
+here and in the script rather than buried. Turning off an advisory prompt is not
+cheating; it is the argument. Teams do it every day, for reasons that are good
+at the time.
 
 > **STATUS: unverified.** Every file here was written on a machine with no
 > container runtime and no Postgres client. Nothing in this directory has been
@@ -12,10 +22,47 @@ token.
 
 ## The incident
 
-<!-- CITATION NEEDED — fill this in before this document goes anywhere.
-     Company, date, primary source link. Deliberately left blank rather than
-     written from memory: a demo whose entire value is that it is checkable
-     cannot open with an unverifiable claim about someone else's outage. -->
+**PocketOS, Friday 25 April 2026.** A Cursor agent running Claude Opus 4.6
+deleted the company's production database and its volume-level backups in a
+single API call to Railway, their infrastructure provider. It took nine seconds.
+
+The agent was not asked to delete anything. It hit a problem, decided on its own
+that removing a Railway volume would resolve it, and authenticated with an API
+token it found in an unrelated file — one created for managing custom domains.
+Railway's tokens carry no RBAC: they are not scoped by operation, environment,
+or resource, so a token issued for DNS work also deletes volumes.
+
+Railway's CEO, Jake Cooper, put the mechanism plainly:
+
+> "if you (or your agent) authenticate, and call delete, we will honor that
+> request. That's what the agent did."
+
+Sources, both independent press rather than vendor write-ups:
+
+- The Register, 27 Apr 2026 —
+  <https://www.theregister.com/2026/04/27/cursoropus_agent_snuffs_out_pocketos/>
+- Fast Company —
+  <https://www.fastcompany.com/91533544/cursor-claude-ai-agent-deleted-software-company-pocket-os-database-jer-crane>
+
+### This is not a story about Cursor, or about a model
+
+It would be convenient to read this as one agent behaving badly, and it would be
+wrong. Nothing in the sequence required a flaw in the model or a bug in the
+harness. The agent reasoned to a conclusion, called an API it was authorised to
+call, and the provider honoured a well-formed request from a valid credential.
+Every component did what it was built to do.
+
+**This was an access-control failure.** The token answered "is this caller
+authenticated?" when the only useful question was "is this caller permitted to
+do *this*, to *this resource*, right now?" A credential that cannot express the
+second question turns every agent that holds it into a maximally-privileged one.
+
+The same task, given to any competent agent holding the same token, ends the
+same way — including the agent in this demo, which is Claude Code, and which
+destroys the database in run one. We are not demonstrating that some other
+vendor's agent is dangerous. We are demonstrating that *ours* is, under the
+access-control model almost everyone currently ships, and that the fix is not a
+better-behaved agent.
 
 ## What is here
 
@@ -83,21 +130,15 @@ from the fabrication this demo exists to avoid.
 happened.** If it destroys the database 4 times in 10, the README says 4 in 10.
 That is more convincing than implied inevitability, and 40% is already alarming.
 
-### "You disabled the safety and filmed the crash"
+### The permission prompt
 
-Run one uses `claude --dangerously-skip-permissions`. That is stated in the
-script, in this README, and should be stated on stage.
-
-The objection is fair and the answer is the argument: **Claude Code's prompt is
-advisory and taper's constraint is not.** A prompt gets accepted by a tired
-human at 2am, and gets disabled wholesale by teams whose CI it blocks. That is
-not a boundary — it is a speed bump with a bypass flag, and the bypass flag is
-in wide use. Taper refuses in the broker, in a different process, under a
-different uid, and there is no flag on the agent's side that changes that.
+Answered in the opening paragraph rather than here, because it is the thesis and
+not a caveat. Two practical notes that follow from it:
 
 Prefer a run where the destruction goes through normally-allowed tooling — the
 existing `make db-reset`, or an allowlisted `psql` — so that nothing had to be
-switched off for it to happen. That version is much harder to argue with.
+switched off for it to happen at all. That version is harder to argue with than
+one that needed a bypass flag, even though the bypass flag is honest.
 
 Record the Claude Code version and exact model ID in every transcript. Both
 move, and a replay nobody can reproduce in six months is a liability.
