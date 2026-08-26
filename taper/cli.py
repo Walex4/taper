@@ -21,8 +21,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
+import time
+from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -37,6 +43,7 @@ HOME = Path(os.environ.get("TAPER_HOME", "~/.taper")).expanduser()
 ROOT_KEY = HOME / "root.key"
 ROOT_PUB = HOME / "root.pub"
 SECRETS = HOME / "secrets"
+CA = HOME / "ca"
 AUDIT = HOME / "audit.jsonl"
 # Default under TAPER_HOME so a single-user checkout works with no root. A real
 # deployment sets TAPER_SOCKET=/run/taper/broker.sock, where the directory is
@@ -200,6 +207,166 @@ def cmd_inspect(args) -> int:
     print(f"\n{BOLD}expires{OFF} in {colour}{remaining}s{OFF}")
     print(f"\n{BOLD}effective capabilities{OFF}  {DIM}(intersection of all blocks){OFF}")
     print(json.dumps(caps_to_json(caps), indent=2))
+    return 0
+
+
+# ------------------------------------------------------------------ certificates
+
+SHIM_PATH = "/usr/local/libexec/taper-shim"
+
+
+def _run(argv: list[str]) -> subprocess.CompletedProcess:
+    """ssh-keygen, always as an argv array and never through a shell.
+
+    Same rule as execute.py: there is no command string anywhere in this file
+    for anything to be smuggled into.
+    """
+    return subprocess.run(argv, capture_output=True, text=True, shell=False,
+                          timeout=60)
+
+
+def cert_validity(cert: Path) -> tuple[Optional[datetime], Optional[datetime]]:
+    """(from, to) for a certificate, or (None, None) if it cannot be read.
+
+    ssh-keygen prints local time with no offset, so these are naive datetimes in
+    the local zone and are compared against datetime.now() — never utcnow(),
+    which would be wrong by the offset and silently so.
+    """
+    if not cert.is_file():
+        return None, None
+    result = _run(["ssh-keygen", "-L", "-f", str(cert)])
+    if result.returncode != 0:
+        return None, None
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("Valid:"):
+            continue
+        if "forever" in line:
+            return datetime.min, datetime.max
+        try:
+            _, _, rest = line.partition("from ")
+            start, _, end = rest.partition(" to ")
+            return (datetime.strptime(start.strip(), "%Y-%m-%dT%H:%M:%S"),
+                    datetime.strptime(end.strip(), "%Y-%m-%dT%H:%M:%S"))
+        except ValueError:
+            return None, None
+    return None, None
+
+
+def cmd_cert_status(args) -> int:
+    """What the broker is holding, and how long it has left."""
+    cert = SECRETS / "ssh.cert.pub"
+    start, end = cert_validity(cert)
+    if end is None:
+        print(f"{RED}no readable certificate{OFF} at {cert}")
+        print(f"{DIM}# run as the broker user, e.g. "
+              f"sudo -u taper-broker TAPER_HOME=/home/taper-broker/.taper "
+              f"taper cert status{OFF}")
+        return 2
+
+    remaining = (end - datetime.now()).total_seconds()
+    colour = GREEN if remaining > 900 else (YELLOW if remaining > 0 else RED)
+    print(f"{BOLD}certificate{OFF} {cert}")
+    print(f"  valid from  {start}")
+    print(f"  valid until {end}")
+    if remaining > 0:
+        print(f"  {colour}{int(remaining // 60)}m {int(remaining % 60)}s "
+              f"remaining{OFF}")
+        return 0
+    print(f"  {RED}expired {int(-remaining // 60)}m ago{OFF}")
+    return 1
+
+
+def cmd_cert_renew(args) -> int:
+    """Issue a fresh certificate into the vault, in one command.
+
+    This exists because renewing by hand is four steps (keygen, sign, load into
+    the vault, delete the copy on disk), the third of which needs the broker's
+    uid — so it gets skipped, and an expired certificate becomes the first thing
+    blocking the morning. A command that can be put behind a timer does not.
+
+    Must run as the user that owns the vault: the CA private key is 0600 in
+    there, and the certificate has to land in the same place.
+
+    verified-by: tests/test_integration.py::TestCertRenew::test_renew_installs_both_halves_at_0600
+    verified-by: tests/test_integration.py::TestCertRenew::test_the_certificate_grants_nothing_it_was_not_asked_to
+    verified-by: tests/test_integration.py::TestCertRenew::test_the_private_key_never_reaches_stdout
+    verified-by: tests/test_integration.py::TestCertRenew::test_no_copy_of_the_key_is_left_on_disk
+    verified-by: tests/test_integration.py::TestCertRenew::test_the_lifetime_is_what_was_asked_for
+    verified-by: tests/test_integration.py::TestCertRenew::test_if_expiring_within_is_a_no_op_while_time_remains
+    """
+    if not CA.is_file():
+        print(f"{RED}no CA private key{OFF} at {CA}", file=sys.stderr)
+        print(f"{DIM}# the CA lives in the broker's vault. Run as that user:{OFF}",
+              file=sys.stderr)
+        print(f"{DIM}#   sudo -u taper-broker TAPER_HOME=/home/taper-broker/.taper "
+              f"taper cert renew{OFF}", file=sys.stderr)
+        return 2
+
+    cert = SECRETS / "ssh.cert.pub"
+    if args.if_expiring_within is not None:
+        _, end = cert_validity(cert)
+        if end is not None:
+            left = (end - datetime.now()).total_seconds()
+            if left > args.if_expiring_within * 60:
+                print(f"{DIM}certificate has {int(left // 60)}m left, more than "
+                      f"{args.if_expiring_within}m — nothing to do{OFF}")
+                return 0
+
+    SECRETS.mkdir(parents=True, exist_ok=True)
+    os.chmod(SECRETS, 0o700)
+
+    # A private key must never exist in a world- or group-readable place, not
+    # even for the moment between writing and moving it. mkdtemp is 0700.
+    # verified-by: tests/test_integration.py::TestCertRenew::test_no_copy_of_the_key_is_left_on_disk
+    workdir = Path(tempfile.mkdtemp(prefix="taper-cert-"))
+    key = workdir / "id"
+    try:
+        gen = _run(["ssh-keygen", "-t", "ed25519", "-f", str(key), "-N", "",
+                    "-C", f"taper-{args.host}", "-q"])
+        if gen.returncode != 0:
+            print(f"{RED}ssh-keygen failed:{OFF} {gen.stderr.strip()}", file=sys.stderr)
+            return 1
+
+        # -O clear drops every default permission and nothing is granted back:
+        # no pty, no forwarding, no agent. force-command pins the session to the
+        # shim whatever the client asks for. Critical options make an older sshd
+        # REFUSE a certificate it does not understand rather than ignore it.
+        # verified-by: tests/test_integration.py::TestCertRenew::test_the_certificate_grants_nothing_it_was_not_asked_to
+        sign = ["ssh-keygen", "-s", str(CA), "-I", f"taper-{int(time.time())}",
+                "-n", args.principal, "-V", f"+{args.minutes}m",
+                "-O", "clear", "-O", f"force-command={args.shim}"]
+        if args.source_cidr:
+            sign += ["-O", f"source-address={args.source_cidr}"]
+        sign.append(str(key) + ".pub")
+        signed = _run(sign)
+        if signed.returncode != 0:
+            print(f"{RED}signing failed:{OFF} {signed.stderr.strip()}", file=sys.stderr)
+            return 1
+
+        # Install both halves at 0600, created at that mode rather than chmod'd
+        # afterwards. The private half is the whole asset.
+        for src, dst in ((key, SECRETS / "ssh.cert"),
+                         (Path(str(key) + "-cert.pub"), SECRETS / "ssh.cert.pub")):
+            fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, src.read_bytes())
+            finally:
+                os.close(fd)
+            os.chmod(dst, 0o600)
+    finally:
+        # The vault is meant to be the only copy that persists.
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    start, end = cert_validity(SECRETS / "ssh.cert.pub")
+    print(f"{GREEN}certificate renewed{OFF}")
+    print(f"  principal  {args.principal}")
+    print(f"  command    {args.shim}")
+    if args.source_cidr:
+        print(f"  from       {args.source_cidr}")
+    print(f"  valid until {end}  {DIM}({args.minutes}m){OFF}")
+    print(f"{DIM}# the broker picks this up on its next request — no restart "
+          f"needed, the vault is read per call{OFF}")
     return 0
 
 
@@ -388,6 +555,28 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("inspect", help="show what a token permits")
     p.add_argument("token")
     p.set_defaults(func=cmd_inspect)
+
+    cert = sub.add_parser("cert", help="manage the broker's SSH certificate")
+    cert_sub = cert.add_subparsers(dest="cert_cmd", required=True)
+
+    p = cert_sub.add_parser("renew", help="issue a fresh certificate into the vault")
+    p.add_argument("--host", default="localhost",
+                   help="comment on the generated key; identifies the target")
+    p.add_argument("--minutes", type=int, default=60,
+                   help="certificate lifetime (default 60)")
+    p.add_argument("--principal", default="taper-agent",
+                   help="certificate principal (default taper-agent)")
+    p.add_argument("--source-cidr", default="",
+                   help="restrict the certificate to this source address")
+    p.add_argument("--shim", default=SHIM_PATH,
+                   help="force-command the certificate pins the session to")
+    # For a timer: run it every N minutes unconditionally and let it decide.
+    p.add_argument("--if-expiring-within", type=int, default=None, metavar="MINUTES",
+                   help="renew only if less than this many minutes remain")
+    p.set_defaults(func=cmd_cert_renew)
+
+    p = cert_sub.add_parser("status", help="show the certificate's remaining life")
+    p.set_defaults(func=cmd_cert_status)
 
     p = sub.add_parser("audit", help="read or verify the audit log")
     p.add_argument("--verify", action="store_true")

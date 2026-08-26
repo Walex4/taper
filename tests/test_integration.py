@@ -12,6 +12,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -780,3 +781,124 @@ class TestProvingKeyDelivery:
         # pop.py writes the proving key; cli.py writes the ROOT key at init.
         # Those are different assets and both are 0600 files, never streams.
         assert writers == {"taper/pop.py", "taper/cli.py"}, writers
+
+
+# ---------------------------------------------------------------- certificates
+
+HAS_SSH_KEYGEN = shutil.which("ssh-keygen") is not None
+needs_ssh_keygen = pytest.mark.skipif(not HAS_SSH_KEYGEN, reason="no ssh-keygen")
+
+
+@pytest.fixture
+def vault(tmp_path, monkeypatch):
+    """A throwaway vault with a CA in it, as the broker user would have."""
+    home = tmp_path / "vault"
+    home.mkdir(mode=0o700)
+    monkeypatch.setattr(cli, "HOME", home)
+    monkeypatch.setattr(cli, "SECRETS", home / "secrets")
+    monkeypatch.setattr(cli, "CA", home / "ca")
+    return home
+
+
+def _make_ca(vault):
+    subprocess.run(["ssh-keygen", "-t", "ed25519", "-f", str(vault / "ca"),
+                    "-N", "", "-C", "test-ca", "-q"], check=True)
+    (vault / "ca").chmod(0o600)
+
+
+class TestCertRenew:
+    """Renewing by hand is four steps, one of which needs the broker's uid, so
+    it gets skipped and an expired certificate blocks the morning. This is the
+    one command, and the thing a timer can call."""
+
+    def test_no_ca_says_where_the_ca_lives(self, vault, capsys):
+        assert cli.main(["cert", "renew"]) == 2
+        err = capsys.readouterr().err
+        assert "no CA private key" in err
+        assert "taper-broker" in err          # names the user to run as
+
+    @needs_ssh_keygen
+    def test_renew_installs_both_halves_at_0600(self, vault, capsys):
+        _make_ca(vault)
+        assert cli.main(["cert", "renew", "--minutes", "45"]) == 0
+        for name in ("ssh.cert", "ssh.cert.pub"):
+            path = vault / "secrets" / name
+            assert path.is_file()
+            assert path.stat().st_mode & 0o777 == 0o600
+        assert (vault / "secrets").stat().st_mode & 0o777 == 0o700
+
+    @needs_ssh_keygen
+    def test_the_certificate_grants_nothing_it_was_not_asked_to(self, vault):
+        """-O clear then nothing back: no pty, no forwarding, no agent. The
+        force-command is what pins the session to the shim whatever the client
+        asks for, and it is a critical option so an older sshd refuses a
+        certificate it cannot understand rather than ignoring it."""
+        _make_ca(vault)
+        assert cli.main(["cert", "renew", "--source-cidr", "10.0.0.5/32"]) == 0
+        shown = subprocess.run(
+            ["ssh-keygen", "-L", "-f", str(vault / "secrets" / "ssh.cert.pub")],
+            capture_output=True, text=True, check=True).stdout
+        assert "Extensions: \n" in shown or "Extensions: (none)" in shown
+        assert "force-command /usr/local/libexec/taper-shim" in shown
+        assert "source-address 10.0.0.5/32" in shown
+        assert "taper-agent" in shown
+
+    @needs_ssh_keygen
+    def test_the_lifetime_is_what_was_asked_for(self, vault):
+        """Measured from now, not from the certificate's own start time:
+        ssh-keygen rounds the start down to a minute boundary, so the nominal
+        span runs a minute or two longer than asked. What an operator cares
+        about is how long it is good for from here."""
+        from datetime import datetime
+
+        _make_ca(vault)
+        assert cli.main(["cert", "renew", "--minutes", "45"]) == 0
+        start, end = cli.cert_validity(vault / "secrets" / "ssh.cert.pub")
+        now = datetime.now()
+        assert start <= now                      # usable immediately
+        assert 44 * 60 <= (end - now).total_seconds() <= 45 * 60 + 30
+
+    @needs_ssh_keygen
+    def test_the_private_key_never_reaches_stdout(self, vault, capsys):
+        """Same rule as `taper grant`: the asset does not go on the channel the
+        operator is watching."""
+        _make_ca(vault)
+        assert cli.main(["cert", "renew"]) == 0
+        out, err = capsys.readouterr()
+        key = (vault / "secrets" / "ssh.cert").read_text()
+        for stream in (out, err):
+            assert "PRIVATE KEY" not in stream
+            assert key not in stream
+
+    @needs_ssh_keygen
+    def test_no_copy_of_the_key_is_left_on_disk(self, vault):
+        """The vault is meant to be the only copy that persists."""
+        _make_ca(vault)
+        before = set(Path(tempfile.gettempdir()).glob("taper-cert-*"))
+        assert cli.main(["cert", "renew"]) == 0
+        assert set(Path(tempfile.gettempdir()).glob("taper-cert-*")) == before
+
+    @needs_ssh_keygen
+    def test_if_expiring_within_is_a_no_op_while_time_remains(self, vault, capsys):
+        """What makes it safe to put behind a timer: run it every few minutes
+        and let it decide, rather than reissuing a certificate every tick."""
+        _make_ca(vault)
+        assert cli.main(["cert", "renew", "--minutes", "60"]) == 0
+        first = (vault / "secrets" / "ssh.cert.pub").read_bytes()
+
+        assert cli.main(["cert", "renew", "--if-expiring-within", "10"]) == 0
+        assert (vault / "secrets" / "ssh.cert.pub").read_bytes() == first
+        assert "nothing to do" in capsys.readouterr().out
+
+        assert cli.main(["cert", "renew", "--if-expiring-within", "600"]) == 0
+        assert (vault / "secrets" / "ssh.cert.pub").read_bytes() != first
+
+    @needs_ssh_keygen
+    def test_status_reports_remaining_life_and_exits_nonzero_when_absent(
+            self, vault, capsys):
+        assert cli.main(["cert", "status"]) == 2          # nothing issued yet
+        _make_ca(vault)
+        assert cli.main(["cert", "renew", "--minutes", "30"]) == 0
+        capsys.readouterr()
+        assert cli.main(["cert", "status"]) == 0
+        assert "remaining" in capsys.readouterr().out
