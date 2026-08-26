@@ -29,6 +29,8 @@ disagree with PostgreSQL's lexer, and every disagreement is a bypass.
 So: in production, replace `classify()` with libpg_query (pganalyze), pinned to
 a tagged release matching your server major version — it extracts the real
 PostgreSQL parser. And even then, keep it a fast-fail, not the boundary.
+
+verified-by: tests/test_taper.py::TestAdapters::test_postgres_classifies_and_flags_itself_as_not_the_boundary
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ from .base import Adapter, ExecPlan
 
 # Statement kinds we are willing to name. Anything unrecognized classifies as
 # "other" and policy must explicitly permit "other" for it to proceed — fail closed.
+# verified-by: tests/test_taper.py::TestAdapters::test_unrecognized_sql_classifies_as_other_not_select
 _KIND = [
     (re.compile(r"^\s*select\b", re.I | re.S), "select"),
     (re.compile(r"^\s*(insert|update|delete)\b", re.I | re.S), "write"),
@@ -49,6 +52,7 @@ _KIND = [
 # Functions that reach outside the database. A statement calling one of these is
 # `dangerous` no matter how innocent its leading keyword looks — the red team
 # caught `SELECT pg_read_file('/etc/passwd')` classifying as a plain select.
+# verified-by: tests/test_taper.py::TestAdapters::test_dangerous_functions_are_dangerous_even_inside_a_select
 _DANGEROUS_FN = re.compile(
     r"\b(pg_read_file|pg_read_binary_file|pg_ls_dir|pg_stat_file|lo_import|lo_export"
     r"|dblink|dblink_exec|pg_sleep|pg_terminate_backend|pg_reload_conf"
@@ -59,6 +63,7 @@ _DANGEROUS_FN = re.compile(
 # literal character while naive lexers read it as an escape, and the two disagree
 # about where the statement ends. We cannot resolve that disagreement without
 # PostgreSQL's own lexer, so we refuse to try.
+# verified-by: tests/test_taper.py::TestAdapters::test_backslash_quote_alone_is_ambiguous
 _AMBIGUOUS_ESCAPE = re.compile(r"\\['\"]")
 
 
@@ -70,6 +75,8 @@ def _statement_count_is_one(statement: str) -> bool:
     that is the correct direction to be wrong in. Determining "is this semicolon
     inside a literal?" requires PostgreSQL's lexer, and reimplementing it is the
     trap that produced the CVE this function exists because of.
+
+    verified-by: tests/test_taper.py::TestAdapters::test_pgadmin_payload_is_refused_by_the_multi_statement_guard
     """
     return ";" not in statement.strip().rstrip(";").rstrip()
 
@@ -87,6 +94,8 @@ def classify(statement: str) -> str:
 
     Order is the entire point. `SELECT 1; DROP TABLE users` starts with SELECT,
     and a classifier that checks the leading keyword first calls it a select.
+
+    verified-by: tests/test_taper.py::TestAdapters::test_stacked_statements_do_not_classify_as_select
     """
     if not _statement_count_is_one(statement):
         return "multi"                 # never grant this
@@ -100,6 +109,7 @@ def classify(statement: str) -> str:
                 # A select touching no recognizable table is either trivial
                 # (`SELECT 1`) or is doing something through a function. Fail
                 # closed: policy must name "other" to permit it.
+                # verified-by: tests/test_taper.py::TestAdapters::test_select_touching_no_table_fails_closed
                 return "other"
             return kind
     return "other"

@@ -8,9 +8,12 @@ where the differentiation is.
 One thing done differently and worth keeping: the credential is attached to the
 resolved host AFTER policy has approved it, so a policy bug cannot result in the
 right credential going to the wrong host. The binding is host-only: the path is
-normalized and policy-checked, but it does not select the credential. The secret
-is referenced by name in the plan and resolved at the last moment, which means
-plans are safe to log verbatim.
+normalized and policy-checked, but it does not select the credential.
+verified-by: tests/test_taper.py::TestAdapters::test_http_never_borrows_another_hosts_credential
+
+The secret is referenced by name in the plan and resolved at the last moment,
+which means plans are safe to log verbatim.
+verified-by: tests/test_taper.py::TestAdapters::test_no_adapter_resolves_a_secret
 """
 
 from __future__ import annotations
@@ -28,6 +31,8 @@ def normalize_path(path: str) -> str:
     `Prefix("/v1/")` constraint while actually addressing `/admin`. The red-team
     suite caught exactly this. Decode percent-encoding first, because `%2e%2e%2f`
     is the same attack wearing a hat, then normalize, then match.
+
+    verified-by: tests/test_taper.py::TestAdapters::test_http_path_traversal_is_normalized_before_policy
     """
     decoded = unquote(unquote(path))          # twice: double-encoding is standard
     normalized = posixpath.normpath(decoded)
@@ -69,6 +74,7 @@ class HTTPAdapter(Adapter):
                 # If no credential is mapped for this host the request still
                 # proceeds unauthenticated rather than borrowing another host's
                 # credential. Never fall back.
+                # verified-by: tests/test_taper.py::TestAdapters::test_http_never_borrows_another_hosts_credential
                 "credential_bound_to_host": host if ref else None,
             },
         )

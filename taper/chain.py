@@ -5,6 +5,12 @@ The property, stated precisely:
     A holder of a token can produce a new token with STRICTLY FEWER capabilities,
     without contacting the issuer, and cannot produce one with more.
 
+verified-by: tests/test_taper.py::TestCannotWiden::test_attenuation_narrows
+verified-by: tests/test_taper.py::TestCannotWiden::test_cannot_add_a_host
+verified-by: tests/test_taper.py::TestCannotWiden::test_cannot_add_an_operation
+verified-by: tests/test_taper.py::TestCannotWiden::test_cannot_escalate_statement_kind
+verified-by: tests/test_taper.py::TestCannotWiden::test_intersection_defeats_a_forged_widening_block
+
 Mechanism, borrowed from Biscuit (biscuitsec.org) and reimplemented here so the
 design is legible and testable in one file:
 
@@ -19,6 +25,8 @@ design is legible and testable in one file:
 
 Each block also commits to the hash of the previous block, so blocks cannot be
 reordered or spliced between chains.
+verified-by: tests/test_taper.py::TestChain::test_blocks_cannot_be_spliced_between_chains
+verified-by: tests/test_taper.py::TestChain::test_tampering_with_a_block_breaks_the_chain
 
 PRODUCTION NOTE: this is a reference implementation for design validation, not a
 hardened token library. For production use Biscuit v3.3 via `biscuit-auth`
@@ -82,6 +90,8 @@ class Block:
 
         Domain-separated so a block signature can never be replayed as some other
         kind of signature over the same bytes.
+
+        verified-by: tests/test_taper.py::TestChain::test_block_signatures_are_domain_separated
         """
         body = {
             "i": self.index,
@@ -180,6 +190,7 @@ class Token:
             raise ChainError(f"attenuation would widen authority: {reason}")
 
         # TTL narrows monotonically: a child can never outlive its parent.
+        # verified-by: tests/test_taper.py::TestCannotWiden::test_ttl_narrows_monotonically
         requested = now + ttl_seconds if ttl_seconds is not None else last.not_after
         not_after = min(requested, last.not_after)
 
@@ -213,6 +224,8 @@ class Token:
     def revocation_ids(self) -> list[str]:
         """One id per block. Revoking a parent id must revoke every derived token,
         which is why each block contributes an id and the checker matches ANY.
+
+        verified-by: tests/test_taper.py::TestChain::test_revoking_a_parent_kills_every_child
         """
         return [_b64(b.hash())[:24] for b in self.blocks]
 
@@ -221,6 +234,9 @@ class Token:
     def serialize(self) -> str:
         """Wire format. Deliberately omits the ephemeral private key: a token
         you hand to a subagent over a socket cannot be attenuated by you again.
+
+        verified-by: tests/test_taper.py::TestChain::test_serialized_token_cannot_be_attenuated_by_the_receiver
+        verified-by: tests/test_taper.py::TestChain::test_serialization_roundtrip_preserves_caps
         """
         return _b64(json.dumps({"b": [b.to_json() for b in self.blocks]},
                                separators=(",", ":")).encode())
@@ -249,6 +265,10 @@ def verify(token: Token,
       6. (strict) each block narrows its parent
 
     Raises ChainError on any failure. There is no partial success.
+
+    verified-by: tests/test_taper.py::TestChain::test_wrong_root_key_is_rejected
+    verified-by: tests/test_taper.py::TestChain::test_expiry
+    verified-by: tests/test_taper.py::TestCannotWiden::test_depth_is_bounded
     """
     now = time.time() if now is None else now
     revoked = revoked or set()

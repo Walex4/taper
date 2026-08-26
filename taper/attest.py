@@ -14,6 +14,8 @@ exchange reported it, and a layer that cannot report never appears. There is
 deliberately no way to add a layer by assertion: `confirmed_layers` reads the
 plan and the execution result and nothing else, so an adapter cannot smuggle a
 claim in through `detail`.
+verified-by: tests/test_taper.py::TestEnforcedBy::test_no_adapter_hardcodes_enforced_by
+verified-by: tests/test_taper.py::TestEnforcedBy::test_plans_with_no_argv_claim_nothing
 
 WHY `sshd:force-command` IS NOT IN HERE
 
@@ -50,6 +52,10 @@ def shim_report(result: Any) -> Optional[dict]:
 
     Fails closed at every step: unparseable, wrong type, or missing the keys the
     shim always sends means we learned nothing and claim nothing.
+
+    verified-by: tests/test_taper.py::TestEnforcedBy::test_a_forged_reply_that_is_not_the_shims_shape_confirms_nothing
+    verified-by: tests/test_taper.py::TestEnforcedBy::test_a_target_that_never_answered_confirms_nothing_remote
+    verified-by: tests/test_taper.py::TestEnforcedBy::test_a_shim_refusal_still_confirms_the_host_allowlist
     """
     stdout = getattr(result, "stdout", None)
     if not isinstance(stdout, str) or not stdout.strip():
@@ -88,6 +94,8 @@ def confirmed_layers(plan: Any, result: Any) -> list[str]:
         # Anything that is not an explicit "applied" is not confinement. The
         # current shim says `available(abi=N) NOT_APPLIED`, which fails this
         # test, and will pass it unchanged once it applies a ruleset.
+        # verified-by: tests/test_taper.py::TestEnforcedBy::test_only_an_explicit_applied_counts
+        # verified-by: tests/test_taper.py::TestEnforcedBy::test_landlock_is_absent_while_the_shim_reports_not_applied
         if str(report.get("landlock", "")).startswith("applied"):
             layers.append(KERNEL_LANDLOCK)
 

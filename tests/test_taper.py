@@ -224,6 +224,19 @@ class TestChain:
         with pytest.raises(ChainError, match="bad signature"):
             verify(token, root.public_key(), now=NOW)
 
+    def test_block_signatures_are_domain_separated(self, root, broad_caps):
+        """The domain tag is not decoration: without it, a signature over these
+        exact bytes made for some other purpose would verify as a block."""
+        token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
+        block = token.blocks[0]
+        prefix = b"\x00taper-block\x00"
+        assert block.payload().startswith(prefix)
+
+        # The same body, signed by the same key, without the tag.
+        block.signature = root.sign(block.payload()[len(prefix):])
+        with pytest.raises(ChainError):
+            verify(token, root.public_key(), now=NOW)
+
     def test_wrong_root_key_is_rejected(self, root, broad_caps):
         token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
         other = Ed25519PrivateKey.generate()
@@ -438,6 +451,22 @@ class TestAdapters:
                              "path": "/x"}, {})
         assert plan.secret_refs == {}
         assert plan.detail["credential_bound_to_host"] is None
+
+    def test_no_adapter_resolves_a_secret(self):
+        """Plans are safe to log verbatim only because no adapter is able to put
+        a credential in one: references are resolved in the executor, which is
+        the single place a real credential is ever in scope. Structural, by AST,
+        so a docstring saying so cannot satisfy the test that checks it."""
+        import ast
+
+        for source_file in Path(adapters.__file__).parent.glob("*.py"):
+            tree = ast.parse(source_file.read_text(), filename=str(source_file))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                target = node.func
+                if isinstance(target, ast.Attribute) and target.attr == "require":
+                    pytest.fail(f"{source_file.name}: resolves a secret at plan time")
 
     def test_plan_redaction_omits_statement_text(self):
         plan = PostgresAdapter().plan(

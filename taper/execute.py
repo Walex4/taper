@@ -5,10 +5,18 @@ time control reaches here; this file's job is to do exactly what the plan says
 and nothing more.
 
 Three invariants, each enforced by a test:
+
   * `shell=False` always, and argv is always a list
+    verified-by: tests/test_integration.py::TestExecutor::test_runs_a_plan_without_a_shell
+    verified-by: tests/test_taper.py::TestAdapters::test_no_adapter_can_produce_a_shell_string
+    verified-by: tests/test_taper.py::TestAdapters::test_every_adapter_returns_a_list_for_argv
+
   * the credential is written to a file descriptor or a session, never to a
     command line (argv is world-readable via /proc on Linux)
+    verified-by: tests/test_integration.py::TestExecutor::test_the_credential_never_reaches_the_command_line
+
   * a timeout is always set, so a hung target cannot pin the broker
+    verified-by: tests/test_integration.py::TestExecutor::test_timeout_is_enforced
 """
 
 from __future__ import annotations

@@ -11,6 +11,10 @@ config file owned by root on the target host. That is not redundancy for its own
 sake: it means a compromised broker still cannot run arbitrary programs here.
 The two policies are written by different people, at different times, and stored
 on different machines. A single compromise breaks one, not both.
+verified-by: tests/test_integration.py::TestShim::test_program_not_in_host_allowlist_is_refused
+verified-by: tests/test_integration.py::TestShim::test_argument_not_in_host_allowlist_is_refused
+verified-by: tests/test_integration.py::TestShim::test_shell_metacharacters_refused_by_the_host_too
+verified-by: tests/test_integration.py::TestShim::test_unknown_field_is_refused
 
 Install (on the target host):
     sudo bash scripts/install-shim.sh [ALLOWLIST]
@@ -72,6 +76,10 @@ def load_allowlist() -> dict:
     everything" when config is absent is how sandboxes become decorative —
     see the 2026 Antigravity escape, where an `(allow default)` profile was
     bypassed entirely.
+
+    verified-by: tests/test_integration.py::TestShim::test_missing_allowlist_fails_closed
+    verified-by: tests/test_integration.py::TestShim::test_empty_allowlist_refuses_everything
+    verified-by: tests/test_integration.py::TestShim::test_malformed_json_is_refused
     """
     if not ALLOWLIST.is_file():
         fail(f"no allowlist at {ALLOWLIST}; refusing to run")
@@ -121,6 +129,7 @@ FS_IOCTL_DEV = 1 << 15      # ABI 5
 # kernel returns EINVAL if a rule for a non-directory asks for any of them. A
 # path like /dev/null or /etc/gitconfig is a perfectly reasonable thing to name
 # in an allowlist, so the mask is narrowed per path rather than forbidden.
+# verified-by: tests/test_integration.py::TestLandlock::test_a_file_can_be_named_in_the_ruleset
 FILE_RIGHTS = FS_EXECUTE | FS_WRITE_FILE | FS_READ_FILE | FS_TRUNCATE | FS_IOCTL_DEV
 
 GRANTS = {
@@ -194,6 +203,9 @@ def _normalize(config) -> dict[str, int]:
 
     The list shorthand grants no write anywhere, which is the right default for
     a build runner and the wrong one to have to remember to ask for.
+
+    verified-by: tests/test_integration.py::TestLandlock::test_the_list_shorthand_grants_no_write_anywhere
+    verified-by: tests/test_integration.py::TestLandlock::test_an_unknown_grant_is_refused_rather_than_ignored
     """
     if isinstance(config, list):
         config = {"read": config, "execute": config}
@@ -225,6 +237,12 @@ def apply_landlock(config) -> str:
     refuses the request rather than running the program unconfined. Silently
     degrading to "no sandbox" is how a sandbox becomes decorative, which is the
     same failure load_allowlist() refuses above.
+
+    verified-by: tests/test_integration.py::TestLandlock::test_a_write_outside_the_ruleset_is_refused_by_the_kernel
+    verified-by: tests/test_integration.py::TestLandlock::test_a_ruleset_that_cannot_be_applied_refuses_the_request
+    verified-by: tests/test_integration.py::TestLandlock::test_an_empty_ruleset_is_refused
+    verified-by: tests/test_integration.py::TestLandlock::test_an_unconfigured_shim_claims_nothing
+    verified-by: tests/test_taper.py::TestEnforcedBy::test_landlock_appears_only_once_the_shim_reports_applied
     """
     if config is None:
         # Nothing asked for. Report the kernel's capability so an operator can

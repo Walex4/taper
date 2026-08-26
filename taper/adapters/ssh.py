@@ -18,6 +18,7 @@ What is actually enforced, and by whom:
 
 None of the above is asserted by this file. Each layer is named in the audit
 record only if it reported itself during the exchange — see taper/attest.py.
+verified-by: tests/test_taper.py::TestEnforcedBy::test_no_adapter_hardcodes_enforced_by
 
 Note `restrict` is the deny-all baseline and you should still not assume it is
 complete: OpenSSH 10.5 (2026-08-11) fixed `restrict` not applying to tunnel
@@ -27,6 +28,8 @@ when given too many arguments. Defence in depth is not optional here.
 The remote program never appears in argv at all: `-s` selects the subsystem, and
 the program and its arguments go to the shim as JSON on stdin. There is no
 interpolation anywhere in this file.
+verified-by: tests/test_taper.py::TestAdapters::test_ssh_plan_is_argv_and_disables_proxycommand
+verified-by: tests/test_taper.py::TestOperations::test_shell_metacharacters_cannot_be_represented
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ from .base import Adapter, ExecPlan
 
 # Options that make the client refuse to do anything clever on our behalf.
 # ProxyCommand/LocalCommand are the classic escapes; disable them explicitly.
+# verified-by: tests/test_taper.py::TestAdapters::test_ssh_plan_is_argv_and_disables_proxycommand
 HARDENING = [
     "-o", "BatchMode=yes",
     "-o", "ClearAllForwardings=yes",

@@ -156,7 +156,7 @@ Four layers, and they check different things:
 
 | Command | Checks | Needs |
 |---|---|---|
-| `pytest` | the code does what you meant — 81 tests | nothing |
+| `pytest` | the code does what you meant — 124 tests | nothing |
 | `python validate/redteam.py` | the system refuses what someone *else* meant — 59 attacks | nothing |
 | `bash scripts/preflight.sh` | this machine can host a broker safely | nothing |
 | `python validate/check_postgres.py <dsn>` | **the database refuses on its own** | a real Postgres |
@@ -170,6 +170,29 @@ yourself answers a different and much friendlier question. It exits 2, not 0, wh
 there is no socket to test: a missing boundary and a passing one are not the same
 answer. `TestCannotWiden` is the unit-test
 class that matters: if anything in it fails, the design is broken, not the code.
+
+### Claims name the test that proves them
+
+Any comment or docstring in `taper/` asserting that something is enforced,
+guaranteed, or invariant carries the pytest node id that proves it:
+
+```python
+# TTL narrows monotonically: a child can never outlive its parent.
+# verified-by: tests/test_taper.py::TestCannotWiden::test_ttl_narrows_monotonically
+```
+
+`tests/test_verified_by.py` walks the source, extracts every reference, and fails
+if the named test is not collected — so renaming a test out from under a claim
+breaks the build instead of quietly orphaning the claim.
+
+This exists because prose is not executable and nobody diffs a docstring against
+the suite. Three claims in this repo were false at the same time: `enforced_by`
+naming `kernel:landlock` before Landlock was implemented, an enforcement table
+citing seccomp that appears nowhere in the repo, and "three invariants, each
+enforced by a test" with two tests. The lint cannot tell whether the named test
+*proves* the claim — nothing mechanical can, and pretending otherwise would be
+the same mistake one level up. It closes the narrower hole: the test named was
+never there, or stopped being there.
 
 The red team is not decoration. On its first run it found four live bypasses —
 stacked statements classifying as `SELECT`, the real pgAdmin backslash payload
