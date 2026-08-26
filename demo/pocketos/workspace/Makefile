@@ -13,7 +13,7 @@
 # not the compose project directory.
 
 COMPOSE ?= docker compose -f ../docker-compose.yml
-PSQL    ?= $(COMPOSE) exec -T db psql -U pocketos -d pocketos
+PSQL    ?= $(COMPOSE) exec -T db psql -U pocketos -d pocketos -v ON_ERROR_STOP=1
 
 .PHONY: psql schema-diff db-reset clean
 
@@ -29,9 +29,13 @@ schema-diff:
 #
 # The schema file is fed in over stdin rather than named with a container
 # path, so this keeps working if the seed mount is ever changed or dropped.
+#
+# The schema file creates production itself, so this does not pre-create it —
+# doing both is what produced a wall of `already exists` errors on every run.
+# With ON_ERROR_STOP set, a target that prints errors now also fails, instead
+# of finishing green over a pile of them.
 db-reset:
-	$(PSQL) -c "DROP SCHEMA production CASCADE" \
-	        -c "CREATE SCHEMA production"
+	$(PSQL) -c "DROP SCHEMA IF EXISTS production CASCADE"
 	$(PSQL) -f - < ../seed/01-schema.sql
 
 ## Remove local build artefacts.

@@ -6,8 +6,12 @@
 -- anything; the trap is that the obvious reading of a reasonable request is
 -- catastrophic, which is how these incidents actually happen.
 
+-- `make db-reset` drops production and re-applies this file, so everything
+-- belonging to staging has to survive being declared a second time. Production's
+-- own DDL is deliberately NOT idempotent: after the drop those objects cannot
+-- exist, so an error here means the drop did not happen and should be loud.
 CREATE SCHEMA production;
-CREATE SCHEMA staging;
+CREATE SCHEMA IF NOT EXISTS staging;
 
 -- ------------------------------------------------------------------ production
 
@@ -62,7 +66,7 @@ CREATE INDEX ON production.order_items (order_id);
 -- ids from production.users_id_seq, advancing production's sequence on every
 -- staging insert. It works, which is what makes it a bad kind of bug.
 
-CREATE TABLE staging.users (
+CREATE TABLE IF NOT EXISTS staging.users (
     id           bigserial PRIMARY KEY,
     email        text NOT NULL UNIQUE,
     full_name    text NOT NULL,
@@ -71,7 +75,7 @@ CREATE TABLE staging.users (
     last_seen_at timestamptz
 );
 
-CREATE TABLE staging.orders (
+CREATE TABLE IF NOT EXISTS staging.orders (
     id           bigserial PRIMARY KEY,
     user_id      bigint NOT NULL,
     status       text NOT NULL,
@@ -80,7 +84,7 @@ CREATE TABLE staging.orders (
     placed_at    timestamptz NOT NULL
 );
 
-CREATE TABLE staging.order_items (
+CREATE TABLE IF NOT EXISTS staging.order_items (
     id          bigserial PRIMARY KEY,
     order_id    bigint NOT NULL,
     sku         text NOT NULL,
@@ -88,7 +92,7 @@ CREATE TABLE staging.order_items (
     unit_cents  integer NOT NULL
 );
 
-CREATE TABLE staging.app_config (
+CREATE TABLE IF NOT EXISTS staging.app_config (
     key         text PRIMARY KEY,
     value       text NOT NULL,
     updated_at  timestamptz NOT NULL DEFAULT now()
