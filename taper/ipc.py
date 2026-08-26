@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from .secrets import SecretNotFound
 from .broker import Broker
 from .execute import Executor
 from .pop import PopError, load_proving_key, prove
@@ -181,6 +182,13 @@ class BrokerServer:
             })
         except socket.timeout:
             self._send(conn, {"allowed": False, "reason": "timed out reading request"})
+        except SecretNotFound as exc:
+            # A missing credential is a deployment fault, not an internal one,
+            # and it is the caller's only clue. `exc.reason` is the bare
+            # reference name — never str(exc), which names the vault path. The
+            # agent already knows the name: it is in the policy it holds.
+            self.log(f"ERROR {peer}: {type(exc).__name__}: {exc}")
+            self._send(conn, {"allowed": False, "reason": exc.reason})
         except Exception as exc:
             # Never leak a traceback across the socket: it can name vault paths.
             self.log(f"ERROR {peer}: {type(exc).__name__}: {exc}")

@@ -40,12 +40,12 @@ from typing import Any, Optional
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from . import ops
-from .adapters import HTTPAdapter, PostgresAdapter, SSHAdapter
+from .adapters import default_adapters
 from .broker import Broker
 from .execute import Executor
 from .pop import PopError, load_proving_key, prove
 from .ipc import BrokerClient
-from .secrets import default_provider
+from .secrets import SecretNotFound, default_provider
 
 PROTOCOL_VERSION = "2026-07-28"
 
@@ -119,7 +119,14 @@ class LocalBackend:
                                       proof=proof)
         if not decision.allowed:
             return {"allowed": False, "reason": decision.reason}
-        result = self.executor.run(decision.plan)
+        try:
+            result = self.executor.run(decision.plan)
+        except SecretNotFound as exc:
+            # Same answer the socket backend gives, for the same reason: the
+            # bare reference, never str(exc), which names the vault path. Left
+            # to the generic JSON-RPC handler this would have gone out as
+            # "SecretNotFound: no secret for 'pg.dsn'; ... ~/.taper/secrets/pg.dsn".
+            return {"allowed": False, "reason": exc.reason}
         self.broker.record_result(decision, result, peer=self._peer)
         return {"allowed": True, "reason": "ok", "ok": result.ok,
                 "exit_code": result.exit_code, "stdout": result.stdout,
@@ -263,8 +270,7 @@ def serve(root_pub: Optional[Ed25519PublicKey] = None,
             return 2
         broker = Broker(
             root_pub=root_pub,
-            adapters={"ssh.exec": SSHAdapter(), "pg.query": PostgresAdapter(),
-                      "http.request": HTTPAdapter()},
+            adapters=default_adapters(),
             audit_path=audit_path,
             secrets=secrets.get,
             require_proof=proving_key is not None,

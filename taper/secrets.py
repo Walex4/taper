@@ -17,7 +17,34 @@ from typing import Optional, Protocol
 
 
 class SecretNotFound(KeyError):
-    pass
+    """A secret reference could not be resolved to a value.
+
+    Carries the bare `ref` separately from the message. The message names vault
+    paths and is for the operator's own log; the ref is the only part safe to
+    put on the wire. `reason` is what a caller may be told: the agent already
+    knows the reference name — it is in the policy it was granted — so naming
+    it discloses nothing and turns an afternoon of tracing into a one-line fix.
+    """
+
+    prefix = "secret not provisioned"
+
+    def __init__(self, message: str, ref: str | None = None):
+        super().__init__(message)
+        self.ref = ref
+
+    @property
+    def reason(self) -> str:
+        return f"{self.prefix}: {self.ref}" if self.ref else self.prefix
+
+
+class SecretUnreadable(SecretNotFound):
+    """The secret exists but cannot be used — wrong mode, unreadable file.
+
+    Distinct from missing: telling an operator a secret is "not provisioned"
+    when it is sitting there at mode 644 sends them to the wrong fix.
+    """
+
+    prefix = "secret unusable"
 
 
 class Provider(Protocol):
@@ -56,15 +83,16 @@ class FileProvider:
         # Reference names are used as filenames — reject anything that could
         # escape the directory before touching the filesystem.
         if "/" in ref or ".." in ref or ref.startswith("."):
-            raise SecretNotFound(f"unsafe secret reference: {ref!r}")
+            raise SecretNotFound(f"unsafe secret reference: {ref!r}", ref=ref)
         path = self.dir / ref
         if not path.is_file():
             return None
         mode = path.stat().st_mode & 0o077
         if mode:
-            raise SecretNotFound(
+            raise SecretUnreadable(
                 f"{path} is readable by others (mode {oct(path.stat().st_mode & 0o777)}); "
-                f"run: chmod 600 {path}"
+                f"run: chmod 600 {path}",
+                ref=ref,
             )
         return path.read_text().strip()
 
@@ -112,7 +140,8 @@ class ChainProvider:
         if value is None:
             raise SecretNotFound(
                 f"no secret for {ref!r}; add it with "
-                f"`taper secret set {ref}` or place it in ~/.taper/secrets/{ref}"
+                f"`taper secret set {ref}` or place it in ~/.taper/secrets/{ref}",
+                ref=ref,
             )
         return value
 

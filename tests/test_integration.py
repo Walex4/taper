@@ -860,6 +860,11 @@ def vault(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "HOME", home)
     monkeypatch.setattr(cli, "SECRETS", home / "secrets")
     monkeypatch.setattr(cli, "CA", home / "ca")
+    # A successful renewal clears the failure marker, and the marker is an
+    # absolute path in /run. Without this, running the test suite on a machine
+    # with a real broker silently clears a real operational alarm — a test with
+    # a side effect on production state, which is worse than the bug it covers.
+    monkeypatch.setattr(cli, "CERT_RENEW_FAILED", home / "cert-renew-FAILED")
     return home
 
 
@@ -907,6 +912,32 @@ class TestCertRenew:
         assert "taper-agent" in shown
 
     @needs_ssh_keygen
+    @needs_ssh_keygen
+    def test_a_successful_renewal_clears_the_failure_marker(self, vault):
+        """The alarm has to be able to turn itself off. One transient failure
+        wrote the marker and nothing ever removed it, so doctor reported FAILED
+        through four successful runs and a real renewal."""
+        _make_ca(vault)
+        marker = cli.CERT_RENEW_FAILED
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("")
+        assert marker.exists()
+
+        assert cli.main(["cert", "renew", "--minutes", "60"]) == 0
+        assert not marker.exists(), "a successful renewal left the alarm standing"
+
+    def test_a_renewal_that_does_nothing_leaves_the_marker_alone(self, vault):
+        """--if-expiring-within returns 0 having renewed nothing. That is not a
+        recovery, and clearing on it would silence a genuinely failing renewal
+        every time the certificate still happened to have life left."""
+        _make_ca(vault)
+        assert cli.main(["cert", "renew", "--minutes", "60"]) == 0
+
+        marker = cli.CERT_RENEW_FAILED
+        marker.write_text("")
+        assert cli.main(["cert", "renew", "--if-expiring-within", "20"]) == 0
+        assert marker.exists(), "cleared the alarm without renewing anything"
+
     def test_the_lifetime_is_what_was_asked_for(self, vault):
         """Measured from now, not from the certificate's own start time:
         ssh-keygen rounds the start down to a minute boundary, so the nominal
@@ -1176,6 +1207,83 @@ class TestMintHint:
         assert "it is in the broker's vault" in out
         assert "sudo -u taper-broker" in out
         assert "no root key — run: taper init" not in out
+
+    def test_doctor_names_policy_secrets_the_vault_lacks(
+            self, tmp_path, monkeypatch, capsys):
+        """A grant that verifies is not a grant that works. Every permitted
+        SELECT failed against an empty vault, and the only clue an operator got
+        was "internal error" on the far side of a socket. Doctor is asked which
+        secrets a policy references and which of them are actually here."""
+        home = tmp_path / "home"
+        (home / "secrets").mkdir(parents=True)
+        for name, value in [("HOME", home), ("ROOT_KEY", home / "root.key"),
+                            ("SECRETS", home / "secrets"),
+                            ("AUDIT", home / "audit.jsonl")]:
+            monkeypatch.setattr(cli, name, value)
+        monkeypatch.setattr(cli, "broker_vault", lambda *a, **k: None)
+        monkeypatch.setattr(cli, "broker_socket", lambda: tmp_path / "absent.sock")
+        # The vault doctor consults must be the one being monkeypatched, not
+        # the developer's real ~/.taper/secrets.
+        import taper.secrets as secrets_module
+        monkeypatch.setattr(secrets_module, "default_provider",
+                            lambda: ChainProvider(FileProvider(home / "secrets")))
+
+        policy = tmp_path / "policy.json"
+        policy.write_text(json.dumps({
+            "capabilities": {"pg.query": {"database": {"kind": "one_of",
+                                                       "values": ["pocketos"]}}}}))
+
+        cli.cmd_doctor(argparse.Namespace(policy=[str(policy)]))
+        out = capsys.readouterr().out
+        assert "pg.dsn" in out                       # names the reference
+        assert "taper secret set pg.dsn" in out      # and the one-line fix
+
+        # Provision it, and the same check goes green.
+        (home / "secrets" / "pg.dsn").write_text("postgresql://x/y")
+        (home / "secrets" / "pg.dsn").chmod(0o600)
+        cli.cmd_doctor(argparse.Namespace(policy=[str(policy)]))
+        out = capsys.readouterr().out
+        assert "referenced but not in this vault" not in out
+
+    def test_doctor_compares_the_socket_owner_against_the_agent_not_the_invoker(
+            self, tmp_path, monkeypatch, capsys):
+        """Run as taper-broker — the documented way, because that is where the
+        vault is — the old check compared the socket's owner against the
+        invoking uid, matched trivially, and reported "no separation" on a
+        correctly split install. A warning guaranteed to fire on the supported
+        path is one people learn to scroll past."""
+        home = tmp_path / "home"
+        (home / "secrets").mkdir(parents=True)
+        for name, value in [("HOME", home), ("ROOT_KEY", home / "root.key"),
+                            ("SECRETS", home / "secrets"),
+                            ("AUDIT", home / "audit.jsonl")]:
+            monkeypatch.setattr(cli, name, value)
+        monkeypatch.setattr(cli, "broker_vault", lambda *a, **k: None)
+        monkeypatch.setattr(cli, "CERT_RENEW_FAILED", home / "no-marker")
+
+        sock = tmp_path / "broker.sock"
+        sock.write_text("")                      # stands in for the socket
+        sock.chmod(0o660)
+        monkeypatch.setattr(cli, "broker_socket", lambda: sock)
+        monkeypatch.setattr(cli, "_username", lambda uid: f"uid{uid}")
+
+        invoker = os.getuid()                    # doctor is running AS the owner
+        assert sock.stat().st_uid == invoker
+
+        # The agent is somebody else: separation holds, and doctor must say so
+        # even though the socket is owned by the uid asking the question.
+        monkeypatch.setattr(cli, "_agent_uids", lambda explicit, gid: {invoker + 1})
+        cli.cmd_doctor(argparse.Namespace())
+        out = capsys.readouterr().out
+        assert "separate uids" in out
+        assert "not actually out of reach" not in out
+
+        # The agent IS the socket's owner: that is the real thing being warned
+        # about, and it must still fire.
+        monkeypatch.setattr(cli, "_agent_uids", lambda explicit, gid: {invoker})
+        cli.cmd_doctor(argparse.Namespace())
+        out = capsys.readouterr().out
+        assert "not actually out of reach" in out
 
     def test_doctor_looks_where_the_broker_actually_listens(
             self, tmp_path, monkeypatch, capsys):

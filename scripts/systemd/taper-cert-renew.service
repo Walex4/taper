@@ -31,7 +31,14 @@ ExecStart=/home/oooye/taper/.venv/bin/taper cert renew --if-expiring-within 20 -
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/taper-broker/.taper
+# The vault, plus the directory holding the failure marker. ProtectSystem=strict
+# makes everything else read-only, and without /run/taper a successful renewal
+# cannot clear the marker its own OnFailure handler wrote — doctor would report
+# FAILED forever, which is a warning people learn to ignore. Not
+# RuntimeDirectory=taper, for the reason spelled out in the failure unit: that
+# directive would delete /run/taper when this unit stops, taking the broker's
+# live socket with it.
+ReadWritePaths=/home/taper-broker/.taper /run/taper
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

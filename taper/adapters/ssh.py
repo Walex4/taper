@@ -65,6 +65,11 @@ class SSHAdapter(Adapter):
         self.subsystem = subsystem
         self.user = user
 
+    def declared_secret_refs(self) -> set[str]:
+        # Both halves: plan() always names the private key AND the certificate,
+        # so a vault holding only one of them is still broken.
+        return {self.identity_ref, self.identity_ref + ".pub"}
+
     def derive(self, request: dict) -> dict:
         return {
             "host": request["host"],

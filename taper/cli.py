@@ -38,6 +38,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from .audit import AuditLog
 from .caps import caps_from_json, caps_to_json
 from .chain import ChainError, Token, verify
+from .secrets import SecretNotFound, SecretUnreadable
 from .hints import broker_socket, broker_vault, mint_procedure
 
 HOME = Path(os.environ.get("TAPER_HOME", "~/.taper")).expanduser()
@@ -46,6 +47,11 @@ ROOT_PUB = HOME / "root.pub"
 SECRETS = HOME / "secrets"
 CA = HOME / "ca"
 AUDIT = HOME / "audit.jsonl"
+# Written by taper-cert-renew-failed.service, cleared by a renewal that
+# succeeds. In /run, so a reboot clears it too. One name, because a marker
+# written by one component and read by another that spell it differently is
+# a warning nothing can ever turn off.
+CERT_RENEW_FAILED = Path("/run/taper/cert-renew-FAILED")
 # Default under TAPER_HOME so a single-user checkout works with no root. A real
 # deployment sets TAPER_SOCKET=/run/taper/broker.sock, where the directory is
 # owned by the broker user and the socket's group is the agent's.
@@ -411,6 +417,26 @@ def cmd_cert_renew(args) -> int:
     print(f"  valid until {end}  {DIM}({args.minutes}m){OFF}")
     print(f"{DIM}# the broker picks this up on its next request — no restart "
           f"needed, the vault is read per call{OFF}")
+
+    # The alarm has to be able to turn itself off. Every check above has passed,
+    # so whatever the last failure was, it is not true now — and a marker that
+    # only ever gets written makes doctor report FAILED forever, which is a
+    # warning people learn to scroll past. Cleared here rather than in the unit
+    # so a renewal by hand clears it too.
+    #
+    # Best effort on purpose: the certificate IS renewed by this point, and
+    # failing the command over a stale marker would turn a good renewal into a
+    # unit failure that writes the marker straight back.
+    # verified-by: tests/test_integration.py::TestCertRenew::test_a_successful_renewal_clears_the_failure_marker
+    try:
+        CERT_RENEW_FAILED.unlink()
+        print(f"{DIM}# cleared {CERT_RENEW_FAILED}{OFF}")
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"{YELLOW}!{OFF} renewed, but could not clear {CERT_RENEW_FAILED}: "
+              f"{exc} — doctor will keep reporting a failure that is over",
+              file=sys.stderr)
     return 0
 
 
@@ -473,6 +499,56 @@ def cmd_doctor(args) -> int:
         check(not loose, f"{len(list(SECRETS.iterdir()))} secrets, all 0600",
               f"secrets readable by others: {[p.name for p in loose]}")
 
+    # Which credentials a policy needs, against which the vault actually holds.
+    # Without this the first sign of a missing secret is an agent failing at
+    # execution time, on the far side of a socket, with the operator reading a
+    # reason that names no cause. A grant is not usable just because it verifies.
+    # verified-by: tests/test_integration.py::TestMintHint::test_doctor_names_policy_secrets_the_vault_lacks
+    if getattr(args, "policy", None):
+        from .adapters import default_adapters
+        from .secrets import default_provider
+
+        adapters = default_adapters()
+        provider = default_provider()
+        for policy_path in args.policy:
+            path = Path(policy_path).expanduser()
+            try:
+                capabilities = json.loads(path.read_text()).get("capabilities", {})
+            except (OSError, json.JSONDecodeError) as exc:
+                check(False, "", f"cannot read policy {path}: {exc}")
+                continue
+
+            unknown = sorted(set(capabilities) - set(adapters))
+            if unknown:
+                check(False, "", f"{path.name}: no adapter serves {', '.join(unknown)}")
+
+            refs: set[str] = set()
+            for operation in capabilities:
+                if operation in adapters:
+                    refs |= adapters[operation].declared_secret_refs()
+
+            if not refs:
+                print(f"  {DIM}{path.name}: references no secrets{OFF}")
+                continue
+
+            missing, unusable = [], []
+            for ref in sorted(refs):
+                try:
+                    if provider.get(ref) is None:
+                        missing.append(ref)
+                except SecretUnreadable as exc:
+                    unusable.append(f"{ref} ({exc})")
+                except SecretNotFound:
+                    missing.append(ref)
+
+            check(not missing,
+                  f"{path.name}: vault has all {len(refs)} referenced secret(s)",
+                  f"{path.name}: referenced but not in this vault: "
+                  f"{', '.join(missing)} — provision with: "
+                  f"taper secret set {missing[0] if missing else '<ref>'}")
+            for entry in unusable:
+                check(False, "", f"{path.name}: {entry}")
+
     if AUDIT.is_file():
         intact, index = AuditLog(AUDIT).verify()
         check(intact, "audit chain intact", f"audit chain broken at record {index}")
@@ -505,10 +581,16 @@ def cmd_doctor(args) -> int:
     # The renewal timer's failure marker. Not a substitute for the check above:
     # that one asks the certificate, this one reports that a renewal already
     # failed. It lives in /run and is cleared when the broker restarts.
-    marker = Path("/run/taper/cert-renew-FAILED")
+    marker = CERT_RENEW_FAILED
     if marker.exists():
-        check(False, "", f"certificate renewal FAILED (marker at {marker}) — "
-                         f"run: systemctl status taper-cert-renew.service")
+        # The age matters: a marker older than the certificate in the vault is
+        # a failure that has since been recovered from, and saying so is the
+        # difference between an alarm and noise.
+        age = int((time.time() - marker.stat().st_mtime) // 60)
+        check(False, "", f"certificate renewal FAILED {age}m ago (marker at "
+                         f"{marker}) — run: systemctl status "
+                         f"taper-cert-renew.service. A successful `taper cert "
+                         f"renew` clears this.")
 
     # The socket only exists while the broker runs; its absence is not a fault.
     sock = broker_socket()
@@ -517,9 +599,27 @@ def cmd_doctor(args) -> int:
         check(not (mode & 0o007), f"broker socket is {oct(mode)}",
               f"broker socket is world-accessible ({oct(mode)}) — any local user "
               f"can spend your capabilities")
-        if sock.stat().st_uid == os.getuid():
-            print(f"  {YELLOW}!{OFF} the broker runs as you — same uid as the agent, "
-                  f"so the vault is not actually out of reach")
+        # Whether there is separation is a question about the AGENT's uid, not
+        # about whichever uid happens to be running doctor. Comparing against
+        # the invoker made this fire every time doctor was run as taper-broker
+        # — which is the documented way to run it, because that is where the
+        # vault is. A warning that is guaranteed on the supported path is one
+        # people learn to ignore.
+        # verified-by: tests/test_integration.py::TestMintHint::test_doctor_compares_the_socket_owner_against_the_agent_not_the_invoker
+        owner = sock.stat().st_uid
+        agents = _agent_uids(getattr(args, "agent_user", None), sock.stat().st_gid)
+        if agents:
+            shared = sorted(agents & {owner})
+            check(not shared,
+                  f"socket owned by {_username(owner)}, agent is "
+                  f"{', '.join(_username(u) for u in sorted(agents))} — "
+                  f"separate uids",
+                  f"the broker runs as {_username(owner)}, which is also the "
+                  f"agent's uid — the vault is not actually out of reach")
+        else:
+            print(f"  {DIM}cannot tell which uid the agent runs as: no members "
+                  f"in the socket's group ({_groupname(sock.stat().st_gid)}). "
+                  f"Pass --agent-user NAME to check for separation.{OFF}")
     else:
         print(f"  {DIM}no broker socket at {sock} (not running, or in-process "
               f"mode){OFF}")
@@ -532,6 +632,45 @@ def cmd_doctor(args) -> int:
     return 0
 
 
+def _agent_uids(explicit: Optional[str], socket_gid: int) -> set[int]:
+    """Which uid(s) the agent runs as, without asking the running broker.
+
+    `--agent-user` wins when given. Otherwise the socket's own group is the
+    answer: the deployment puts the agent in that group and nothing else, which
+    is what makes mode 0660 a gate rather than decoration (see
+    scripts/setup-broker-user.sh). Supplementary members only — the broker's
+    own primary group does not list it, which is exactly the distinction
+    wanted here.
+    """
+    import grp
+    import pwd
+
+    if explicit:
+        try:
+            return {pwd.getpwnam(explicit).pw_uid}
+        except KeyError:
+            return set()
+    try:
+        members = grp.getgrgid(socket_gid).gr_mem
+    except KeyError:
+        return set()
+    uids = set()
+    for name in members:
+        try:
+            uids.add(pwd.getpwnam(name).pw_uid)
+        except KeyError:
+            continue
+    return uids
+
+
+def _groupname(gid: int) -> str:
+    import grp
+    try:
+        return grp.getgrgid(gid).gr_name
+    except KeyError:
+        return str(gid)
+
+
 def _username(uid: int) -> str:
     try:
         import pwd
@@ -542,7 +681,7 @@ def _username(uid: int) -> str:
 
 def cmd_broker(args) -> int:
     """The trusted half. Run this as the broker user, not as the agent."""
-    from .adapters import HTTPAdapter, PostgresAdapter, SSHAdapter
+    from .adapters import default_adapters
     from .broker import Broker
     from .execute import Executor
     from .ipc import BrokerServer
@@ -568,8 +707,7 @@ def cmd_broker(args) -> int:
     secrets = default_provider()
     broker = Broker(
         root_pub=load_root_public(),
-        adapters={"ssh.exec": SSHAdapter(), "pg.query": PostgresAdapter(),
-                  "http.request": HTTPAdapter()},
+        adapters=default_adapters(),
         audit_path=AUDIT,
         secrets=secrets.get,
     )
@@ -673,6 +811,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_audit)
 
     p = sub.add_parser("doctor", help="check the local setup")
+    p.add_argument("--agent-user", metavar="NAME",
+                   help="the account the agent runs as. Only needed when it "
+                        "cannot be read from the broker socket's group.")
+    p.add_argument("--policy", action="append", metavar="FILE",
+                   help="also check that this policy's secret references are "
+                        "present in the vault (repeatable). Run as the broker "
+                        "user to check the vault that actually serves them.")
     p.set_defaults(func=cmd_doctor)
 
     # "daemon" because that is what it is in a unit file, "broker" because that

@@ -873,3 +873,99 @@ class TestProofOfPossession:
         assert a.startswith(b"\x00taper-pop\x00")
         assert a != canonical(digest, "pg.query",
                               {"host": "h", "program": "git"}, NOW, "n")
+
+
+class TestExecutor:
+    """The SQL execution path, which the adapter tests do not cover.
+
+    Everything above this line tests whether a request is ALLOWED. None of it
+    notices when a permitted request then fails to run — and a read path that
+    never works looks, from outside, exactly like an agent that was never
+    connected to anything.
+    """
+
+    def _run(self, statement="SELECT 1", settings=None):
+        """Run one plan against a fake psycopg, returning what it was asked."""
+        import sys, types
+        executed = []
+
+        class Cursor:
+            description = None
+            rowcount = 0
+
+            def execute(self, sql, params=None):
+                executed.append((sql, params))
+
+            def fetchmany(self, n):
+                return []
+
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        class Conn:
+            def cursor(self): return Cursor()
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        fake = types.ModuleType("psycopg")
+        fake.connect = lambda dsn, connect_timeout=None: Conn()
+        real = sys.modules.get("psycopg")
+        sys.modules["psycopg"] = fake
+        try:
+            from taper.adapters.base import ExecPlan
+            from taper.execute import Executor
+            from taper.secrets import ChainProvider
+
+            class Fixed:
+                def get(self, ref): return "postgresql://user@host/db"
+
+            plan = ExecPlan(kind="sql", secret_refs={"dsn": "pg.dsn"},
+                            detail={"statement_text": statement,
+                                    "session_settings": settings if settings is not None
+                                    else {"statement_timeout": "15000ms"},
+                                    "max_rows": 50})
+            result = Executor(ChainProvider(Fixed())).run(plan)
+        finally:
+            if real is not None:
+                sys.modules["psycopg"] = real
+            else:
+                del sys.modules["psycopg"]
+        return executed, result
+
+    def test_session_settings_bind_rather_than_interpolate(self):
+        """`SET LOCAL x = %s` is a syntax error: Postgres parses SET before any
+        parameter is bound, so it failed at "$1" and aborted the transaction
+        before the permitted statement ran. Every denial still looked right,
+        which is why it survived — only the ALLOWED path was broken."""
+        executed, result = self._run(settings={"statement_timeout": "15000ms",
+                                               "default_transaction_read_only": "on"})
+
+        setting_calls = [(sql, params) for sql, params in executed
+                         if "set_config" in sql or "SET LOCAL" in sql.upper()]
+        assert setting_calls, "session settings were not applied at all"
+
+        for sql, params in setting_calls:
+            assert "SET LOCAL" not in sql.upper(), (
+                f"SET LOCAL cannot take a bound parameter: {sql!r}")
+            assert "set_config" in sql
+            # The name and value are BOUND, not interpolated into the SQL.
+            assert "%s" in sql and params is not None
+            assert params[0] not in sql
+
+        applied = {params[0] for _, params in setting_calls}
+        assert applied == {"statement_timeout", "default_transaction_read_only"}
+        # is_local — the third argument is what makes set_config a SET LOCAL
+        # rather than a session-wide SET that outlives this transaction on a
+        # pooled connection. It is a literal in the SQL, not a bound parameter.
+        assert all(sql.rstrip().rstrip(")").endswith("true")
+                   for sql, _ in setting_calls), setting_calls
+        assert all(len(params) == 2 for _, params in setting_calls)
+        assert result.ok, result.stderr
+
+    def test_the_permitted_statement_actually_runs(self):
+        """The regression in one line: a permitted SELECT must reach the
+        database, not die applying the settings in front of it."""
+        executed, result = self._run(statement="SELECT key FROM production.app_config")
+        assert any(sql == "SELECT key FROM production.app_config"
+                   for sql, _ in executed), executed
+        assert result.ok

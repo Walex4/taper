@@ -10,4 +10,19 @@ from .ssh import SSHAdapter
 from .postgres import PostgresAdapter
 from .http import HTTPAdapter
 
-__all__ = ["ExecPlan", "Adapter", "SSHAdapter", "PostgresAdapter", "HTTPAdapter"]
+
+
+def default_adapters() -> dict[str, Adapter]:
+    """The operation registry, in one place.
+
+    This used to be spelled out identically in cli.py and mcp.py. Two copies of
+    a registry drift, and a doctor that checked a third copy would report on a
+    set of operations the broker does not actually serve.
+    """
+    return {"ssh.exec": SSHAdapter(),
+            "pg.query": PostgresAdapter(),
+            "http.request": HTTPAdapter()}
+
+
+__all__ = ["ExecPlan", "Adapter", "SSHAdapter", "PostgresAdapter", "HTTPAdapter",
+           "default_adapters"]

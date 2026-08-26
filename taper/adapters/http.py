@@ -51,6 +51,12 @@ class HTTPAdapter(Adapter):
         # host -> secret ref. Explicit mapping; no wildcards, no fallback.
         self.credentials = credentials or {}
 
+    def declared_secret_refs(self) -> set[str]:
+        # Only the hosts actually mapped. An unmapped host is not a missing
+        # secret — the adapter deliberately sends that request unauthenticated
+        # rather than borrowing another host's credential.
+        return set(self.credentials.values())
+
     def derive(self, request: dict) -> dict:
         return {
             "method": request["method"],

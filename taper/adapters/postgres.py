@@ -126,6 +126,9 @@ class PostgresAdapter(Adapter):
         self.dsn_ref = dsn_ref
         self.statement_timeout_ms = statement_timeout_ms
 
+    def declared_secret_refs(self) -> set[str]:
+        return {self.dsn_ref}
+
     def derive(self, request: dict) -> dict:
         statement = request["statement"]
         return {

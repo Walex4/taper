@@ -35,6 +35,15 @@ class ExecPlan:
 class Adapter:
     operation: str = ""
 
+    def declared_secret_refs(self) -> set[str]:
+        """Every secret reference this adapter may need, without a request.
+
+        `plan()` names refs for one concrete call; this names them for the
+        adapter as configured, so `taper doctor` can tell an operator a
+        credential is missing BEFORE an agent discovers it at execution time.
+        """
+        return set()
+
     def derive(self, request: dict) -> dict[str, Any]:
         """Map a validated request onto the attributes policy actually constrains.
 

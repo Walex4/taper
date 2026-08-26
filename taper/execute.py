@@ -144,12 +144,23 @@ class Executor:
             with psycopg.connect(dsn, connect_timeout=10) as conn:
                 with conn.cursor() as cur:
                     # Session settings are applied by the BROKER, never requested
-                    # by the agent. `SET LOCAL` so they cannot leak across pooled
+                    # by the agent, and locally so they cannot leak across pooled
                     # connections.
+                    #
+                    # set_config(name, value, is_local=true) rather than
+                    # `SET LOCAL name = %s`. Postgres parses SET before any
+                    # parameter is bound, so the parameterized form is a syntax
+                    # error at "$1" — it aborted the transaction before the
+                    # statement ran, which meant every PERMITTED query failed
+                    # while every denial still looked correct. A read path that
+                    # never works is indistinguishable from an agent that was
+                    # never connected. set_config is the same SET LOCAL and does
+                    # take parameters, so the value stays bound rather than
+                    # interpolated into SQL.
+                    # verified-by: tests/test_taper.py::TestExecutor::test_session_settings_bind_rather_than_interpolate
                     for key, value in settings.items():
-                        cur.execute(
-                            f"SET LOCAL {psycopg.sql.Identifier(key).as_string(conn)} = %s",
-                            (value,))
+                        cur.execute("SELECT set_config(%s, %s, true)",
+                                    (key, str(value)))
                     cur.execute(statement)
                     if cur.description is None:
                         return Result(True, 0, f"{cur.rowcount} rows affected", "")
