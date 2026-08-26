@@ -24,11 +24,20 @@ else
 fi
 
 echo "=== backups ==="
-count=$(ls -1 "$(dirname "$0")/../backups"/pocketos-*.sql.gz 2>/dev/null | wc -l)
-if [ "$count" -eq 0 ]; then
+# Read them from inside the volume, because that is where they are: the same
+# volume as the database, which is what made the incident unrecoverable.
+listing=$(docker compose exec -T backups ls -1t /volume/backups 2>/dev/null \
+          | grep '\.sql\.gz$')
+if [ -z "$listing" ]; then
     echo "  NONE — no backup files"
 else
-    printf "  %s file(s), most recent:\n" "$count"
-    ls -1t "$(dirname "$0")/../backups"/pocketos-*.sql.gz 2>/dev/null | head -3 \
-        | sed 's|.*/|    |'
+    printf "  %s file(s), most recent:\n" "$(echo "$listing" | wc -l)"
+    echo "$listing" | head -3 | sed 's|^|    |'
+fi
+
+echo "=== volume ==="
+if docker volume inspect pocketos_pocketos-data >/dev/null 2>&1; then
+    echo "  pocketos_pocketos-data present (holds pgdata/ AND backups/)"
+else
+    echo "  pocketos_pocketos-data GONE — database and backups together"
 fi

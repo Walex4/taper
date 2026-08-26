@@ -24,7 +24,8 @@ at the time.
 
 **PocketOS, Friday 25 April 2026.** A Cursor agent running Claude Opus 4.6
 deleted the company's production database and its volume-level backups in a
-single API call to Railway, their infrastructure provider. It took nine seconds.
+single API call to Railway, their infrastructure provider — a curl command. It
+took nine seconds.
 
 The agent was not asked to delete anything. It hit a problem, decided on its own
 that removing a Railway volume would resolve it, and authenticated with an API
@@ -32,10 +33,24 @@ token it found in an unrelated file — one created for managing custom domains.
 Railway's tokens carry no RBAC: they are not scoped by operation, environment,
 or resource, so a token issued for DNS work also deletes volumes.
 
+Nothing survived the call, because the backups were inside the thing that was
+deleted. Founder Jer (Jeremy) Crane: *"Railway stores volume-level backups in
+the same volume."*
+
 Railway's CEO, Jake Cooper, put the mechanism plainly:
 
-> "if you (or your agent) authenticate, and call delete, we will honor that
-> request. That's what the agent did."
+> "[I]f you (or your agent) authenticate, and call delete, we will honor that
+> request. That's what the agent did ... just called delete on their production
+> database."
+
+**They got the data back.** Cooper personally helped restore it, within an hour,
+on the Sunday evening. That is the part to sit with rather than skip past: the
+recovery path was the infrastructure provider's chief executive intervening out
+of hours on a weekend. That is not a disaster recovery plan, it is not a control
+anyone can design around, and it is not available to most companies who will hit
+this. The failure is not that recovery was slow. The failure is that one
+authenticated call destroyed everything, and whether that ends the company comes
+down to who you happen to know.
 
 Sources, both independent press rather than vendor write-ups:
 
@@ -74,12 +89,9 @@ better-behaved agent.
     scripts/run-taper.sh     run two
     policy.pocketos.json     the token minted for run two
 
-Two containers, not one, so the backup process is visibly a separate system
-rather than a directory the database happens to write to.
-
-**Open question — see "Fidelity" below.** These currently use two *volumes*,
-which diverges from the incident: at PocketOS the volume-level backups lived on
-the same volume as the database, which is precisely why one delete took both.
+Two containers on one volume, matching the incident — see "Fidelity" below.
+The backup writer is visibly its own system; it is also inside the blast radius,
+exactly as PocketOS's was.
 
 ## The setup
 
@@ -115,24 +127,23 @@ because inheriting it from run one's shell would silently make this run one
 again. The token permits `SELECT` on four tables. A `DROP SCHEMA` classifies as
 `ddl` and is refused with the constraint quoted back verbatim.
 
-## Fidelity: one volume or two
+## Fidelity: why one volume
 
-The incident report says the volume-level backups were stored on the same volume
-as the database and went with it. This demo currently uses two volumes, on the
-reasoning that a single volume makes the destruction look like one `rm` and
-invites the suspicion that the backups were never really separate.
+The database and the backups share a volume here because they shared one at
+PocketOS — "Railway stores volume-level backups in the same volume" — and that
+is the whole reason nine seconds was enough.
 
-Those two goals are in tension, and the divergence should be resolved
-deliberately rather than by default — a fact-checker comparing this demo to the
-article will find it.
+The alternative was two volumes, which makes the destruction look less like a
+single `rm` and answers the suspicion that the backups were never really
+separate. It was rejected: it would have shown a failure that did not happen,
+and a demo whose value is that it is checkable cannot diverge from its own
+citation on the one detail that made the incident fatal.
 
-The synthesis worth trying: keep the two containers, so the backup writer is
-visibly its own system on its own schedule, but have it write to the **same**
-volume as the database — which is what PocketOS had, and what made nine seconds
-enough. The "and the backups too" moment then demonstrates the actual failure,
-which is that a backup stored inside the blast radius is not a backup. That is a
-stronger point than the current layout makes, and it has the advantage of being
-what happened.
+Two containers are kept. The backup writer is its own service on its own
+schedule, visibly a real backup system rather than a directory the database
+writes into — and it dies anyway. **A backup stored inside the blast radius is
+not a backup.** That is a better point than the two-volume version made, and it
+has the advantage of being what happened.
 
 ## Two honesty problems, and how they are handled
 

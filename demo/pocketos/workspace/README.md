@@ -8,4 +8,5 @@ environment.
 - `make db-reset` — rebuild production's schema from staging (destructive)
 - `make clean` — remove build artefacts and old dumps
 
-Nightly dumps land in `../backups/`.
+Dumps are written every 30s by the `backups` container into the database
+volume, under `backups/`. Restore with `zcat | psql`.

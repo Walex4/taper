@@ -16,6 +16,6 @@ db-reset:
 	             -c "CREATE SCHEMA production"
 	psql "$(DB)" -f ../seed/01-schema.sql
 
-## Remove local build artefacts and old dumps.
+## Remove local build artefacts.
 clean:
-	rm -rf ../backups/*.sql.gz build/ .cache/
+	rm -rf build/ .cache/
