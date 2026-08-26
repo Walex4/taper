@@ -212,8 +212,10 @@ Three layers. The design's central commitment is that the broker is never the on
 | Layer                     | Enforced by                                                                                        | Still holds if…                                          |
 |---------------------------|----------------------------------------------------------------------------------------------------|----------------------------------------------------------|
 | **1. Token and policy**   | The broker's constraint arithmetic                                                                 | …the agent is fully compromised                          |
-| **2. The target refuses** | sshd's `force-command` plus a root-owned shim allowlist; PostgreSQL role privileges and forced RLS | …the broker is compromised and issues arbitrary requests |
+| **2. The target refuses** | sshd's `force-command` plus a root-owned shim allowlist, and a Landlock ruleset the shim applies to itself before exec; PostgreSQL role privileges and forced RLS | …the broker is compromised and issues arbitrary requests |
 | **3. The kernel**         | Separate uid, 0700 vault, 0660 socket, `SO_PEERCRED`                                               | …the agent has a shell as its own user                   |
+
+Layer 2's kernel ruleset is built from the `landlock` block in the target's own allowlist — `execute`, `read` and `read_write` lists of absolute paths — and covers the shim and, by inheritance, the program it execs. The path count in the response (`applied(abi=7, paths=4)`) is the number of distinct paths that block names, so a target that has been given a wider ruleset than intended says so in every reply rather than only in a file on that host. `scripts/install-shim.sh` is the deploy step and fails the install if the allowlist has no such block; without one the shim runs the program unconfined and reports `not_configured`.
 
 Each layer is verified by a check that runs without the others present. `check_ssh.sh` attacks sshd directly with the broker removed. `check_postgres.py` connects as the agent role with no broker in the path. `check_isolation.py` runs as the agent's uid and tries to read the vault, follow the socket back to its directory, and ask the broker outright for a credential.
 
@@ -228,14 +230,6 @@ No proof-of-possession binding
 \[design gap\]
 
 The token is a bearer credential. Steal the chain and the current ephemeral private key and you hold the authority. Biscuit has the same property; Tenuo's invariant I6 exists specifically to fix it, by requiring the holder to prove key possession at use. Taper should adopt an equivalent. Until it does, "narrowing-only" bounds what a *delegate* can do, not what a *thief* can do.
-
-Landlock is applied only where the host allowlist asks for it
-
-\[partially closed\]
-
-Was: the shim reported `available(abi=7) NOT_APPLIED`, so policy governed which program ran and nothing governed what it touched. `shim.py` now builds a real ruleset — every access right the running ABI defines, `path_beneath` rules from the allowlist's `landlock` block, `PR_SET_NO_NEW_PRIVS`, then `landlock_restrict_self` before the exec. It fails closed: configured and unappliable refuses the request rather than running unconfined.
-
-What remains. An allowlist with no `landlock` key still runs the program with the shim user's full filesystem access, and says so in its reply rather than pretending otherwise. Writing that block is a deployment step, and until an install has done it this gap is open for that install. `enforced_by` in the audit log distinguishes the two cases without anyone having to ask, which is the point of deriving it — see `taper/attest.py`.
 
 Operations name classes, not object handles
 

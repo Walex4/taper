@@ -13,10 +13,13 @@ The two policies are written by different people, at different times, and stored
 on different machines. A single compromise breaks one, not both.
 
 Install (on the target host):
-    sudo install -m 0755 shim.py /usr/local/libexec/taper-shim
-    sudo install -m 0644 allowlist.json /etc/taper/allowlist.json
+    sudo bash scripts/install-shim.sh [ALLOWLIST]
     # /etc/ssh/sshd_config:
     Subsystem taper-shim /usr/local/libexec/taper-shim
+
+Re-run that script every time this file changes. It is copied onto the target,
+not imported, so an edited repo and a stale installed copy are indistinguishable
+from the broker side until you read the `landlock` field in a response.
 """
 
 from __future__ import annotations

@@ -1,0 +1,12 @@
+{
+  "programs": {
+    "echo": {"path": "/bin/echo", "args": ["hello"]},
+    "git":  {"path": "/usr/bin/git", "args": ["status", "--version"]}
+  },
+  "cwd": "/home/taper-agent",
+  "landlock": {
+    "execute": ["/usr"],
+    "read": ["/etc"],
+    "read_write": ["/home/taper-agent", "/dev/null"]
+  }
+}
