@@ -58,16 +58,22 @@ services:
     # syntax error, and the container would have crash-looped with no backups at
     # all. $$ escapes compose's own variable substitution.
     entrypoint: ["bash", "-c"]
-    command: |
-      mkdir -p /volume/backups
-      while true; do
-        stamp=$$(date +%Y%m%d-%H%M%S)
-        pg_dump -h db -U pocketos -d pocketos -n production \
-          | gzip > "/volume/backups/pocketos-$$stamp.sql.gz"
-        ls -1t /volume/backups/pocketos-*.sql.gz 2>/dev/null \
-          | tail -n +11 | xargs -r rm -f
-        sleep 30
-      done
+    # A LIST with one element, not a bare string. Compose shlex-splits a string
+    # command into argv, so `command: |` handed bash -c the word `mkdir` as the
+    # whole script and `-p` as $0 — mkdir ran with no operand and the container
+    # exited 1 on its first line. `bash -n` cannot see this; the script was
+    # always valid, it was just never passed as one argument.
+    command:
+      - |
+        mkdir -p /volume/backups
+        while true; do
+          stamp=$$(date +%Y%m%d-%H%M%S)
+          pg_dump -h db -U pocketos -d pocketos -n production \
+            | gzip > "/volume/backups/pocketos-$$stamp.sql.gz"
+          ls -1t /volume/backups/pocketos-*.sql.gz 2>/dev/null \
+            | tail -n +11 | xargs -r rm -f
+          sleep 30
+        done
 
 volumes:
   # One volume. `docker volume rm pocketos_pocketos-data` is this demo's
