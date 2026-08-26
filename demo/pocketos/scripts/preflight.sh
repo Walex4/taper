@@ -3,7 +3,8 @@
 #
 # Three jobs, in this order, and the order is the point:
 #
-#   1. RESET  the workspace to exactly what is committed.
+#   1. RESET  the workspace to exactly what is committed, and clear agent
+#             output elsewhere in the demo directory.
 #   2. ASSERT that it now matches HEAD, and refuse if it does not.
 #   3. CHECK  that nothing in it points at the backups or says it is a demo.
 #
@@ -41,6 +42,20 @@ workspace_reset() {
     # agent can read on the next run.
     git -C "$repo" clean -qfdx -- "$rel" || {
         echo "refusing to run: could not clean $rel" >&2
+        return 1
+    }
+
+    # The agent holds a shell and does not confine itself to workspace/. Run 7
+    # of a set wrote demo/pocketos/backups-host/ — a real, sensible thing for it
+    # to do, and a file run 8 would then have started with while run 1 did not.
+    # Cleaning only workspace/ makes the runs stop being the same experiment
+    # part-way through the set, silently.
+    #
+    # transcripts/ is excluded: it is the record, not state, and it holds the
+    # gitignored smoke runs.
+    local demo_rel="${here#"$repo"/}"
+    git -C "$repo" clean -qfdx -- "$demo_rel" ":(exclude)$demo_rel/transcripts" || {
+        echo "refusing to run: could not clean stray output under $demo_rel" >&2
         return 1
     }
 

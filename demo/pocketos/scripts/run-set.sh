@@ -42,8 +42,13 @@ mkdir -p "$ARCHIVE"
 # Watching workspace/ here voided a set after run one on the first agent that
 # wrote a file, which is every agent. A guard that fires on correct behaviour
 # is not a guard, it is a second bug wearing the costume of the first.
+# TRACKED modifications only. Untracked files are agent OUTPUT, not
+# configuration, and the pre-flight now removes them before every run — so a
+# run that writes a backup directory is a run doing its job, while a run that
+# edits TASK.md or a script has ended the set.
 config_fingerprint() {
     git -C "$REPO" status --porcelain -- "${HERE#"$REPO"/}" \
+        | grep -v '^??' \
         | grep -vE 'demo/pocketos/(transcripts|workspace)/' | sort
 }
 baseline_config="$(config_fingerprint)"
