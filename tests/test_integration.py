@@ -183,6 +183,73 @@ class TestExecutor:
         executor = Executor(ChainProvider(FileProvider(tmp_path)))
         assert not executor.run(ExecPlan(kind="telepathy")).ok
 
+    def test_the_credential_never_reaches_the_command_line(self, tmp_path):
+        """Invariant 2 of execute.py: a credential goes to a file descriptor,
+        never to argv.
+
+        Checked from inside the child against /proc/self/cmdline, which is the
+        actual exposure — argv is world-readable there, so any other process on
+        the host can read a key passed as an argument. Asserting on the argv list
+        the test itself built would only prove the test's own arithmetic.
+
+        Both halves matter. The key must be ABSENT from the command line, and it
+        must still have ARRIVED — a bug that delivered nothing would pass an
+        absence check on its own, so the child hashes the file it was handed.
+        """
+        import hashlib
+
+        from taper.adapters.base import ExecPlan
+
+        secret = ("-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                  "unique-marker-8f3a1c7e-not-in-argv\n"
+                  "-----END OPENSSH PRIVATE KEY-----")
+        key_file = tmp_path / "ssh.cert"
+        key_file.write_text(secret)
+        key_file.chmod(0o600)
+
+        # The executor writes the secret with a trailing newline; FileProvider
+        # strips what it reads. This is what should land on disk.
+        expected = hashlib.sha256((secret + "\n").encode()).hexdigest()
+
+        # Reports its own cmdline and what it can see of the identity file. Not
+        # a shell script, and it ignores the flags the executor inserts.
+        probe = tmp_path / "probe"
+        probe.write_text(
+            f"#!{sys.executable}\n"
+            "import hashlib, json, os, pathlib\n"
+            "argv = [a for a in pathlib.Path('/proc/self/cmdline')"
+            ".read_bytes().decode().split(chr(0)) if a]\n"
+            "out = {'argv': argv}\n"
+            "if '-i' in argv:\n"
+            "    path = argv[argv.index('-i') + 1]\n"
+            "    out['identity_path'] = path\n"
+            "    out['identity_mode'] = oct(os.stat(path).st_mode & 0o777)\n"
+            "    out['identity_sha256'] = hashlib.sha256("
+            "pathlib.Path(path).read_bytes()).hexdigest()\n"
+            "print(json.dumps(out))\n")
+        probe.chmod(0o755)
+
+        executor = Executor(ChainProvider(FileProvider(tmp_path)), timeout=30)
+        result = executor.run(ExecPlan(
+            kind="process", argv=[str(probe)],
+            secret_refs={"identity": "ssh.cert"}))
+        assert result.ok, result.stderr
+        seen = json.loads(result.stdout)
+
+        # The key is not on the command line, in whole or in part.
+        assert "unique-marker-8f3a1c7e-not-in-argv" not in result.stdout
+        for argument in seen["argv"]:
+            assert "PRIVATE KEY" not in argument
+            assert "unique-marker" not in argument
+
+        # It arrived anyway, by path, in a file only this user can read.
+        assert seen["identity_sha256"] == expected
+        assert seen["identity_mode"] == "0o600"
+        assert "taper-id-" in seen["identity_path"]
+
+        # And it is gone once the process that needed it has exited.
+        assert not Path(seen["identity_path"]).exists()
+
 
 # ----------------------------------------------------------------- mcp server
 
