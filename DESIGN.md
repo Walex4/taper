@@ -147,9 +147,23 @@ canonicalised as sorted-key, no-whitespace JSON under a `\x00taper-pop\x00` doma
 
 The request is inside the signature, not just the token. Signing the token alone would yield a proof that authorises *any* request from whoever captures it — a smaller hole of the same kind. A proof captured for `git status` is not a proof for anything else.
 
-**Delivery is the whole security benefit, and the easy thing to get wrong.** `taper grant` writes the proving key to a file named on the command line and puts only the token on stdout. If both went to stdout, one `$(taper grant ...)` would capture them into a single variable and the scheme would silently degrade to the bearer one it replaced, with every other test still passing. `--key-file` is therefore required rather than optional, refuses `/dev/stdout` and friends, and creates the file at 0600 by `open(..., 0o600)` rather than write-then-chmod.
+#### The key is delivered separately from the chain
 
-In-process mode (no socket, broker and caller in one memory) turns the check off and says so in its startup banner. There is nothing there for a proof to protect against, and a control that ships quietly disabled is worse than one that is loudly absent.
+This is the whole security benefit, and the easy thing to get wrong. `taper grant <policy> --key-file PATH` writes the proving key to `PATH` and puts **only** the token on stdout; everything else goes to stderr. The two travel on two channels and are read from two files — `mcp-serve.sh` exports `TAPER_TOKEN` from one and `TAPER_KEY_FILE` from the other, the latter a *path*, never key material.
+
+If both went to stdout, one `$(taper grant ...)` would capture them into a single variable and the scheme would degrade to the bearer one it replaced, silently, with every other test still passing. So `--key-file` is required rather than optional — a token minted without one cannot be used, so there is no forgetting it — it refuses `/dev/stdout` and its aliases, and it creates the file with `open(..., 0o600)` rather than write-then-chmod, because between those two calls the key is world-readable and the key is the entire asset. The key reaches neither the audit log, nor `taper inspect`, nor an error message, nor argv.
+
+Steal the chain **and** the key file and you still hold the authority. Proof-of-possession moves the asset rather than removing it. That is the whole of the improvement, and it is a real one: the chain is what leaks — into audit logs, process listings, error text — and it is now worth nothing on its own.
+
+#### Consequence: the proving key is also the delegation key
+
+The final block's ephemeral key now has two roles. It signs the next block, so its holder can delegate; and it signs proofs, so its holder can act. That is coherent with the capability model — anything that can *use* a token can also *delegate* a narrowed one is close to what a capability means — and it is chosen rather than stumbled into.
+
+The cost is that **non-delegable grants become inexpressible.** There is no way to say "this agent may run `git status` but may not hand a subagent the right to." SPKI carries a delegation bit for exactly this distinction and we have no equivalent. Adding one to the block format is the obvious fix if a deployment ever needs it.
+
+The path if the two roles must separate is holder-generated confirmation keys (RFC 7800 `cnf`, DPoP-style): the holder generates its own keypair and mint binds only the public half into the block, so the proving key is never transmitted at all and is unrelated to the block-signing key. That is strictly stronger than what is here, and this design does not block it — a `cnf` field can be added later and take precedence over `next_pub` when present.
+
+In-process mode (no socket, broker and caller in one memory) has nothing for a proof to cross. It signs anyway when `TAPER_KEY_FILE` is set, and its startup banner names which of the two it got: a path that never carries a proof is a path that cannot notice proofs breaking.
 
 ### Constraint algebra
 
@@ -240,18 +254,6 @@ The failure this structure is designed against is the one where a single clever 
 ## Known gaps
 
 Stated here because a design document that lists only strengths is marketing.
-
-The proving key is also the delegation key
-
-\[deliberate choice\]
-
-Proof-of-possession is implemented (§5), so the chain is no longer a bearer credential: a thief who captures it holds nothing without the proving key, which never appears in the chain, on the socket, or on stdout.
-
-The design reuses the final block's ephemeral key for both roles — it signs the next block, and it signs proofs. That is coherent with the capability model: anything that can *use* a token can also *delegate* a narrowed one, which is what a capability is supposed to mean. It is also a real limitation, and chosen rather than stumbled into. **Non-delegable grants become inexpressible.** There is no way to say "this agent may run `git status` but may not hand a subagent the right to". SPKI carries a delegation bit for exactly this distinction; we have no equivalent, and adding one to the block format is the obvious fix if a deployment ever needs it.
-
-The path if the two must separate is holder-generated confirmation keys (RFC 7800 `cnf`, DPoP-style): the holder generates its own keypair and mint binds only the public half into the block, so the proving key is never transmitted at all and is unrelated to the block-signing key. That is strictly stronger than what is here, and this design does not block it — a `cnf` field can be added later and take precedence over `next_pub` when present.
-
-Steal the chain **and** the key file and you still hold the authority. Proof-of-possession moves the asset, it does not remove it; the file is 0600 and does not travel with the token, which is the whole of the improvement.
 
 Operations name classes, not object handles
 
