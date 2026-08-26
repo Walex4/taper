@@ -587,6 +587,22 @@ class TestLandlock:
         assert confirmed_layers(plan, Result(True, 0, json.dumps(out), "")) == [
             "broker:argv", "target:shim-allowlist", "kernel:landlock"]
 
+    @needs_landlock
+    def test_a_file_can_be_named_in_the_ruleset(self, tmp_path):
+        """Landlock returns EINVAL for a non-directory rule that asks for
+        directory rights, so the mask narrows per path. /dev/null and
+        /etc/gitconfig are ordinary things to name in an allowlist — git needs
+        the first one to run at all."""
+        target = tmp_path / "a-file"
+        target.write_text("x")
+        out = run_shim(json.dumps({"program": "echo", "args": ["hello"]}),
+                       {**ECHO_ALLOWLIST,
+                        "landlock": {"execute": _sys_paths(),
+                                     "read_write": [str(target), "/dev/null"]}},
+                       tmp_path)
+        assert out["ok"] is True, out
+        assert out["landlock"].startswith("applied("), out["landlock"]
+
     def test_a_ruleset_that_cannot_be_applied_refuses_the_request(self, tmp_path):
         """Fail closed. Configured-but-broken must never mean unconfined."""
         out = run_shim(json.dumps({"program": "echo", "args": ["hello"]}),

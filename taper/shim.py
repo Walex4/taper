@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -111,6 +112,13 @@ FS_MAKE_SYM = 1 << 12
 FS_REFER = 1 << 13          # ABI 2
 FS_TRUNCATE = 1 << 14       # ABI 3
 FS_IOCTL_DEV = 1 << 15      # ABI 5
+
+# Rights that mean something for a file. The rest — READ_DIR, the MAKE_* and
+# REMOVE_* family, REFER — describe operations on directory entries, and the
+# kernel returns EINVAL if a rule for a non-directory asks for any of them. A
+# path like /dev/null or /etc/gitconfig is a perfectly reasonable thing to name
+# in an allowlist, so the mask is narrowed per path rather than forbidden.
+FILE_RIGHTS = FS_EXECUTE | FS_WRITE_FILE | FS_READ_FILE | FS_TRUNCATE | FS_IOCTL_DEV
 
 GRANTS = {
     "read": FS_READ_FILE | FS_READ_DIR,
@@ -248,8 +256,15 @@ def apply_landlock(config) -> str:
             try:
                 # Mask by `handled`: granting a right the ruleset does not
                 # handle is EINVAL, and on an older kernel some of these bits do
-                # not exist at all.
-                rule = _path_beneath_attr(bits & handled, parent_fd)
+                # not exist at all. Then by FILE_RIGHTS if this is not a
+                # directory, for the same reason.
+                allowed = bits & handled
+                if not stat.S_ISDIR(os.fstat(parent_fd).st_mode):
+                    allowed &= FILE_RIGHTS
+                if not allowed:
+                    fail(f"landlock path {path!r} would be granted nothing; "
+                         f"a non-directory cannot take directory rights")
+                rule = _path_beneath_attr(allowed, parent_fd)
                 if libc.syscall(ctypes.c_long(LANDLOCK_ADD_RULE),
                                 ctypes.c_int(ruleset_fd),
                                 ctypes.c_int(LANDLOCK_RULE_PATH_BENEATH),
