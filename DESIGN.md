@@ -131,9 +131,25 @@ No model decides its own permissions and no model is consulted in the decision p
 
 An append-only chain of blocks. Block *i* carries a capability set and the public half of a freshly generated Ed25519 key pair. Block *i+1* is signed by block *i*'s ephemeral private key, which is destroyed immediately after signing and is never serialized. Verification walks the chain from the root public key forward.
 
+The **final** block's ephemeral private key is the exception: it is not destroyed but handed to the holder, by `taper grant --key-file`, as a 0600 file of its own. It is still never serialized into the chain and never crosses the socket. That key is the holder's proving key.
+
 ### The security property
 
 Effective capability is the **intersection** of every block. Not the last block, not a merge — the intersection. Attenuation is therefore arithmetic rather than trust: a holder can append a block, and appending cannot increase authority because intersection only shrinks. The `subsumes` check that rejects a widening attempt at issue time is a developer guardrail; removing it would produce confusing tokens, not insecure ones.
+
+### Proof of possession
+
+Presenting the chain is not sufficient to use it. Each request carries a proof: an Ed25519 signature, by the final block's ephemeral private key, over
+
+    sha256(serialized chain) ‖ operation ‖ request ‖ ts ‖ nonce
+
+canonicalised as sorted-key, no-whitespace JSON under a `\x00taper-pop\x00` domain tag — the same discipline as `caps.canonical()`, because two encoders that disagree about byte order are two parties that disagree about what was signed. The broker checks it against `blocks[-1].next_pub` **before** any policy arithmetic, rejects a timestamp more than 30s from its own clock, and rejects a repeated nonce within that window from a bounded LRU. A proof failure and a policy denial are deliberately different answers: "you are not the holder" must never be reportable as "you are the holder and may not do this".
+
+The request is inside the signature, not just the token. Signing the token alone would yield a proof that authorises *any* request from whoever captures it — a smaller hole of the same kind. A proof captured for `git status` is not a proof for anything else.
+
+**Delivery is the whole security benefit, and the easy thing to get wrong.** `taper grant` writes the proving key to a file named on the command line and puts only the token on stdout. If both went to stdout, one `$(taper grant ...)` would capture them into a single variable and the scheme would silently degrade to the bearer one it replaced, with every other test still passing. `--key-file` is therefore required rather than optional, refuses `/dev/stdout` and friends, and creates the file at 0600 by `open(..., 0o600)` rather than write-then-chmod.
+
+In-process mode (no socket, broker and caller in one memory) turns the check off and says so in its startup banner. There is nothing there for a proof to protect against, and a control that ships quietly disabled is worse than one that is loudly absent.
 
 ### Constraint algebra
 
@@ -159,9 +175,9 @@ An unrecognized kind raises on deserialization. Unknown means refused, not ignor
 
 **A correction worth making before review**  
 
-The claim "the agent never holds a secret" is false as usually stated and a reviewer will say so. The agent holds the current ephemeral private key — that is what lets it attenuate offline. What it does not hold is the *resource* credential. State it that way.
+The claim "the agent never holds a secret" is false as usually stated and a reviewer will say so. The agent holds the current ephemeral private key — that is what lets it attenuate offline, and now also what lets it prove possession. What it does not hold is the *resource* credential. State it that way.
 
-The consequence is in §9: without proof-of-possession binding, the chain is a bearer credential with all of macaroons' theft properties. Steal the chain and the last ephemeral key, and you have the authority.
+Worth recording that this paragraph was aspirational when written: until proof-of-possession landed, the agent held **no** key at all. `serialize()` omitted it and `deserialize()` set it to `None`, so a holder could neither attenuate nor prove anything, and the chain was a pure bearer credential. The document described the design as intended rather than as built. It is now accurate.
 
 ## The broker
 
@@ -225,11 +241,17 @@ The failure this structure is designed against is the one where a single clever 
 
 Stated here because a design document that lists only strengths is marketing.
 
-No proof-of-possession binding
+The proving key is also the delegation key
 
-\[design gap\]
+\[deliberate choice\]
 
-The token is a bearer credential. Steal the chain and the current ephemeral private key and you hold the authority. Biscuit has the same property; Tenuo's invariant I6 exists specifically to fix it, by requiring the holder to prove key possession at use. Taper should adopt an equivalent. Until it does, "narrowing-only" bounds what a *delegate* can do, not what a *thief* can do.
+Proof-of-possession is implemented (§5), so the chain is no longer a bearer credential: a thief who captures it holds nothing without the proving key, which never appears in the chain, on the socket, or on stdout.
+
+The design reuses the final block's ephemeral key for both roles — it signs the next block, and it signs proofs. That is coherent with the capability model: anything that can *use* a token can also *delegate* a narrowed one, which is what a capability is supposed to mean. It is also a real limitation, and chosen rather than stumbled into. **Non-delegable grants become inexpressible.** There is no way to say "this agent may run `git status` but may not hand a subagent the right to". SPKI carries a delegation bit for exactly this distinction; we have no equivalent, and adding one to the block format is the obvious fix if a deployment ever needs it.
+
+The path if the two must separate is holder-generated confirmation keys (RFC 7800 `cnf`, DPoP-style): the holder generates its own keypair and mint binds only the public half into the block, so the proving key is never transmitted at all and is unrelated to the block-signing key. That is strictly stronger than what is here, and this design does not block it — a `cnf` field can be added later and take precedence over `next_pub` when present.
+
+Steal the chain **and** the key file and you still hold the authority. Proof-of-possession moves the asset, it does not remove it; the file is 0600 and does not travel with the token, which is the whole of the improvement.
 
 Operations name classes, not object handles
 

@@ -2,6 +2,7 @@
 
 Request lifecycle, in order, failing closed at every step:
 
+    0. verify the caller's proof of possession, before anything else is read
     1. verify the capability chain against the root public key
     2. validate the request against the operation's typed schema
     3. derive the policy attributes from the request
@@ -38,6 +39,7 @@ from .adapters import Adapter, ExecPlan
 from .attest import confirmed_layers
 from .audit import AuditLog
 from .caps import Constraint
+from .pop import NonceCache, PopError, verify_proof
 from .chain import ChainError, Token, verify
 
 
@@ -62,21 +64,31 @@ class Broker:
                  audit_path: str | Path = "~/.taper/audit.jsonl",
                  secrets: Optional[Callable[[str], str]] = None,
                  revoked: Optional[set[str]] = None,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time,
+                 require_proof: bool = True):
         self.root_pub = root_pub
         self.adapters = adapters
         self.audit = AuditLog(Path(str(audit_path)).expanduser())
         self._secrets = secrets or (lambda ref: "")
         self.revoked = revoked if revoked is not None else set()
         self.clock = clock
+        # Defaults ON. A proof-of-possession check that ships disabled is a
+        # bearer token with extra steps, and every caller that forgot to turn it
+        # on looks exactly like one that did.
+        self.require_proof = require_proof
+        self.nonces = NonceCache()
 
     # ------------------------------------------------------------------ deciding
 
     def decide(self, token_text: str, operation: str, request: dict,
-               peer: Optional[dict] = None) -> Decision:
+               peer: Optional[dict] = None, proof: Optional[dict] = None) -> Decision:
         """`peer` is the calling process's identity as reported by the kernel
         (see ipc.peer_of), or None when the caller is in-process. It is passed
         down to the audit record so the log names who asked, not who claimed to.
+
+        `proof` is the caller's proof of possession over this exact request. It
+        is checked at step 0, before policy, so that "you are not the holder"
+        can never be reported as "you are the holder and may not do this".
         """
         now = self.clock()
 
@@ -88,6 +100,22 @@ class Broker:
             decision = Decision(False, f"token rejected: {exc}", operation, {})
             self._record(decision, peer)
             return decision
+
+        # 0. Possession, before any policy arithmetic. The chain had to be
+        # parsed first to learn which key to check against — but nothing about
+        # what the token PERMITS has been consulted yet, and nothing will be if
+        # this fails. The reason string is deliberately unlike any denial the
+        # policy layer produces.
+        # verified-by: tests/test_taper.py::TestProofOfPossession::test_a_captured_chain_alone_is_refused
+        if self.require_proof or proof is not None:
+            try:
+                verify_proof(token.holder_public_key(), token_text, operation,
+                             request, proof, self.nonces, now=now)
+            except PopError as exc:
+                decision = Decision(False, str(exc), operation, {},
+                                    token_ids=token.revocation_ids())
+                self._record(decision, peer)
+                return decision
 
         token_ids = token.revocation_ids()
 

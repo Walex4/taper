@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from taper import cli
@@ -24,6 +25,7 @@ from taper.caps import OneOf, Range, Subset
 from taper.chain import Token
 from taper.execute import Executor
 from taper.ipc import BrokerClient
+from taper.pop import PopError, load_proving_key, prove
 from taper.mcp import LocalBackend, Server
 from taper.secrets import ChainProvider, EnvProvider, FileProvider, SecretNotFound
 
@@ -259,7 +261,8 @@ def mcp(tmp_path):
     token = Token.issue(root, CAPS, ttl_seconds=3600, now=NOW)
     broker = Broker(root_pub=root.public_key(),
                     adapters={"ssh.exec": SSHAdapter(), "pg.query": PostgresAdapter()},
-                    audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW)
+                    audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW,
+                    require_proof=False)   # possession is tested separately
     executor = Executor(ChainProvider(FileProvider(tmp_path)))
     backend = LocalBackend(broker, executor)
     return Server(backend, token.serialize(), operations=backend.operations())
@@ -429,7 +432,8 @@ def _run_once(tmp_path, payload):
     token = Token.issue(root, CAPS, ttl_seconds=3600, now=NOW)
     broker = Broker(root_pub=root.public_key(),
                     adapters={"ssh.exec": SSHAdapter()},
-                    audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW)
+                    audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW,
+                    require_proof=False)   # possession is tested separately
     backend = LocalBackend(broker, _StubExecutor(payload))
     reply = backend.call(token.serialize(), "ssh.exec",
                          {"host": "build-1.internal", "program": "git",
@@ -471,7 +475,8 @@ class TestEnforcedByIsLoggedFromTheResult:
         token = Token.issue(root, CAPS, ttl_seconds=3600, now=NOW)
         broker = Broker(root_pub=root.public_key(),
                         adapters={"ssh.exec": SSHAdapter()},
-                        audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW)
+                        audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW,
+                    require_proof=False)   # possession is tested separately
         backend = LocalBackend(broker, _StubExecutor(
             {"ok": True, "exit_code": 0, "stdout": "", "stderr": "",
              "landlock": "available(abi=7) NOT_APPLIED"}))
@@ -486,7 +491,8 @@ class TestEnforcedByIsLoggedFromTheResult:
         token = Token.issue(root, CAPS, ttl_seconds=3600, now=NOW)
         broker = Broker(root_pub=root.public_key(),
                         adapters={"ssh.exec": SSHAdapter()},
-                        audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW)
+                        audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW,
+                    require_proof=False)   # possession is tested separately
         backend = LocalBackend(broker, _StubExecutor({}))
         reply = backend.call(token.serialize(), "ssh.exec",
                              {"host": "prod-db.internal", "program": "git",
@@ -621,3 +627,154 @@ class TestLandlock:
         out = run_shim(json.dumps({"program": "echo", "args": ["hello"]}),
                        {**ECHO_ALLOWLIST, "landlock": []}, tmp_path)
         assert out["ok"] is False and "no paths" in out["error"]
+
+
+# --------------------------------------------------- proving key delivery
+
+POLICY = {"note": "test grant",
+          "capabilities": {"ssh.exec": {
+              "host": {"kind": "one_of", "values": ["build-1.internal"]},
+              "program": {"kind": "one_of", "values": ["git"]},
+              "args": {"kind": "subset", "values": ["status"]}}}}
+
+
+def _grant(tmp_path, monkeypatch, capsys, key_file, ttl="1h"):
+    """Run `taper init` then `taper grant` against a throwaway home.
+
+    Drains capsys between the two so what comes back is the grant's own output
+    and not init's — the whole question here is what `grant` puts on stdout.
+    """
+    home = tmp_path / "home"
+    for name, value in [("HOME", home), ("ROOT_KEY", home / "root.key"),
+                        ("ROOT_PUB", home / "root.pub"),
+                        ("SECRETS", home / "secrets"),
+                        ("AUDIT", home / "audit.jsonl")]:
+        monkeypatch.setattr(cli, name, value)
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+    policy = tmp_path / "policy.json"
+    policy.write_text(json.dumps(POLICY))
+    code = cli.main(["grant", str(policy), "--ttl", ttl, "--key-file", str(key_file)])
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+class TestProvingKeyDelivery:
+    """C's entire benefit is that the key does not travel with the token.
+
+    If both reach stdout, one `$(taper grant ...)` captures them together and
+    the design silently degrades to the bearer scheme it replaced, with every
+    other test still passing. So: separate file, and nothing key-shaped on the
+    channel the token uses.
+    """
+
+    def test_stdout_carries_the_token_and_no_key_material(
+            self, tmp_path, monkeypatch, capsys):
+        key_file = tmp_path / "agent.key"
+        code, out, err = _grant(tmp_path, monkeypatch, capsys, key_file)
+        assert code == 0
+
+        # stdout is exactly one line: the token.
+        lines = [line for line in out.splitlines() if line.strip()]
+        assert len(lines) == 1
+        Token.deserialize(lines[0])                     # parses as a token
+
+        key_pem = key_file.read_text()
+        for stream, label in ((out, "stdout"), (err, "stderr")):
+            assert "PRIVATE KEY" not in stream, f"key material on {label}"
+            assert key_pem not in stream, f"key file contents on {label}"
+            for line in key_pem.splitlines():
+                if line and "-----" not in line:
+                    assert line not in stream, f"key body on {label}"
+
+        # The key went to its own file, at 0600, readable by nobody else.
+        assert key_file.stat().st_mode & 0o777 == 0o600
+        assert "PRIVATE KEY" in key_pem
+        # stderr may name the path — that is the point — but only the path.
+        assert str(key_file) in err
+
+    def test_the_key_file_is_required(self, tmp_path, monkeypatch, capsys):
+        """A token minted without one cannot be used, so it must not be
+        possible to forget."""
+        home = tmp_path / "home"
+        monkeypatch.setattr(cli, "HOME", home)
+        monkeypatch.setattr(cli, "ROOT_KEY", home / "root.key")
+        policy = tmp_path / "policy.json"
+        policy.write_text(json.dumps(POLICY))
+        with pytest.raises(SystemExit):
+            cli.main(["grant", str(policy)])
+
+    @pytest.mark.parametrize("target", ["-", "/dev/stdout", "/dev/stderr"])
+    def test_the_key_cannot_be_aimed_at_a_stream(self, tmp_path, monkeypatch,
+                                                 capsys, target):
+        """--key-file /dev/stdout would undo the whole scheme in one keystroke
+        while looking like it worked."""
+        with pytest.raises(SystemExit):
+            _grant(tmp_path, monkeypatch, capsys, target)
+
+    def test_a_world_readable_key_is_refused_by_the_reader(self, tmp_path,
+                                                           monkeypatch, capsys):
+        key_file = tmp_path / "agent.key"
+        assert _grant(tmp_path, monkeypatch, capsys, key_file)[0] == 0
+        key_file.chmod(0o644)
+        with pytest.raises(PopError, match="readable by others"):
+            load_proving_key(key_file)
+
+    def test_the_key_never_reaches_the_audit_log_or_an_error_message(
+            self, tmp_path, monkeypatch, capsys):
+        """Same discipline as execute.py's credential invariant: the asset must
+        not turn up in the places we look at afterwards."""
+        key_file = tmp_path / "agent.key"
+        code, out, _ = _grant(tmp_path, monkeypatch, capsys, key_file)
+        assert code == 0
+        token_text = [l for l in out.splitlines() if l.strip()][0]
+        key_pem = key_file.read_text()
+        body = [l for l in key_pem.splitlines() if l and "-----" not in l]
+
+        root_pub = serialization.load_pem_public_key(
+            (tmp_path / "home" / "root.pub").read_bytes())
+        broker = Broker(root_pub=root_pub, adapters={"ssh.exec": SSHAdapter()},
+                        audit_path=tmp_path / "audit.jsonl")
+        request = {"host": "build-1.internal", "program": "git", "args": ["status"]}
+        decision = broker.decide(
+            token_text, "ssh.exec", request,
+            proof=prove(load_proving_key(key_file), token_text, "ssh.exec", request))
+        assert decision.allowed, decision.reason
+
+        # 1. the audit log
+        log = (tmp_path / "audit.jsonl").read_text()
+        assert "PRIVATE KEY" not in log
+        for line in body:
+            assert line not in log
+
+        # 2. `taper inspect`
+        assert cli.main(["inspect", token_text]) == 0
+        shown = capsys.readouterr().out
+        assert "PRIVATE KEY" not in shown
+        for line in body:
+            assert line not in shown
+
+        # 3. an error message about the key names the path, not the contents
+        key_file.chmod(0o644)
+        with pytest.raises(PopError) as caught:
+            load_proving_key(key_file)
+        assert str(key_file) in str(caught.value)
+        assert "PRIVATE KEY" not in str(caught.value)
+        for line in body:
+            assert line not in str(caught.value)
+
+    def test_key_material_is_serialized_in_exactly_one_place(self):
+        """Structural, by AST. A second place that can turn a key into bytes is
+        a second place it can leak from."""
+        import ast
+
+        writers = set()
+        for source_file in sorted((ROOT / "taper").rglob("*.py")):
+            tree = ast.parse(source_file.read_text(), filename=str(source_file))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                        and node.func.attr == "private_bytes":
+                    writers.add(source_file.relative_to(ROOT).as_posix())
+        # pop.py writes the proving key; cli.py writes the ROOT key at init.
+        # Those are different assets and both are 0600 files, never streams.
+        assert writers == {"taper/pop.py", "taper/cli.py"}, writers

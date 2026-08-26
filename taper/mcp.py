@@ -100,8 +100,10 @@ class LocalBackend:
     def operations(self) -> list[str]:
         return list(self.broker.adapters)
 
-    def call(self, token: str, operation: str, request: dict) -> dict:
-        decision = self.broker.decide(token, operation, request, peer=self._peer)
+    def call(self, token: str, operation: str, request: dict,
+             proof: Optional[dict] = None) -> dict:
+        decision = self.broker.decide(token, operation, request, peer=self._peer,
+                                      proof=proof)
         if not decision.allowed:
             return {"allowed": False, "reason": decision.reason}
         result = self.executor.run(decision.plan)
@@ -241,11 +243,17 @@ def serve(root_pub: Optional[Ed25519PublicKey] = None,
                       "http.request": HTTPAdapter()},
             audit_path=audit_path,
             secrets=secrets.get,
+            # No socket and no second process: the caller and the broker are the
+            # same memory. A proof would be this process proving something to
+            # itself. Stated here, and in the banner below, rather than left to
+            # be discovered — the socket path keeps the check.
+            require_proof=False,
         )
         backend = LocalBackend(broker, Executor(secrets))
         server = Server(backend, token, operations=backend.operations())
         print("taper mcp server ready on stdio (in-process broker: no uid "
-              "separation, development only)", file=sys.stderr)
+              "separation, no proof of possession, development only)",
+              file=sys.stderr)
     for line in sys.stdin:
         line = line.strip()
         if not line:

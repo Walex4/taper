@@ -18,7 +18,7 @@ Three properties the kernel enforces, not the code:
      identity rather than a claim.
 
 What crosses the socket is thin on purpose: a token, an operation name, typed
-fields. Back comes a result. Never the execution plan (which names secret
+fields, and a proof of possession over exactly those. Back comes a result. Never the execution plan (which names secret
 references), never a credential, and there is no request type that returns one.
 
 SO_PEERCRED is Linux. macOS uses LOCAL_PEERCRED with a different struct; this
@@ -38,6 +38,7 @@ from typing import Callable, Optional
 
 from .broker import Broker
 from .execute import Executor
+from .pop import PopError, load_proving_key, prove
 
 MAX_REQUEST = 256 * 1024
 RECV_TIMEOUT = 120.0
@@ -141,7 +142,7 @@ class BrokerServer:
                 self._send(conn, {"allowed": False, "reason": "request must be an object"})
                 return
 
-            unknown = set(message) - {"token", "operation", "request"}
+            unknown = set(message) - {"token", "operation", "request", "proof"}
             if unknown:
                 self._send(conn, {"allowed": False, "reason": f"unknown fields: {sorted(unknown)}"})
                 return
@@ -160,7 +161,8 @@ class BrokerServer:
                 # identity, not a claim — and it is the same single chained record
                 # that carries the token chain and the redacted plan.
                 decision = self.broker.decide(token, operation, request,
-                                              peer=peer.as_dict())
+                                              peer=peer.as_dict(),
+                                              proof=message.get("proof"))
                 if not decision.allowed:
                     self.log(f"DENY  {peer} {operation}: {decision.reason}")
                     self._send(conn, {"allowed": False, "reason": decision.reason})
@@ -217,9 +219,13 @@ class BrokerServer:
 class BrokerClient:
     """Runs as the AGENT user. Holds no secrets and can reach no vault."""
 
-    def __init__(self, socket_path, timeout: float = 120.0):
+    def __init__(self, socket_path, timeout: float = 120.0, key_file=None):
         self.path = Path(str(socket_path))
         self.timeout = timeout
+        # A PATH, never key material. The path is fine in an environment or a
+        # command line; the key it points at is not, which is why the file is
+        # 0600 and read here rather than passed through.
+        self.key_file = key_file or os.environ.get("TAPER_KEY_FILE")
 
     def call(self, token: str, operation: str, request: dict) -> dict:
         # No exists() pre-check. The broker's runtime directory is 0750 and owned
@@ -248,8 +254,15 @@ class BrokerClient:
         except OSError as exc:
             return {"allowed": False, "reason": f"cannot reach broker: {exc}"}
         try:
-            conn.sendall((json.dumps({"token": token, "operation": operation,
-                                      "request": request}) + "\n").encode())
+            message = {"token": token, "operation": operation, "request": request}
+            if self.key_file:
+                try:
+                    message["proof"] = prove(load_proving_key(self.key_file),
+                                             token, operation, request)
+                except PopError as exc:
+                    # Say what is wrong with the key file, never what is in it.
+                    return {"allowed": False, "reason": f"cannot prove possession: {exc}"}
+            conn.sendall((json.dumps(message) + "\n").encode())
             chunks = []
             while True:
                 chunk = conn.recv(8192)

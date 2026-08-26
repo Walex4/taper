@@ -21,6 +21,7 @@ from taper.caps import (
     Any_, Never, OneOf, Prefix, Range, Subset, from_json, intersect, subsumes,
 )
 from taper.chain import MAX_DEPTH, ChainError, Token, verify
+from taper.pop import NonceCache, PopError, canonical, prove, verify_proof
 
 NOW = 1_756_000_000.0
 
@@ -478,11 +479,15 @@ class TestAdapters:
 
 @pytest.fixture
 def broker(root, tmp_path):
+    # This fixture exercises policy, not possession. Proof-of-possession has
+    # its own tests in TestProofOfPossession; leaving the check on here would
+    # make every policy assertion depend on a signature it is not testing.
     return Broker(
         root_pub=root.public_key(),
         adapters={"ssh.exec": SSHAdapter(), "pg.query": PostgresAdapter()},
         audit_path=tmp_path / "audit.jsonl",
         clock=lambda: NOW,
+        require_proof=False,
     )
 
 
@@ -695,3 +700,161 @@ class TestEnforcedBy:
                      HTTPAdapter().plan(
                         {"method": "GET", "host": "api.example.com", "path": "/v1"}, {})):
             assert confirmed_layers(plan, _shim()) == []
+
+
+# ----------------------------------------------------------- proof of possession
+
+@pytest.fixture
+def pop_broker(root, tmp_path):
+    """A broker with the possession check ON — the shipped default."""
+    return Broker(
+        root_pub=root.public_key(),
+        adapters={"ssh.exec": SSHAdapter(), "pg.query": PostgresAdapter()},
+        audit_path=tmp_path / "audit.jsonl",
+        clock=lambda: NOW,
+    )
+
+
+GIT_STATUS = {"host": "build-1.internal", "program": "git", "args": ["status"]}
+
+
+class TestProofOfPossession:
+    """Holding the chain must stop being sufficient.
+
+    The chain is a bearer credential without these: capture it from an audit
+    log or a process listing and you hold the authority it names, which makes
+    narrowing a bound on a delegate and not on a thief.
+    """
+
+    def test_a_captured_chain_alone_is_refused(self, pop_broker, root, broad_caps):
+        """The whole point, stated twice: the same token and the same request
+        are ALLOWED with the key and REFUSED without it. Asserting only the
+        refusal would pass just as well if policy were quietly denying it, and
+        a possession check that is really a policy denial is the bug this is
+        supposed to expose."""
+        token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
+        wire = token.serialize()
+
+        thief = pop_broker.decide(wire, "ssh.exec", GIT_STATUS)
+        assert not thief.allowed
+        assert thief.reason.startswith("proof of possession failed")
+        # Not a policy denial wearing a different hat.
+        assert "not permitted" not in thief.reason
+        assert "unconstrained" not in thief.reason
+        assert thief.plan is None
+
+        holder = pop_broker.decide(
+            wire, "ssh.exec", GIT_STATUS,
+            proof=prove(token.proving_key(), wire, "ssh.exec", GIT_STATUS, now=NOW))
+        assert holder.allowed, holder.reason
+
+    def test_a_proof_does_not_transfer_to_another_operation(
+            self, pop_broker, root, broad_caps):
+        token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
+        wire = token.serialize()
+        captured = prove(token.proving_key(), wire, "ssh.exec", GIT_STATUS, now=NOW)
+
+        query = {"database": "analytics", "statement": "SELECT 1 FROM public.events",
+                 "max_rows": 1}
+        replayed = pop_broker.decide(wire, "pg.query", query, proof=captured)
+        assert not replayed.allowed
+        assert replayed.reason.startswith("proof of possession failed")
+
+    def test_a_proof_does_not_transfer_to_another_request(
+            self, pop_broker, root, broad_caps):
+        """Same operation, different arguments. Binding to the operation alone
+        would leave `git status` proving `make build`."""
+        token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
+        wire = token.serialize()
+        captured = prove(token.proving_key(), wire, "ssh.exec", GIT_STATUS, now=NOW)
+
+        elsewhere = {**GIT_STATUS, "host": "build-2.internal"}
+        assert pop_broker.decide(wire, "ssh.exec", elsewhere,
+                                 proof=captured).reason.startswith(
+            "proof of possession failed")
+
+        other_args = {**GIT_STATUS, "program": "make", "args": ["build"]}
+        assert pop_broker.decide(wire, "ssh.exec", other_args,
+                                 proof=captured).reason.startswith(
+            "proof of possession failed")
+
+    def test_a_proof_cannot_be_used_twice(self, pop_broker, root, broad_caps):
+        token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
+        wire = token.serialize()
+        captured = prove(token.proving_key(), wire, "ssh.exec", GIT_STATUS, now=NOW)
+
+        assert pop_broker.decide(wire, "ssh.exec", GIT_STATUS,
+                                 proof=captured).allowed
+        replay = pop_broker.decide(wire, "ssh.exec", GIT_STATUS, proof=captured)
+        assert not replay.allowed
+        assert "nonce already used" in replay.reason
+
+    @pytest.mark.parametrize("offset", [-31.0, -600.0, 31.0, 3600.0])
+    def test_a_stale_or_future_timestamp_is_refused(self, pop_broker, root,
+                                                    broad_caps, offset):
+        token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
+        wire = token.serialize()
+        stale = prove(token.proving_key(), wire, "ssh.exec", GIT_STATUS,
+                      now=NOW + offset)
+        decision = pop_broker.decide(wire, "ssh.exec", GIT_STATUS, proof=stale)
+        assert not decision.allowed
+        assert "outside the 30s window" in decision.reason
+
+    def test_a_proof_from_the_wrong_key_is_refused(self, pop_broker, root,
+                                                   broad_caps):
+        """A thief who captures the chain and generates a key of their own."""
+        token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
+        wire = token.serialize()
+        forged = prove(Ed25519PrivateKey.generate(), wire, "ssh.exec",
+                       GIT_STATUS, now=NOW)
+        assert pop_broker.decide(wire, "ssh.exec", GIT_STATUS,
+                                 proof=forged).reason.startswith(
+            "proof of possession failed")
+
+    def test_a_proof_for_a_different_chain_is_refused(self, pop_broker, root,
+                                                      broad_caps):
+        """The digest binds the exact bytes received, so a proof made against
+        one chain does not carry to another the same holder also has."""
+        a = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
+        b = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
+        for_a = prove(a.proving_key(), a.serialize(), "ssh.exec", GIT_STATUS, now=NOW)
+        assert pop_broker.decide(b.serialize(), "ssh.exec", GIT_STATUS,
+                                 proof=for_a).reason.startswith(
+            "proof of possession failed")
+
+    def test_the_nonce_cache_is_bounded(self):
+        """A caller must not be able to grow the broker's memory by talking."""
+        cache = NonceCache(capacity=8)
+        for i in range(200):
+            cache.remember(f"n{i}", NOW)
+        assert len(cache) == 8
+        assert cache.seen("n199") and not cache.seen("n0")
+
+    def test_an_unsigned_request_does_not_evict_a_real_nonce(self, pop_broker,
+                                                             root, broad_caps):
+        """Nonces are recorded only after the signature verifies, so garbage
+        cannot push a legitimate caller's entry out of a bounded cache."""
+        token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
+        wire = token.serialize()
+        pop_broker.nonces = NonceCache(capacity=2)
+
+        good = prove(token.proving_key(), wire, "ssh.exec", GIT_STATUS, now=NOW)
+        assert pop_broker.decide(wire, "ssh.exec", GIT_STATUS, proof=good).allowed
+
+        for i in range(50):
+            pop_broker.decide(wire, "ssh.exec", GIT_STATUS,
+                              proof={"ts": NOW, "nonce": f"junk{i}", "sig": "AAAA"})
+        assert len(pop_broker.nonces) == 1
+        assert not pop_broker.decide(wire, "ssh.exec", GIT_STATUS,
+                                     proof=good).allowed
+
+    def test_the_signed_bytes_are_canonical(self):
+        """Key order in the request must not change the signature, or two
+        encoders disagree about what was signed. Same rule as caps.canonical()."""
+        digest = b"\x01" * 32
+        a = canonical(digest, "ssh.exec", {"host": "h", "program": "git"}, NOW, "n")
+        b = canonical(digest, "ssh.exec", {"program": "git", "host": "h"}, NOW, "n")
+        assert a == b
+        assert a.startswith(b"\x00taper-pop\x00")
+        assert a != canonical(digest, "pg.query",
+                              {"host": "h", "program": "git"}, NOW, "n")

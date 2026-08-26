@@ -209,6 +209,20 @@ class Token:
         child = Token(blocks=self.blocks + [block], _next_priv=eph)
         return child
 
+    def proving_key(self) -> Optional[Ed25519PrivateKey]:
+        """The key a holder proves possession with — the private half of the
+        final block's ephemeral pair, held only in the process that built it.
+
+        Under design C this key has two roles: it signs the next block (so its
+        holder can delegate) and it signs proofs of possession (so its holder
+        can act). That is a deliberate conflation, recorded in DESIGN.md §9.
+        """
+        return self._next_priv
+
+    def holder_public_key(self) -> Ed25519PublicKey:
+        """The key a proof must verify against: `next_pub` of the last block."""
+        return Ed25519PublicKey.from_public_bytes(self.blocks[-1].next_pub)
+
     # ------------------------------------------------------------------ reading
 
     def effective_caps(self) -> dict[str, dict[str, Constraint]]:

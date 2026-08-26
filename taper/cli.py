@@ -121,14 +121,48 @@ def cmd_secret_set(args) -> int:
 
 
 def cmd_grant(args) -> int:
+    """Mint a token, and write its proving key to a file of its own.
+
+    The two outputs go to two places on purpose. The token goes to stdout, where
+    it will be captured into a variable or a unit file. The proving key goes to
+    a path named on the command line, at 0600, and never to a stream — because
+    the entire benefit of proof-of-possession is that capturing the token does
+    not also hand over the key. Printing both would let one `$(taper grant ...)`
+    collect them together, and the design would quietly become bearer again
+    while every test still passed.
+
+    --key-file is required rather than optional for the same reason: a token
+    minted without one cannot be used, so there is no such thing as forgetting.
+
+    verified-by: tests/test_integration.py::TestProvingKeyDelivery::test_stdout_carries_the_token_and_no_key_material
+    verified-by: tests/test_integration.py::TestProvingKeyDelivery::test_the_key_file_is_required
+    """
+    from .pop import PopError, write_proving_key
+
     policy = json.loads(Path(args.policy).read_text())
     caps = caps_from_json(policy["capabilities"])
     ttl = parse_duration(args.ttl)
     token = Token.issue(load_root_private(), caps, ttl_seconds=ttl,
                         note=policy.get("note", ""))
+
+    key = token.proving_key()
+    if key is None:                        # cannot happen for a freshly issued token
+        sys.exit("issued token carries no proving key")
+    try:
+        path = write_proving_key(key, Path(args.key_file).expanduser())
+    except PopError as exc:
+        sys.exit(str(exc))
+
+    # stdout: the token, and nothing else. Everything below is stderr, so that
+    # `taper grant p.json --key-file k > token.txt` captures only the token.
     print(token.serialize())
     print(f"{DIM}# expires in {args.ttl}, revocation id "
           f"{token.revocation_ids()[0]}{OFF}", file=sys.stderr)
+    print(f"{GREEN}proving key{OFF} written to {path} (0600)", file=sys.stderr)
+    print(f"{DIM}# point the caller at it with TAPER_KEY_FILE={path}{OFF}",
+          file=sys.stderr)
+    print(f"{DIM}# the key is not printed anywhere and cannot be recovered from "
+          f"the token — keep it, or mint again{OFF}", file=sys.stderr)
     return 0
 
 
@@ -340,6 +374,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("grant", help="issue a token from a policy file")
     p.add_argument("policy")
     p.add_argument("--ttl", default="1h")
+    # Required: the proving key must land somewhere that is not stdout, and
+    # making the caller name it is what keeps the key off the token's channel.
+    p.add_argument("--key-file", required=True,
+                   help="where to write the proving key (0600, never stdout)")
     p.set_defaults(func=cmd_grant)
 
     p = sub.add_parser("narrow", help="attenuate a token")

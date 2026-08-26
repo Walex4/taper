@@ -44,7 +44,7 @@ NODE_ID = re.compile(r"^tests/[\w./-]+\.py::\w+(::\w+)?$")
 # be visible. Not a cap on where the convention applies — the walk covers all of
 # taper/ — just a floor, so a bulk deletion cannot pass silently.
 ANNOTATED = [
-    "taper/chain.py", "taper/execute.py", "taper/shim.py",
+    "taper/chain.py", "taper/execute.py", "taper/shim.py", "taper/pop.py",
     "taper/adapters/ssh.py", "taper/adapters/postgres.py",
     "taper/adapters/http.py",
 ]
