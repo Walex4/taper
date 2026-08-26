@@ -4,6 +4,31 @@ Narrowing-only capability tokens and a credential broker for AI agents.
 
 *(Placeholder name — rename before you publish. `taper`, as in progressively narrowing.)*
 
+> ## Status: unaudited. Not yet suitable for production credentials.
+>
+> No external security review has been done. This is about two thousand lines
+> of Python written by one person, and the broker is the thing that holds your
+> credentials — so the failure mode of trusting it too early is the failure
+> mode it exists to prevent.
+>
+> What that means concretely:
+>
+> * **Do not point it at a credential you would mind losing.** Use a role
+>   scoped to the smallest thing that demonstrates the idea, on data you can
+>   recreate.
+> * **The second enforcement layer is not optional.** Every target must refuse
+>   the dangerous operation on its own, with the broker removed from the path —
+>   a dedicated database role, `force-command` on the SSH side. `DESIGN.md` §8
+>   explains why, and `validate/` holds the checks that prove it. The broker is
+>   never the only boundary.
+> * **Taper is not a sandbox.** It mediates the paths that go through it. An
+>   agent holding the docker socket or a shell on the database host has a route
+>   it never sees, and enumerating those routes is the operator's job.
+>
+> Read it, run the red team, try to break it — that is what it is for right now.
+> Vulnerability reports go through GitHub's private reporting; see
+> [SECURITY.md](SECURITY.md).
+
 ## The one-sentence version
 
 Your agent never holds a credential. It holds a token that says what it may do,
@@ -248,5 +273,7 @@ They are one product decision away. Assume 12–18 months.
 
 ## License
 
-Pick one before publishing. MIT if you want adoption; the moat here is the design
-discipline and the audit trail, not the source.
+Apache License 2.0 — see [LICENSE](LICENSE). Apache rather than MIT for the
+explicit patent grant and the requirement that changes be marked, both of which
+matter more than adoption for something whose value is that you can check what
+it does.
