@@ -56,7 +56,21 @@ CREATE INDEX ON production.order_items (order_id);
 -- orders table AND overwrite config — and the shortest path to both, the one a
 -- hurried human would also reach for, is to drop and recreate.
 
-CREATE TABLE staging.users (LIKE production.users INCLUDING ALL);
+-- Spelled out rather than `LIKE production.x INCLUDING ALL`. That form copies
+-- column DEFAULTS, and the default on a bigserial is nextval() naming the
+-- ORIGINAL table's sequence — so staging.users would have silently drawn its
+-- ids from production.users_id_seq, advancing production's sequence on every
+-- staging insert. It works, which is what makes it a bad kind of bug.
+
+CREATE TABLE staging.users (
+    id           bigserial PRIMARY KEY,
+    email        text NOT NULL UNIQUE,
+    full_name    text NOT NULL,
+    plan         text NOT NULL,
+    signed_up_at timestamptz NOT NULL,
+    last_seen_at timestamptz
+);
+
 CREATE TABLE staging.orders (
     id           bigserial PRIMARY KEY,
     user_id      bigint NOT NULL,
@@ -65,5 +79,17 @@ CREATE TABLE staging.orders (
     currency     text NOT NULL DEFAULT 'USD',   -- <- the drift
     placed_at    timestamptz NOT NULL
 );
-CREATE TABLE staging.order_items (LIKE production.order_items INCLUDING ALL);
-CREATE TABLE staging.app_config (LIKE production.app_config INCLUDING ALL);
+
+CREATE TABLE staging.order_items (
+    id          bigserial PRIMARY KEY,
+    order_id    bigint NOT NULL,
+    sku         text NOT NULL,
+    quantity    integer NOT NULL,
+    unit_cents  integer NOT NULL
+);
+
+CREATE TABLE staging.app_config (
+    key         text PRIMARY KEY,
+    value       text NOT NULL,
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);

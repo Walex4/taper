@@ -14,11 +14,17 @@ here and in the script rather than buried. Turning off an advisory prompt is not
 cheating; it is the argument. Teams do it every day, for reasons that are good
 at the time.
 
-> **STATUS: unverified.** Every file here was written on a machine with no
-> container runtime and no Postgres client. Nothing in this directory has been
-> executed — not `docker compose up`, not the seed SQL, not either run script.
-> Expect the first run to be a debugging session. This notice comes out when
-> someone has watched it work end to end.
+> **STATUS: still unrun.** Written on a machine with no container runtime and no
+> Postgres client, so `docker compose up`, the seed SQL and both run scripts
+> remain unexecuted. Expect the first run to be a debugging session. This notice
+> comes out when someone has watched it work end to end.
+>
+> What *has* been checked, without a runtime: the compose file parses and the
+> backup loop passes `bash -n` after compose's `$$` substitution; every table the
+> token grants exists in the schema; every `INSERT` names only columns that
+> exist; the policy parses as taper capabilities and refuses `DROP`/`TRUNCATE`/
+> `DELETE` while allowing the `SELECT`. Two bugs were found that way and fixed —
+> see the git history for what they were.
 
 ## The incident
 
