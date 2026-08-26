@@ -1160,6 +1160,67 @@ class TestRenewalUnits:
 # and produces signature failures that name nothing. What follows is a test per
 # message, because a message is exactly the kind of thing that rots unwatched.
 
+class TestServeRefusesInProcess:
+    """`taper serve` is the obvious command. The obvious command must not
+    silently hand back the configuration with the boundary removed.
+
+    In-process mode puts the broker in the agent's own process — same uid, same
+    address space, vault readable by anything that can read the agent. The CLI
+    has always said so; until now it was also the default, while the README's
+    opening sentence claimed a kernel boundary. One of the two had to change.
+    """
+
+    def test_plain_serve_with_no_socket_exits_non_zero(self, monkeypatch, capsys):
+        monkeypatch.delenv("TAPER_SOCKET", raising=False)
+        monkeypatch.delenv("TAPER_INSECURE_IN_PROCESS", raising=False)
+
+        assert cli.main(["serve"]) != 0
+
+        err = capsys.readouterr().err
+        assert "refusing" in err.lower()
+        # The refusal has to name the way out, or it is just an obstacle.
+        assert "--socket" in err
+        assert "TAPER_SOCKET" in err
+        assert "--in-process" in err
+
+    def test_the_environment_opt_in_is_honoured(self, monkeypatch):
+        """Not a test that in-process WORKS — that needs a root key and a vault.
+        It is a test that the gate is passed, i.e. that the failure after this
+        point is about something else."""
+        monkeypatch.delenv("TAPER_SOCKET", raising=False)
+        monkeypatch.setenv("TAPER_INSECURE_IN_PROCESS", "1")
+
+        called = {}
+
+        def fake_serve(*a, **k):
+            called["yes"] = True
+            return 0
+
+        import taper.mcp
+        monkeypatch.setattr(taper.mcp, "serve", fake_serve)
+        monkeypatch.setattr(cli, "load_root_public", lambda: object())
+
+        assert cli.main(["serve"]) == 0
+        assert called.get("yes"), "the opt-in did not reach serve()"
+
+    def test_socket_mode_is_untouched_by_the_gate(self, monkeypatch, tmp_path):
+        """The gate must only fire when NO socket is configured."""
+        monkeypatch.delenv("TAPER_INSECURE_IN_PROCESS", raising=False)
+        monkeypatch.setenv("TAPER_SOCKET", str(tmp_path / "broker.sock"))
+
+        seen = {}
+
+        def fake_serve(*a, **k):
+            seen.update(k)
+            return 0
+
+        import taper.mcp
+        monkeypatch.setattr(taper.mcp, "serve", fake_serve)
+
+        assert cli.main(["serve"]) == 0
+        assert seen.get("socket_path") is not None, "socket mode did not run"
+
+
 class TestMintHint:
     def test_a_single_uid_box_still_gets_the_one_liner(self, monkeypatch):
         """No broker, no two-step. The old instruction was never wrong here."""

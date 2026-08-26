@@ -745,6 +745,46 @@ def cmd_serve(args) -> int:
         # Deliberately does not load the root key: this half should not be able to.
         return serve(token_env=args.token_env,
                      socket_path=Path(socket).expanduser())
+
+    # No socket configured. In-process mode puts the broker inside the agent's
+    # own process: same uid, same memory, the vault reachable by anything that
+    # can read the agent. It is useful for development and it is NOT a boundary,
+    # which is the one thing the README's opening sentence claims.
+    #
+    # So it has to be asked for. `taper serve` is the obvious command, and the
+    # obvious command must not silently hand back the version with the boundary
+    # removed — a default that is safe only when someone remembered a flag is
+    # the same defect as a permission prompt: it works until the day it is
+    # skipped.
+    # verified-by: tests/test_integration.py::TestServeRefusesInProcess::test_plain_serve_with_no_socket_exits_non_zero
+    if not (args.in_process
+            or os.environ.get("TAPER_INSECURE_IN_PROCESS", "").strip() == "1"):
+        print(f"{RED}refusing to run the broker inside the agent's process"
+              f"{OFF}", file=sys.stderr)
+        print(file=sys.stderr)
+        print("No socket is configured, so this would run in-process: the "
+              "broker\nwould share a uid and an address space with the agent it "
+              "is meant to\nbe a boundary against, and the vault would be "
+              "readable by anything that\ncan read the agent. That is fine for "
+              "development and it is not a\nboundary.", file=sys.stderr)
+        print(file=sys.stderr)
+        print("Point it at the broker instead:", file=sys.stderr)
+        print(f"    taper serve --socket            "
+              f"{DIM}# {broker_socket()}{OFF}", file=sys.stderr)
+        print(f"    TAPER_SOCKET={broker_socket()} taper serve", file=sys.stderr)
+        print(file=sys.stderr)
+        print("The broker half runs separately, as its own user:", file=sys.stderr)
+        print(f"    sudo -u taper-broker taper daemon --socket "
+              f"{broker_socket()} --allow-user \"$USER\"", file=sys.stderr)
+        print(file=sys.stderr)
+        print("If you really want the development mode, ask for it:",
+              file=sys.stderr)
+        print("    taper serve --in-process", file=sys.stderr)
+        print("    TAPER_INSECURE_IN_PROCESS=1 taper serve", file=sys.stderr)
+        return 2
+
+    print(f"{YELLOW}!{OFF} in-process mode: the broker is inside the agent's "
+          f"process and is not a boundary", file=sys.stderr)
     return serve(root_pub=load_root_public(), audit_path=AUDIT,
                  token_env=args.token_env)
 
@@ -844,6 +884,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--socket", nargs="?", const=str(broker_socket()), default=None,
                    help="reach the broker over this unix socket instead of "
                         "running it in-process (the real trust boundary)")
+    p.add_argument("--in-process", action="store_true",
+                   help="run the broker inside this process. Development only: "
+                        "same uid, same memory, no boundary. Without this (or "
+                        "TAPER_INSECURE_IN_PROCESS=1) a serve with no socket "
+                        "configured refuses to start.")
     p.set_defaults(func=cmd_serve)
 
     return parser

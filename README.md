@@ -30,7 +30,7 @@ so a subagent cannot exceed its parent.
 > Vulnerability reports go through GitHub's private reporting; see
 > [SECURITY.md](SECURITY.md).
 
-## The one-sentence version
+## Try it
 
 Your agent never holds a credential. It holds a token that says what it may do,
 and it can narrow that token for a subagent without asking anyone — but it can
@@ -150,7 +150,7 @@ taper secret set ssh.cert < ~/.ssh/id   # into the vault
 taper grant policy.example.json --ttl 1h
 taper inspect "$TOKEN"                  # what does this actually permit?
 taper doctor                            # is this machine set up correctly?
-TAPER_TOKEN="$TOKEN" taper serve        # MCP server on stdio
+TAPER_TOKEN="$TOKEN" taper serve --in-process   # dev only — see below
 ```
 
 Those are the single-uid shapes. Once the broker runs as its own user the root
@@ -161,7 +161,16 @@ run on.
 
 That last line runs the broker inside the agent's own process, which is fine for
 development and is **not** a trust boundary: the same uid that runs the model can
-read the vault. The real shape is two users and a socket.
+read the vault.
+
+`--in-process` is required rather than assumed. A plain `taper serve` with no
+socket configured refuses to start and prints the socket form instead, because
+the obvious command should not silently hand back the configuration with the
+boundary removed — a default that is only safe when someone remembered a flag
+fails the same way a permission prompt does. `TAPER_INSECURE_IN_PROCESS=1` is
+the environment equivalent, named so it cannot be set by accident.
+
+The real shape is two users and a socket.
 
 ```bash
 # as the broker user — holds the vault, decides, executes
