@@ -1,6 +1,9 @@
 # Taper
 
-Narrowing-only capability tokens and a credential broker for AI agents.
+A credential broker for AI agents. The agent never holds a credential — it
+names a typed operation, and a process behind a kernel boundary decides
+whether to carry it out and carries it out. Tokens narrow and never widen,
+so a subagent cannot exceed its parent.
 
 > ## Status: unaudited. Not yet suitable for production credentials.
 >
