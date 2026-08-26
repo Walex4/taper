@@ -5,11 +5,12 @@ agentgateway, Alter, Authsome all do HTTP egress injection). It is included
 because a developer should not have to install four tools, not because it is
 where the differentiation is.
 
-One thing done differently and worth keeping: the credential is attached to a
-resolved (host, path) pair AFTER policy has approved it, so a policy bug cannot
-result in the right credential going to the wrong host. The secret is referenced
-by name in the plan and resolved at the last moment, which means plans are safe
-to log verbatim.
+One thing done differently and worth keeping: the credential is attached to the
+resolved host AFTER policy has approved it, so a policy bug cannot result in the
+right credential going to the wrong host. The binding is host-only: the path is
+normalized and policy-checked, but it does not select the credential. The secret
+is referenced by name in the plan and resolved at the last moment, which means
+plans are safe to log verbatim.
 """
 
 from __future__ import annotations

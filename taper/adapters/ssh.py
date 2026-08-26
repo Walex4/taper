@@ -9,16 +9,18 @@ What is actually enforced, and by whom:
                          `force-command` critical option pointing at a typed shim;
                          plus `restrict` as the deny-all baseline, source-address,
                          and a short certificate validity window.
-  KERNEL (target host)   Landlock + seccomp under the shim, so a bug in the shim
-                         is contained rather than fatal.
+  KERNEL (target host)   nothing, currently. The shim probes for Landlock and
+                         reports what it found, but applies no ruleset, so a bug
+                         in the shim is NOT contained. See DESIGN.md "Known gaps".
 
 Note `restrict` is the deny-all baseline and you should still not assume it is
 complete: OpenSSH 10.5 (2026-08-11) fixed `restrict` not applying to tunnel
 forwarding, and 10.4 fixed the internal SFTP server dropping security options
 when given too many arguments. Defence in depth is not optional here.
 
-We use `--` before the remote program and pass every argument as a separate argv
-element. There is no interpolation anywhere in this file.
+The remote program never appears in argv at all: `-s` selects the subsystem, and
+the program and its arguments go to the shim as JSON on stdin. There is no
+interpolation anywhere in this file.
 """
 
 from __future__ import annotations
@@ -89,6 +91,6 @@ class SSHAdapter(Adapter):
                 "program": program,
                 "args": args,
                 "stdin_json": payload,
-                "enforced_by": ["broker:argv", "sshd:force-command", "kernel:landlock"],
+                "enforced_by": ["broker:argv", "sshd:force-command"],
             },
         )
