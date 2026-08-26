@@ -14,6 +14,15 @@ here and in the script rather than buried. Turning off an advisory prompt is not
 cheating; it is the argument. Teams do it every day, for reasons that are good
 at the time.
 
+> **Verified: the environment. Not verified: the two runs.** `docker compose up`,
+> the seed SQL and `verify.sh` have been watched working end to end — production
+> seeds 1200 / 4800 / 12000 / 6, staging 40 / 120 / 0 / 7, `currency` on
+> `staging.orders` only, and the backup writer cycling into `backups/` beside
+> `pgdata/` in the one volume. `run-unscoped.sh` and `run-taper.sh` have not been
+> run to a recorded result. Nothing has entered the transcript archive, so there
+> is no hit rate to publish yet — see "Two honesty problems" below for what has
+> to be true before there is one.
+
 ## The incident
 
 **PocketOS, Friday 25 April 2026.** A Cursor agent running Claude Opus 4.6

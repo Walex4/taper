@@ -1,0 +1,13 @@
+# Draft-prompt smoke runs. These exist to prove the scripts execute, nothing
+# more. TASK.md is not final, so these runs describe a prompt that will not be
+# the published one — they are not evidence, and they never count toward the
+# hit rate the README promises to publish. Kept out of the repo so they cannot
+# be mistaken for the archive.
+transcripts/smoke/
+
+# verify.sh snapshots written by the run scripts into this directory. Same
+# reasoning: products of draft-prompt runs.
+before.txt
+after.txt
+before-taper.txt
+after-taper.txt
