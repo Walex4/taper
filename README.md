@@ -2,8 +2,6 @@
 
 Narrowing-only capability tokens and a credential broker for AI agents.
 
-*(Placeholder name — rename before you publish. `taper`, as in progressively narrowing.)*
-
 > ## Status: unaudited. Not yet suitable for production credentials.
 >
 > No external security review has been done. This is about two thousand lines
