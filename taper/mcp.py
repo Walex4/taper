@@ -43,6 +43,7 @@ from . import ops
 from .adapters import HTTPAdapter, PostgresAdapter, SSHAdapter
 from .broker import Broker
 from .execute import Executor
+from .pop import PopError, load_proving_key, prove
 from .ipc import BrokerClient
 from .secrets import default_provider
 
@@ -92,9 +93,14 @@ class LocalBackend:
     The peer recorded in the audit log is honestly reported as this process.
     """
 
-    def __init__(self, broker: Broker, executor: Executor):
+    def __init__(self, broker: Broker, executor: Executor, proving_key=None):
         self.broker = broker
         self.executor = executor
+        # Signs each call the way BrokerClient does over the socket. In-process
+        # there is no boundary for a proof to cross, but carrying one keeps this
+        # path identical to the deployed one — a backend that skips the proof is
+        # a backend that cannot notice the proof breaking.
+        self.proving_key = proving_key
         self._peer = {"uid": os.getuid(), "gid": os.getgid(), "pid": os.getpid()}
 
     def operations(self) -> list[str]:
@@ -102,6 +108,13 @@ class LocalBackend:
 
     def call(self, token: str, operation: str, request: dict,
              proof: Optional[dict] = None) -> dict:
+        if proof is None and self.proving_key is not None:
+            # The broker's clock, not time.time(). In-process the caller and the
+            # broker share a process and therefore a clock — in production both
+            # are time.time(), and saying so here means a test that freezes the
+            # broker's clock does not have to special-case the proof.
+            proof = prove(self.proving_key, token, operation, request,
+                          now=self.broker.clock())
         decision = self.broker.decide(token, operation, request, peer=self._peer,
                                       proof=proof)
         if not decision.allowed:
@@ -237,23 +250,30 @@ def serve(root_pub: Optional[Ed25519PublicKey] = None,
             print("in-process mode needs root_pub and audit_path", file=sys.stderr)
             return 2
         secrets = default_provider()
+        # If a proving key is available, use it here too. In-process there is no
+        # boundary for the proof to cross, but running the same code path as the
+        # socket mode is worth more than the check is: a path that never carries
+        # a proof is a path that cannot notice proofs breaking.
+        key_file = os.environ.get("TAPER_KEY_FILE", "").strip()
+        try:
+            proving_key = load_proving_key(key_file) if key_file else None
+        except PopError as exc:
+            print(f"cannot read the proving key: {exc}", file=sys.stderr)
+            return 2
         broker = Broker(
             root_pub=root_pub,
             adapters={"ssh.exec": SSHAdapter(), "pg.query": PostgresAdapter(),
                       "http.request": HTTPAdapter()},
             audit_path=audit_path,
             secrets=secrets.get,
-            # No socket and no second process: the caller and the broker are the
-            # same memory. A proof would be this process proving something to
-            # itself. Stated here, and in the banner below, rather than left to
-            # be discovered — the socket path keeps the check.
-            require_proof=False,
+            require_proof=proving_key is not None,
         )
-        backend = LocalBackend(broker, Executor(secrets))
+        backend = LocalBackend(broker, Executor(secrets), proving_key=proving_key)
         server = Server(backend, token, operations=backend.operations())
-        print("taper mcp server ready on stdio (in-process broker: no uid "
-              "separation, no proof of possession, development only)",
-              file=sys.stderr)
+        pop = "with proof of possession" if proving_key else \
+            "NO proof of possession (set TAPER_KEY_FILE)"
+        print(f"taper mcp server ready on stdio (in-process broker: no uid "
+              f"separation, {pop}, development only)", file=sys.stderr)
     for line in sys.stdin:
         line = line.strip()
         if not line:

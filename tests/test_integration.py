@@ -261,10 +261,12 @@ def mcp(tmp_path):
     token = Token.issue(root, CAPS, ttl_seconds=3600, now=NOW)
     broker = Broker(root_pub=root.public_key(),
                     adapters={"ssh.exec": SSHAdapter(), "pg.query": PostgresAdapter()},
-                    audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW,
-                    require_proof=False)   # possession is tested separately
+                    audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW)
     executor = Executor(ChainProvider(FileProvider(tmp_path)))
-    backend = LocalBackend(broker, executor)
+    # The proving key the holder would have been handed by `taper grant`. The
+    # suite signs real proofs rather than switching the check off, so the
+    # default test path is the deployed one.
+    backend = LocalBackend(broker, executor, proving_key=token.proving_key())
     return Server(backend, token.serialize(), operations=backend.operations())
 
 
@@ -432,9 +434,9 @@ def _run_once(tmp_path, payload):
     token = Token.issue(root, CAPS, ttl_seconds=3600, now=NOW)
     broker = Broker(root_pub=root.public_key(),
                     adapters={"ssh.exec": SSHAdapter()},
-                    audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW,
-                    require_proof=False)   # possession is tested separately
-    backend = LocalBackend(broker, _StubExecutor(payload))
+                    audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW)
+    backend = LocalBackend(broker, _StubExecutor(payload),
+                           proving_key=token.proving_key())
     reply = backend.call(token.serialize(), "ssh.exec",
                          {"host": "build-1.internal", "program": "git",
                           "args": ["status"]})
@@ -475,11 +477,11 @@ class TestEnforcedByIsLoggedFromTheResult:
         token = Token.issue(root, CAPS, ttl_seconds=3600, now=NOW)
         broker = Broker(root_pub=root.public_key(),
                         adapters={"ssh.exec": SSHAdapter()},
-                        audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW,
-                    require_proof=False)   # possession is tested separately
+                        audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW)
         backend = LocalBackend(broker, _StubExecutor(
             {"ok": True, "exit_code": 0, "stdout": "", "stderr": "",
-             "landlock": "available(abi=7) NOT_APPLIED"}))
+             "landlock": "available(abi=7) NOT_APPLIED"}),
+            proving_key=token.proving_key())
         backend.call(token.serialize(), "ssh.exec",
                      {"host": "build-1.internal", "program": "git",
                       "args": ["status"]})
@@ -491,9 +493,9 @@ class TestEnforcedByIsLoggedFromTheResult:
         token = Token.issue(root, CAPS, ttl_seconds=3600, now=NOW)
         broker = Broker(root_pub=root.public_key(),
                         adapters={"ssh.exec": SSHAdapter()},
-                        audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW,
-                    require_proof=False)   # possession is tested separately
-        backend = LocalBackend(broker, _StubExecutor({}))
+                        audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW)
+        backend = LocalBackend(broker, _StubExecutor({}),
+                               proving_key=token.proving_key())
         reply = backend.call(token.serialize(), "ssh.exec",
                              {"host": "prod-db.internal", "program": "git",
                               "args": ["status"]})

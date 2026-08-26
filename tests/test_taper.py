@@ -479,32 +479,45 @@ class TestAdapters:
 
 @pytest.fixture
 def broker(root, tmp_path):
-    # This fixture exercises policy, not possession. Proof-of-possession has
-    # its own tests in TestProofOfPossession; leaving the check on here would
-    # make every policy assertion depend on a signature it is not testing.
     return Broker(
         root_pub=root.public_key(),
         adapters={"ssh.exec": SSHAdapter(), "pg.query": PostgresAdapter()},
         audit_path=tmp_path / "audit.jsonl",
         clock=lambda: NOW,
-        require_proof=False,
     )
+
+
+def decide(broker, token, operation, request, **kwargs):
+    """Ask the broker the way a deployed caller does: carrying a proof.
+
+    Every real call carries one, so the default test path carries one too. A
+    fixture that can mint a token can mint the key that goes with it — the
+    holder's proving key is right there on the token it just issued — so there
+    is no reason for the suite to exercise a configuration that does not exist
+    in production. Tests that are ABOUT possession call broker.decide directly
+    and construct their own proof, or none.
+    """
+    wire = token.serialize()
+    return broker.decide(
+        wire, operation, request,
+        proof=prove(token.proving_key(), wire, operation, request, now=NOW),
+        **kwargs)
 
 
 class TestBroker:
     def test_allows_a_permitted_request(self, broker, root, broad_caps):
         token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
-        d = broker.decide(token.serialize(), "ssh.exec",
-                          {"host": "build-1.internal", "program": "git",
-                           "args": ["status"]})
+        d = decide(broker, token, "ssh.exec",
+                   {"host": "build-1.internal", "program": "git",
+                    "args": ["status"]})
         assert d.allowed, d.reason
         assert d.plan.kind == "process"
 
     def test_denies_a_host_outside_the_grant(self, broker, root, broad_caps):
         token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
-        d = broker.decide(token.serialize(), "ssh.exec",
-                          {"host": "prod-db.internal", "program": "git",
-                           "args": ["status"]})
+        d = decide(broker, token, "ssh.exec",
+                   {"host": "prod-db.internal", "program": "git",
+                    "args": ["status"]})
         assert not d.allowed and "not permitted" in d.reason
 
     def test_subagent_token_is_genuinely_narrower_at_the_broker(
@@ -515,30 +528,32 @@ class TestBroker:
                           "program": OneOf(["git"]),
                           "args": Subset(["status"])}},
             note="subagent: changelog", now=NOW)
-        ok = broker.decide(sub.serialize(), "ssh.exec",
-                           {"host": "build-1.internal", "program": "git",
-                            "args": ["status"]})
+        ok = decide(broker, sub, "ssh.exec",
+                    {"host": "build-1.internal", "program": "git",
+                     "args": ["status"]})
         assert ok.allowed
         for bad in ({"host": "build-2.internal", "program": "git", "args": ["status"]},
                     {"host": "build-1.internal", "program": "make", "args": []},
                     {"host": "build-1.internal", "program": "git", "args": ["build"]}):
-            assert not broker.decide(sub.serialize(), "ssh.exec", bad).allowed
+            assert not decide(broker, sub, "ssh.exec", bad).allowed
 
     def test_unconstrained_attribute_fails_closed(self, broker, root):
         # Grant omits "args" entirely — the broker must refuse rather than guess.
         token = Token.issue(root, {"ssh.exec": {"host": OneOf(["build-1.internal"]),
                                                 "program": OneOf(["git"])}},
                             ttl_seconds=3600, now=NOW)
-        d = broker.decide(token.serialize(), "ssh.exec",
-                          {"host": "build-1.internal", "program": "git",
-                           "args": ["status"]})
+        d = decide(broker, token, "ssh.exec",
+                   {"host": "build-1.internal", "program": "git",
+                    "args": ["status"]})
         assert not d.allowed and "unconstrained" in d.reason
 
     def test_garbage_token_denied_not_crashed(self, broker):
+        # No proof, deliberately: a chain that will not parse is refused
+        # before possession is ever consulted, and there is no key to sign with.
         for junk in ["", "not-base64!!", "eyJiIjpbXX0"]:
             d = broker.decide(junk, "ssh.exec",
                               {"host": "a.internal", "program": "git"})
-            assert not d.allowed
+            assert not d.allowed and "token rejected" in d.reason
 
     def test_ddl_denied_when_grant_is_select_only(self, broker, root, broad_caps):
         token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW).attenuate(
@@ -546,9 +561,9 @@ class TestBroker:
                           "statement_kind": OneOf(["select"]),
                           "tables": Subset(["public.events"]),
                           "max_rows": Range(0, 100)}}, now=NOW)
-        d = broker.decide(token.serialize(), "pg.query",
-                          {"database": "analytics",
-                           "statement": "DROP TABLE public.events", "max_rows": 1})
+        d = decide(broker, token, "pg.query",
+                   {"database": "analytics",
+                    "statement": "DROP TABLE public.events", "max_rows": 1})
         assert not d.allowed and "statement_kind" in d.reason
 
     def test_table_outside_grant_denied(self, broker, root, broad_caps):
@@ -557,24 +572,24 @@ class TestBroker:
                           "statement_kind": OneOf(["select"]),
                           "tables": Subset(["public.events"]),
                           "max_rows": Range(0, 100)}}, now=NOW)
-        d = broker.decide(token.serialize(), "pg.query",
-                          {"database": "analytics",
-                           "statement": "SELECT * FROM public.users", "max_rows": 1})
+        d = decide(broker, token, "pg.query",
+                   {"database": "analytics",
+                    "statement": "SELECT * FROM public.users", "max_rows": 1})
         assert not d.allowed and "tables" in d.reason
 
     def test_revocation_takes_effect_immediately(self, broker, root, broad_caps):
         token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
         request = {"host": "build-1.internal", "program": "git", "args": ["status"]}
-        assert broker.decide(token.serialize(), "ssh.exec", request).allowed
+        assert decide(broker, token, "ssh.exec", request).allowed
         broker.revoke(token.revocation_ids()[0])
-        assert not broker.decide(token.serialize(), "ssh.exec", request).allowed
+        assert not decide(broker, token, "ssh.exec", request).allowed
 
 
 class TestAudit:
     def test_denials_are_logged_too(self, broker, root, broad_caps):
         token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
-        broker.decide(token.serialize(), "ssh.exec",
-                      {"host": "prod-db.internal", "program": "git"})
+        decide(broker, token, "ssh.exec",
+               {"host": "prod-db.internal", "program": "git"})
         records = list(broker.audit.read())
         assert len(records) == 1
         assert records[0]["body"]["allowed"] is False

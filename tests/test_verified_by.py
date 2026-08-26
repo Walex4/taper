@@ -113,6 +113,28 @@ class TestVerifiedBy:
             f"{source_file} has no verified-by annotation left. If its claims "
             f"genuinely went away, remove it from ANNOTATED and say so.")
 
+    def test_no_test_disables_the_possession_check(self):
+        """A companion lint, same failure mode as a dangling verified-by.
+
+        Every deployed call carries a proof. A fixture that sets
+        require_proof=False verifies a configuration that does not exist, and
+        passes while standing for something untrue — which is how a check ends
+        up green against a control nobody is exercising. A fixture that can mint
+        a token can mint the key that goes with it, so the honest fix is always
+        to sign. If some future test genuinely cannot, delete this and say why
+        in the same commit.
+        """
+        offenders = []
+        for path in sorted((ROOT / "tests").glob("*.py")):
+            if path.name == Path(__file__).name:
+                continue
+            for lineno, line in enumerate(path.read_text().splitlines(), 1):
+                if "require_proof=False" in line:
+                    offenders.append(f"  tests/{path.name}:{lineno}")
+        assert not offenders, (
+            "these tests switch proof-of-possession off instead of signing:\n"
+            + "\n".join(offenders))
+
     def test_the_lint_catches_a_dangling_reference(self, tmp_path, collected):
         """Teeth. A lint nobody has watched fail is a lint nobody can trust."""
         module = tmp_path / "fake.py"
