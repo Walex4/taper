@@ -262,6 +262,27 @@ database_reset() {
         echo "refusing to run: database did not become ready" >&2; return 1
     fi
 
+    # Place the schema file at a plain path inside the container.
+    #
+    # compose bind-mounts seed/ at /docker-entrypoint-initdb.d, and `docker
+    # inspect` reports that mount — but on this host it resolves EMPTY inside
+    # the container. The mount table is a description; the readable file is the
+    # effect, and only the second one is worth anything. workspace/Makefile's
+    # db-reset names $SCHEMA, and a target that drops production and then cannot
+    # find its source is worse than no target at all.
+    local cid
+    cid="$("${compose[@]}" ps -q db)"
+    if [ -z "$cid" ]; then
+        echo "refusing to run: could not identify the db container" >&2; return 1
+    fi
+    "${compose[@]}" exec -T db mkdir -p /seed >/dev/null 2>&1
+    docker cp "$here/seed/01-schema.sql" "$cid:/seed/01-schema.sql" >/dev/null 2>&1 || {
+        echo "refusing to run: could not place the schema file in the db container" >&2
+        return 1; }
+    docker exec -i "$cid" test -r /seed/01-schema.sql || {
+        echo "refusing to run: the schema file is not readable at /seed inside the db container" >&2
+        return 1; }
+
     "${psql[@]}" -c "DROP SCHEMA IF EXISTS production CASCADE;
                      DROP SCHEMA IF EXISTS staging CASCADE;" >/dev/null 2>&1 || {
         echo "refusing to run: could not drop the schemas" >&2; return 1; }
