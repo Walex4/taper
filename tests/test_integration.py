@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import socket
+import re
 import subprocess
 import sys
 import tempfile
@@ -1401,3 +1402,58 @@ class TestMintHint:
     def test_taper_socket_still_wins(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TAPER_SOCKET", str(tmp_path / "custom.sock"))
         assert hints.broker_socket() == tmp_path / "custom.sock"
+
+
+class TestDemoScript:
+    """demo.py is the first thing anyone runs, and nothing checked it.
+
+    When proof-of-possession landed, every request in the walkthrough started
+    returning "proof of possession failed: no proof supplied" — including the
+    section that exists to show an ALLOW, and a section whose caption claimed
+    rejection by the typed schema while printing a PoP reason. The suite was
+    green throughout, because the suite never ran the demo.
+    """
+
+    def _run(self):
+        demo = Path(__file__).resolve().parent.parent / "demo.py"
+        result = subprocess.run([sys.executable, str(demo)],
+                                capture_output=True, text=True, timeout=120)
+        assert result.returncode == 0, result.stderr
+        # Strip the ANSI the demo prints, so assertions match on text.
+        return re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+
+    def _section(self, out, number):
+        """The body of one numbered section, up to the next one."""
+        m = re.search(rf"^{number}\. .*?$(.*?)(?=^\d+\. |\Z)", out, re.S | re.M)
+        assert m, f"section {number} not found in demo output"
+        return m.group(1)
+
+    def test_section_three_allows(self):
+        """The section that exists to show an allow must show one. This is the
+        assertion that would have caught the regression."""
+        body = self._section(self._run(), 3)
+        assert "ALLOW" in body, f"section 3 produced no allow:\n{body}"
+        assert "DENY" not in body, f"section 3 produced a denial:\n{body}"
+
+    def test_no_section_fails_for_lack_of_a_proof_except_the_one_demonstrating_it(self):
+        """A PoP failure anywhere else means the demo stopped supplying proofs
+        again. Section 4 ends with a deliberate one — a caller holding the
+        token text and not the key — and that line is labelled."""
+        out = self._run()
+        for line in out.splitlines():
+            if "proof of possession failed" in line:
+                assert "copied the token text" in out, (
+                    f"unexplained proof-of-possession failure: {line!r}")
+
+    def test_the_denials_are_the_ones_the_captions_claim(self):
+        """Section 4 must deny on policy, section 5 on the typed schema. Both
+        printed a PoP reason while their captions said otherwise."""
+        out = self._run()
+        four = self._section(out, 4)
+        assert "not permitted by" in four, f"section 4 denied for the wrong reason:\n{four}"
+        five = self._section(out, 5)
+        assert "failed validation" in five, f"section 5 denied for the wrong reason:\n{five}"
+
+    def test_the_walkthrough_still_ends_with_an_intact_audit_chain(self):
+        out = self._run()
+        assert "intact=True" in out, out[-400:]

@@ -11,6 +11,7 @@ from taper.adapters import PostgresAdapter, SSHAdapter
 from taper.broker import Broker
 from taper.caps import OneOf, Range, Subset
 from taper.chain import ChainError, Token
+from taper.pop import prove
 
 NOW = 1_756_000_000.0
 
@@ -22,6 +23,23 @@ def line(title):
 def show(decision):
     mark = "\033[32m✓ ALLOW\033[0m" if decision.allowed else "\033[31m✗ DENY \033[0m"
     print(f"  {mark}  {decision.reason if not decision.allowed else decision.operation}")
+
+
+def ask(token, operation, request):
+    """Make a request the way a real holder does: with a proof of possession.
+
+    The broker checks the proof at step 0, before policy, so that "you are not
+    the holder" can never be reported as "you are the holder and may not do
+    this". A caller that has the token text but not the key gets nowhere, which
+    is the last case in section 4.
+
+    The proving key is the private half of the final block's ephemeral pair,
+    held only by the process that built the token. `now=NOW` because this demo
+    runs the broker on a frozen clock and a proof carries a timestamp.
+    """
+    text = token.serialize()
+    proof = prove(token.proving_key(), text, operation, request, now=NOW)
+    return broker.decide(text, operation, request, proof=proof)
 
 
 root = Ed25519PrivateKey.generate()
@@ -62,8 +80,8 @@ print(f"  expires in: {int(sub.expires_at() - NOW)}s   (parent had 3600s)")
 print("  no network call was made to narrow this")
 
 line("3. What the subagent may do")
-show(broker.decide(sub.serialize(), "ssh.exec",
-                   {"host": "build-1.internal", "program": "git", "args": ["status"]}))
+show(ask(sub, "ssh.exec",
+         {"host": "build-1.internal", "program": "git", "args": ["status"]}))
 
 line("4. What it may not — every one of these is refused deterministically")
 for label, request in [
@@ -73,16 +91,25 @@ for label, request in [
                                 "args": ["build"]}),
 ]:
     print(f"  {label}:")
-    show(broker.decide(sub.serialize(), "ssh.exec", request))
+    show(ask(sub, "ssh.exec", request))
 
 print("\n  operation the parent had but the subagent dropped:")
-show(broker.decide(sub.serialize(), "pg.query",
-                   {"database": "analytics", "statement": "SELECT * FROM public.events"}))
+show(ask(sub, "pg.query",
+         {"database": "analytics", "statement": "SELECT * FROM public.events"}))
+
+# Deliberately NOT through ask(): this is a caller who scraped the token text
+# from a log, a process listing or an environment, and does not hold the
+# proving key. Without this the token would be a bearer credential and
+# narrowing would bound only what a DELEGATE can do, saying nothing about what
+# a THIEF can do — the weaker of the two properties, and not the one claimed.
+print("\n  someone who copied the token text but not the proving key:")
+show(broker.decide(sub.serialize(), "ssh.exec",
+                   {"host": "build-1.internal", "program": "git", "args": ["status"]}))
 
 line("5. Shell injection is not filtered — it cannot be expressed")
-show(broker.decide(sub.serialize(), "ssh.exec",
-                   {"host": "build-1.internal", "program": "git",
-                    "args": ["status; rm -rf /"]}))
+show(ask(sub, "ssh.exec",
+         {"host": "build-1.internal", "program": "git",
+          "args": ["status; rm -rf /"]}))
 print("  (rejected by the typed schema before policy was even consulted)")
 
 line("6. The subagent tries to give ITSELF more authority")
@@ -96,8 +123,8 @@ except ChainError as exc:
 
 line("7. Revoking the parent kills every derived token at once")
 broker.revoke(you.revocation_ids()[0])
-show(broker.decide(sub.serialize(), "ssh.exec",
-                   {"host": "build-1.internal", "program": "git", "args": ["status"]}))
+show(ask(sub, "ssh.exec",
+         {"host": "build-1.internal", "program": "git", "args": ["status"]}))
 
 line("8. The audit log is hash-chained")
 intact, broken = broker.audit.verify()

@@ -37,9 +37,27 @@ and it can narrow that token for a subagent without asking anyone — but it can
 never widen it.
 
 ```bash
+# Debian/Ubuntu ship the venv module separately, and pip refuses to install
+# into the system Python (PEP 668). Both are one-time.
+sudo apt install -y python3-venv python3-pip
+
+git clone https://github.com/Walex4/taper.git
+cd taper
+python3 -m venv .venv
+source .venv/bin/activate
+
 pip install -e .
 python demo.py
 ```
+
+If `python3 -m venv` still reports that `ensurepip` is unavailable, install the
+version-specific package it names — `python3.12-venv`, `python3.14-venv` — since
+`python3-venv` tracks only the distribution's default interpreter.
+
+Without the virtual environment, `pip install -e .` fails with
+`error: externally-managed-environment` on any PEP 668 distribution, which is
+every current Debian and Ubuntu. That is pip protecting the system Python, not
+a problem with this package.
 
 ## Why this exists
 
