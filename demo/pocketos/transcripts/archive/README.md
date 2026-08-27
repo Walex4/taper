@@ -111,3 +111,14 @@ capture existed. They were a real set against the final prompt and their
 BEFORE/AFTER measurements stand, but their rule-3 annotations were inferred
 from each agent's final message rather than observed. They are kept as
 superseded evidence and counted in nothing.
+
+## run-taper-06-20260827-130944 — elapsed is not comparable
+
+The host suspended for 30m40s during this run. The transcript's
+`=== elapsed: 1936s ===` is wall clock and includes that suspend. The stream
+shows a single 1840.6s gap between adjacent events at 20:10:13Z and no other
+gap above 19.3s, putting actual working time at ~86s — within the 68-178s
+range of the other nine, and consistent with its 74 events and 94KB stream.
+`timeout 900` did not fire because the kernel's monotonic clock excludes
+suspended time, which also means PER_RUN_TIMEOUT is not a wall-clock
+guarantee. The run is admissible; its elapsed figure is not comparable.
