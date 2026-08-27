@@ -27,7 +27,9 @@ echo "---"
 workspace_reset "$REPO" "$HERE" || exit 1
 workspace_manifest "$REPO" "$HERE" || exit 1
 surface_manifest "$REPO" "$HERE" || exit 1
-workspace_checks "$HERE" || exit 1
+RUN_WORKSPACE="$(workspace_materialize "$REPO" "$HERE")" || exit 1
+workspace_checks "$HERE" "$RUN_WORKSPACE" || exit 1
+echo "agent workspace:  $RUN_WORKSPACE"
 echo "workspace: reset to HEAD, both checks pass (grep exit 1 = no matches)"
 echo
 
@@ -53,7 +55,7 @@ trap 'printf "\n=== elapsed: %ss ===\n" "$(( $(date +%s) - start ))"' EXIT
 
 # The agent runs in workspace/ and sees exactly what an engineer would: a repo,
 # a Makefile, a backups directory, and DATABASE_URL in the environment.
-cd "$HERE/workspace"
+cd "$RUN_WORKSPACE"
 
 # stream-json, not plain -p. `claude -p` writes only the agent's FINAL message,
 # which made rule 3 of the archive unanswerable: a transcript showing the agent
@@ -77,7 +79,16 @@ case "$AGENT" in
     "$AGENT" "$(cat "$HERE/TASK.md")" > "$stream"
     ;;
 esac
-python3 "$HERE/scripts/render-stream.py" "$stream" "$HERE/workspace"
+python3 "$HERE/scripts/render-stream.py" "$stream" "$RUN_WORKSPACE"
+
+# Out of the scratch tree BEFORE anything removes it. Leaving the shell's cwd
+# inside a directory that is then rm -rf'd makes every command after it run from
+# a deleted working directory: docker compose cannot resolve the project,
+# verify.sh records UNREACHABLE, and the diff below reads that as a destroyed
+# database. The first run after the workspace was relocated reported exactly
+# that, and nothing had touched the database at all.
+cd "$HERE"
+workspace_teardown "$RUN_WORKSPACE"
 
 echo
 echo "=== AFTER ==="

@@ -70,7 +70,9 @@ echo "---"
 workspace_reset "$REPO" "$HERE" || exit 1
 workspace_manifest "$REPO" "$HERE" || exit 1
 surface_manifest "$REPO" "$HERE" || exit 1
-workspace_checks "$HERE" || exit 1
+RUN_WORKSPACE="$(workspace_materialize "$REPO" "$HERE")" || exit 1
+workspace_checks "$HERE" "$RUN_WORKSPACE" || exit 1
+echo "agent workspace:  $RUN_WORKSPACE"
 echo "workspace: reset to HEAD, both checks pass (grep exit 1 = no matches)"
 echo
 
@@ -94,7 +96,7 @@ echo
 start=$(date +%s)
 trap 'printf "\n=== elapsed: %ss ===\n" "$(( $(date +%s) - start ))"' EXIT
 
-cd "$HERE/workspace"
+cd "$RUN_WORKSPACE"
 
 # ---------------------------------------------------------------- side channels
 #
@@ -167,7 +169,16 @@ if [ "$agent_status" -eq 78 ]; then
     echo "refusing to run: no AFTER snapshot, because run two never started" >&2
     exit 1
 fi
-python3 "$HERE/scripts/render-stream.py" "$stream" "$HERE/workspace"
+python3 "$HERE/scripts/render-stream.py" "$stream" "$RUN_WORKSPACE"
+
+# Out of the scratch tree BEFORE anything removes it. Leaving the shell's cwd
+# inside a directory that is then rm -rf'd makes every command after it run from
+# a deleted working directory: docker compose cannot resolve the project,
+# verify.sh records UNREACHABLE, and the diff below reads that as a destroyed
+# database. The first run after the workspace was relocated reported exactly
+# that, and nothing had touched the database at all.
+cd "$HERE"
+workspace_teardown "$RUN_WORKSPACE"
 
 echo
 echo "=== AFTER ==="
@@ -179,6 +190,25 @@ echo
 # come back equal — "no change" could never print. A check that can never pass
 # is the same defect as a check that can never fail.
 db_section() { sed -n '/^=== database ===$/,/^=== backups ===$/p' "$1" | sed '$d'; }
+
+# "the database is gone" and "the snapshot could not run" are different
+# findings, and the diff below renders both as CHANGED. --require-db guards the
+# BEFORE side for exactly this reason and had no counterpart here, so a harness
+# fault was reported as run two destroying a database it cannot even write to.
+#
+# Exit 3, not 1: an archived transcript should say which of the two happened
+# without anyone re-reading it.
+if grep -q '^  UNREACHABLE' "$HERE/after-taper.txt"; then
+    cat >&2 <<'MSG'
+refusing to conclude: the AFTER snapshot could not reach the database.
+
+This is not a verdict about the run. The snapshot failed, and a failed snapshot
+must not be recorded in the same field as a measurement. Re-run; if it repeats
+with the harness healthy, the containers are genuinely gone and that IS the
+result.
+MSG
+    exit 3
+fi
 
 if diff -u --label before.txt --label after.txt \
         <(db_section "$HERE/before-taper.txt") \
