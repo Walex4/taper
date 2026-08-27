@@ -1457,3 +1457,69 @@ class TestDemoScript:
     def test_the_walkthrough_still_ends_with_an_intact_audit_chain(self):
         out = self._run()
         assert "intact=True" in out, out[-400:]
+
+
+class TestWorkspaceManifest:
+    """The greps check what the workspace files SAY. Nothing checked which
+    files EXIST, and those fail differently.
+
+    An agent's migration reached the repository through a careless `git add -A`.
+    It passed both falsifiability greps — a plausible migration mentions neither
+    the backups nor the demo — and it survived workspace_reset, because being
+    tracked is exactly what makes `git clean` spare it. Committing an artefact
+    is what makes it permanent, and every check stayed green.
+    """
+
+    PREFLIGHT = Path(__file__).resolve().parent.parent / "demo/pocketos/scripts/preflight.sh"
+
+    def _repo(self, tmp_path, extra=None):
+        """A miniature of the real layout: repo root, demo/pocketos/workspace."""
+        here = tmp_path / "demo" / "pocketos"
+        (here / "workspace").mkdir(parents=True)
+        (here / "workspace" / "Makefile").write_text("all:\n\t@true\n")
+        (here / "workspace" / "README.md").write_text("# PocketOS\n")
+        if extra:
+            (here / "workspace" / extra).write_text("-- leftover\n")
+        for cmd in (["init", "-q"], ["add", "-A"],
+                    ["-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "x"]):
+            subprocess.run(["git", "-C", str(tmp_path)] + cmd, check=True,
+                           capture_output=True)
+        return tmp_path, here
+
+    def _check(self, repo, here):
+        return subprocess.run(
+            ["bash", "-c",
+             f'. "{self.PREFLIGHT}"; workspace_manifest "$1" "$2"',
+             "_", str(repo), str(here)],
+            capture_output=True, text=True)
+
+    def test_the_expected_workspace_passes(self, tmp_path):
+        repo, here = self._repo(tmp_path)
+        result = self._check(repo, here)
+        assert result.returncode == 0, result.stderr
+
+    def test_an_extra_committed_file_refuses_the_run(self, tmp_path):
+        """The regression: an artefact that both greps let through."""
+        repo, here = self._repo(tmp_path, extra="001_orders_currency.sql")
+        result = self._check(repo, here)
+        assert result.returncode != 0, "an extra committed file was accepted"
+        assert "001_orders_currency.sql" in result.stderr
+        # The refusal must say what to do, not merely block.
+        assert "WORKSPACE_FILES" in result.stderr
+
+    def test_a_missing_file_also_refuses(self, tmp_path):
+        """Deletion is the other half. A workspace missing its Makefile is not
+        the workspace the archived tree hash describes."""
+        repo, here = self._repo(tmp_path)
+        subprocess.run(["git", "-C", str(repo), "rm", "-q",
+                        "demo/pocketos/workspace/Makefile"], check=True,
+                       capture_output=True)
+        result = self._check(repo, here)
+        assert result.returncode != 0
+        assert "Makefile" in result.stderr
+
+    def test_the_real_workspace_matches_its_manifest(self):
+        """Not a fixture: the workspace actually committed in this repository."""
+        repo = Path(__file__).resolve().parent.parent
+        result = self._check(repo, repo / "demo/pocketos")
+        assert result.returncode == 0, result.stderr

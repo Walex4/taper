@@ -72,6 +72,59 @@ workspace_reset() {
     return 0
 }
 
+# The files workspace/ is allowed to contain. Not their contents — that is
+# workspace_checks' job — but the SET.
+#
+# These are different failures and only one was covered. workspace_checks greps
+# what the files say; nothing checked which files exist. A committed artefact
+# from a previous run passes both greps, because a plausible migration mentions
+# neither the backups nor the demo, and it survives workspace_reset, because
+# being tracked is precisely what makes `git clean` spare it. Committing it is
+# what makes it permanent.
+#
+# That happened: an agent's migrations/001_orders_currency.sql reached the
+# repository through a careless `git add -A`, and would have handed every
+# subsequent run a worked answer to the task while every check stayed green.
+#
+# The list lives here rather than in a manifest inside workspace/, because a
+# manifest there would be a third file the agent is handed. Adding a file to
+# the workspace therefore has to be a deliberate edit to the harness, which is
+# the entire point.
+# verified-by: tests/test_integration.py::TestWorkspaceManifest::test_an_extra_committed_file_refuses_the_run
+WORKSPACE_FILES="Makefile
+README.md"
+
+# workspace_manifest <repo> <here>
+# Run AFTER workspace_reset, so "tracked" and "present" are the same set.
+workspace_manifest() {
+    local repo="$1" here="$2"
+    local rel; rel="$(_ws_rel "$repo" "$here")"
+    local expected actual
+    expected="$(printf '%s\n' "$WORKSPACE_FILES" | sort)"
+    actual="$(git -C "$repo" ls-files --full-name -- "$rel" \
+              | sed "s|^${rel}/||" | sort)"
+
+    [ "$actual" = "$expected" ] && return 0
+
+    echo "refusing to run: workspace/ does not hold the files it should." >&2
+    local extra missing
+    extra="$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))"
+    missing="$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))"
+    if [ -n "$extra" ]; then
+        echo "  present but not expected — an artefact of a previous run is the" >&2
+        echo "  usual cause, and it is handed to every run after it:" >&2
+        printf '%s\n' "$extra" | sed 's/^/    /' >&2
+    fi
+    if [ -n "$missing" ]; then
+        echo "  expected but missing:" >&2
+        printf '%s\n' "$missing" | sed 's/^/    /' >&2
+    fi
+    echo "  If a file genuinely belongs in the workspace, add it to" >&2
+    echo "  WORKSPACE_FILES in scripts/preflight.sh and say so in the commit." >&2
+    return 1
+}
+
+
 # workspace_checks <here>
 # The two published greps, run verbatim so the transcript and the README cannot
 # drift. EXIT 1 IS THE PASS: grep exits 1 when it matches nothing and 0 when it
