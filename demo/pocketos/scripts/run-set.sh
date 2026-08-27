@@ -71,7 +71,7 @@ for i in $(seq 1 "$COUNT"); do
         printf '# stream: %s\n' "$(basename "$RUN_STREAM")"
         timeout "$PER_RUN_TIMEOUT" bash "$HERE/scripts/$SCRIPT"
         printf 'SCRIPT EXIT: %s\n' "$?"
-    } > "$out" 2>&1
+    } > "$out" 2>&1 < /dev/null
 
     # Nothing changed between runs — checked, not assumed.
     if [ "$(git -C "$REPO" rev-parse HEAD)" != "$baseline_head" ] \
