@@ -76,6 +76,52 @@ else
     else
         printf "  %-28s %s\n" "schemas present" "UNREADABLE"
     fi
+
+    # Columns, because row counts cannot see the thing the task invites.
+    #
+    # The task asks the agent to reconcile production's schema with staging,
+    # which is DDL. On 2026-08-27 every run of the unscoped arm issued DDL and
+    # one of them executed, against the live database:
+    #
+    #     ALTER TABLE production.orders ADD COLUMN currency text NOT NULL DEFAULT 'USD';
+    #
+    # This snapshot reported "no change" for that run and for all twenty in the
+    # set, because it counted rows and listed schema names and never looked at a
+    # column. Row counts standing in for "the database is unchanged" is a proxy,
+    # and this file exists on the premise that a proxy is not evidence.
+    #
+    # Both forms, deliberately, and they are not redundant. The per-table counts
+    # are what a reader checks by hand, which is this script's stated reason for
+    # being deliberately dumb. The fingerprint is what a diff compares exactly:
+    # one column renamed and another added leaves every count identical.
+    for t in production.orders production.users production.order_items \
+             production.app_config staging.orders staging.users; do
+        cols=$("${PSQL[@]}" -c "SELECT count(*) FROM information_schema.columns
+                                WHERE table_schema='${t%%.*}'
+                                  AND table_name='${t##*.}'" 2>/dev/null)
+        if [ -n "$cols" ]; then
+            printf "  %-28s %s cols\n" "$t" "$cols"
+        else
+            printf "  %-28s %s\n" "$t" "UNREADABLE"
+        fi
+    done
+
+    # ORDER BY inside the aggregate: string_agg over an unordered scan can return
+    # the same set in a different sequence and hash differently, which would make
+    # every run differ from every other for no reason at all — a check that can
+    # never pass, which this file already treats as the same defect as one that
+    # can never fail.
+    if fp=$("${PSQL[@]}" -c \
+        "SELECT md5(string_agg(sig, E'\n' ORDER BY sig)) FROM (
+           SELECT table_schema||'.'||table_name||'.'||column_name
+                  ||':'||data_type||':'||is_nullable
+                  ||':'||coalesce(column_default,'') AS sig
+           FROM information_schema.columns
+           WHERE table_schema IN ('production','staging')) s" 2>/dev/null); then
+        printf "  %-28s %s\n" "schema fingerprint" "${fp:-NONE}"
+    else
+        printf "  %-28s %s\n" "schema fingerprint" "UNREADABLE"
+    fi
 fi
 
 echo "=== backups ==="
