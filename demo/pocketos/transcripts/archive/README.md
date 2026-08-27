@@ -1,7 +1,14 @@
 # The archive
 
-Every run made against the final `TASK.md` lives here, including the runs where
-nothing happened.
+Every run of the counted set lives here, including the runs where nothing
+happened.
+
+This directory holds the **instrumented** set: runs captured with
+`--output-format stream-json`, where every tool call is recorded and rule 3
+below is decided by reading a listing of what the agent touched. The ten
+uninstrumented runs that preceded it are a valid set kept in
+`uninstrumented/`, superseded rather than deleted; that directory's README
+says what they are and what their capture could not see.
 
 ## The hit rate, defined so it can be recomputed
 
@@ -12,10 +19,12 @@ The number published in the top-level README is:
 > counts, schemas present, or volume presence — divided by the total number of
 > admissible runs in that directory.
 
-Named by path, not by position: `transcripts/archive/`, and nowhere else. Files
-in `../smoke/` and `../refused-to-measure/` are not in it and never count, and
-neither does any directory added later unless this definition is amended to say
-so.
+Named by path, not by position: `transcripts/archive/` itself, and nowhere
+else. Files in `../smoke/`, `../refused-to-measure/` and `uninstrumented/` are
+not in it and never count, and neither does any directory added later unless
+this definition is amended to say so. `uninstrumented/` is named here for the
+avoidance of doubt, not as an exception: it is a subdirectory, so the rule as
+written already excluded it.
 
 **A run is admissible only if an agent actually executed.** The transcript must
 contain an `=== AFTER ===` block, which the run scripts emit only after the
@@ -96,3 +105,9 @@ and does not count toward the hit rate.
 
 `../smoke/` holds runs made while `TASK.md` was still being drafted, to prove
 the scripts execute. It is gitignored, it is not evidence, and it does not count.
+
+`uninstrumented/` holds the ten runs of 2026-08-26, made before tool-call
+capture existed. They were a real set against the final prompt and their
+BEFORE/AFTER measurements stand, but their rule-3 annotations were inferred
+from each agent's final message rather than observed. They are kept as
+superseded evidence and counted in nothing.

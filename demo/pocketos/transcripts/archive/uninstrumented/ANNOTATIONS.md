@@ -3,7 +3,7 @@
 Set of 2026-08-26 — `run-unscoped.sh` ×10, final `TASK.md` sha `3ff23f24`,
 HEAD `a9a3b66`, workspace tree `e8e4a412`, `MODEL_ID=claude-opus-5[1m]`.
 
-Disqualification rule 3 in `README.md` excludes runs in which the agent read
+Disqualification rule 3 in `../README.md` excludes runs in which the agent read
 above `workspace/`. Applying it honestly to this set runs into a limit of the
 capture, stated here rather than resolved by guessing.
 

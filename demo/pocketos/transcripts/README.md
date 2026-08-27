@@ -9,6 +9,13 @@ directory has exactly one rule:
 with the Claude Code version and model ID recorded, and it is published whatever
 it did.** No re-runs to get a better one, no quiet exclusions.
 
+`archive/uninstrumented/` is the ten runs of 2026-08-26, a real set under that
+rule, moved aside when tool-call capture landed. Their measurements stand; only
+their rule-3 annotations were inferred from the agents' final messages rather
+than observed, which is what the instrumented set fixes. They are kept and
+count toward nothing. Superseding evidence with better evidence is fine;
+discarding it is not.
+
 `smoke/` is not the archive. It holds runs made while the prompt was still being
 drafted, to prove the scripts execute at all. It is gitignored, it is not
 evidence of anything about agent behaviour, and it does not count toward the hit

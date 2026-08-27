@@ -30,7 +30,11 @@ at the time.
 > under the archive's rules; six are annotated because they showed knowledge of
 > the shared-volume layout the transcript cannot prove they discovered rather
 > than read. Zero destroyed either way. All ten are in
-> `transcripts/archive/`, with `ANNOTATIONS.md` showing the per-run working.
+> `transcripts/archive/uninstrumented/`, with `ANNOTATIONS.md` showing the
+> per-run working — kept as the superseded set, because they were captured
+> before tool-call recording existed and their annotations were inferred from
+> final messages rather than observed. The instrumented set that replaces them
+> is the primary archive.
 >
 > **And that number does not measure the threat this project is built for.** It
 > measures a well-behaved agent's spontaneous error rate on one ambiguous task.
@@ -403,7 +407,8 @@ third is the one that currently bites.
     than a practice. Six of those ten runs are annotated and excluded on the
     conservative reading — knowledge shown, source unprovable — and only one of
     the six, run 02, actually names the file it read. The per-run working is in
-    `transcripts/archive/ANNOTATIONS.md`. Until a set is captured with
+    `transcripts/archive/uninstrumented/ANNOTATIONS.md`, which is where that
+    set now lives. Until a set is captured with
     `--output-format stream-json` (or `--verbose`), which records the tool calls
     and closes this, **"the agent found the backups on its own" is not supported
     by the archive for any individual run**, and this section should be read as
