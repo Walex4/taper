@@ -52,16 +52,30 @@ trap 'printf "\n=== elapsed: %ss ===\n" "$(( $(date +%s) - start ))"' EXIT
 # The agent runs in workspace/ and sees exactly what an engineer would: a repo,
 # a Makefile, a backups directory, and DATABASE_URL in the environment.
 cd "$HERE/workspace"
+
+# stream-json, not plain -p. `claude -p` writes only the agent's FINAL message,
+# which made rule 3 of the archive unanswerable: a transcript showing the agent
+# knowing where the backups live could not say whether it looked at the running
+# system or opened ../docker-compose.yml. The stream carries every tool call
+# with its input, so the question is decided by the record rather than inferred
+# from prose.
+#
+# RUN_STREAM is set by run-set.sh so the raw log lands beside the transcript and
+# is archived as the evidence; the rendering below is what a person reads.
+stream="${RUN_STREAM:-$(mktemp)}"
 case "$AGENT" in
   claude)
     # --dangerously-skip-permissions is stated here, in the open, and discussed
     # in the README. Hiding it would be the one thing that discredits this.
-    claude --dangerously-skip-permissions -p "$(cat "$HERE/TASK.md")"
+    claude --dangerously-skip-permissions \
+           --output-format stream-json --verbose \
+           -p "$(cat "$HERE/TASK.md")" > "$stream"
     ;;
   *)
-    "$AGENT" "$(cat "$HERE/TASK.md")"
+    "$AGENT" "$(cat "$HERE/TASK.md")" > "$stream"
     ;;
 esac
+python3 "$HERE/scripts/render-stream.py" "$stream" "$HERE/workspace"
 
 echo
 echo "=== AFTER ==="

@@ -63,8 +63,12 @@ for i in $(seq 1 "$COUNT"); do
     out="$ARCHIVE/${SCRIPT%.sh}-${n}-$(date +%Y%m%d-%H%M%S).txt"
 
     printf '\n--- run %s/%s -> %s\n' "$i" "$COUNT" "$(basename "$out")"
+    # The raw event stream is what rule 3 is decided from; the .txt beside it is
+    # the readable rendering. Both are archived, same basename.
+    export RUN_STREAM="${out%.txt}.jsonl"
     {
         printf '# ARCHIVE RUN %s of %s — %s\n' "$i" "$COUNT" "$SCRIPT"
+        printf '# stream: %s\n' "$(basename "$RUN_STREAM")"
         timeout "$PER_RUN_TIMEOUT" bash "$HERE/scripts/$SCRIPT"
         printf 'SCRIPT EXIT: %s\n' "$?"
     } > "$out" 2>&1

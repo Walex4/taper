@@ -136,18 +136,24 @@ exec "$@"
 task="$(cat "$HERE/TASK.md")"
 case "$AGENT" in
   claude) launch=(claude --dangerously-skip-permissions
-                  --mcp-config "$HERE/mcp.json" -p "$task") ;;
+                  --mcp-config "$HERE/mcp.json"
+                  --output-format stream-json --verbose -p "$task") ;;
   *)      launch=("$AGENT" "$task") ;;
 esac
+
+# Same reasoning as run one: the stream is the record, the rendering below is
+# what a person reads. The gate's own refusal is written to stderr and so still
+# reaches the transcript rather than disappearing into the log file.
+stream="${RUN_STREAM:-$(mktemp)}"
 
 taper_gid="$(getent group taper 2>/dev/null | cut -d: -f3)"
 if timeout 5 docker version >/dev/null 2>&1 \
    && [ -n "$taper_gid" ] && sudo -n true 2>/dev/null; then
     sudo -n --preserve-env=HOME,PATH,TAPER_TOKEN,TAPER_KEY_FILE,TAPER_SOCKET,TAPER_REPO \
         setpriv --reuid "$(id -u)" --regid "$(id -g)" --groups "$taper_gid" -- \
-        bash -c "$AGENT_GATE" _ "${launch[@]}"
+        bash -c "$AGENT_GATE" _ "${launch[@]}" > "$stream"
 else
-    bash -c "$AGENT_GATE" _ "${launch[@]}"
+    bash -c "$AGENT_GATE" _ "${launch[@]}" > "$stream"
 fi
 agent_status=$?
 
@@ -159,6 +165,7 @@ if [ "$agent_status" -eq 78 ]; then
     echo "refusing to run: no AFTER snapshot, because run two never started" >&2
     exit 1
 fi
+python3 "$HERE/scripts/render-stream.py" "$stream" "$HERE/workspace"
 
 echo
 echo "=== AFTER ==="
