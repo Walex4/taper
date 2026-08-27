@@ -1523,3 +1523,93 @@ class TestWorkspaceManifest:
         repo = Path(__file__).resolve().parent.parent
         result = self._check(repo, repo / "demo/pocketos")
         assert result.returncode == 0, result.stderr
+
+
+class TestSurfaceManifest:
+    """workspace_manifest pins what the agent is handed. This pins what an
+    agent that walks up one level can read.
+
+    The demo's README concedes that directory is the weaker half: it holds the
+    compose file whose comments discuss the shared volume, and the README
+    containing the whole argument. An artefact committed there is read by any
+    run that looks, and one already was — a run wrote backups-host/ before the
+    reset was widened.
+
+    The property is that the readable surface is what we think it is, not that
+    the directory never changes. Two of these tests exist to prove the second
+    thing is NOT being asserted.
+    """
+
+    PREFLIGHT = Path(__file__).resolve().parent.parent / "demo/pocketos/scripts/preflight.sh"
+
+    def _check(self, repo, here):
+        return subprocess.run(
+            ["bash", "-c", f'. "{self.PREFLIGHT}"; surface_manifest "$1" "$2"',
+             "_", str(repo), str(here)],
+            capture_output=True, text=True)
+
+    def test_the_real_surface_matches_its_manifest(self):
+        """Against the repository itself, so SURFACE_FILES cannot drift from
+        the thing it describes."""
+        repo = Path(__file__).resolve().parent.parent
+        result = self._check(repo, repo / "demo/pocketos")
+        assert result.returncode == 0, result.stderr
+
+    def _fixture(self, tmp_path, extra=None):
+        here = tmp_path / "demo" / "pocketos"
+        (here / "scripts").mkdir(parents=True)
+        (here / "seed").mkdir()
+        (here / "workspace").mkdir()
+        (here / "transcripts" / "archive").mkdir(parents=True)
+        for name in (".gitignore", "README.md", "TASK.md", "docker-compose.yml",
+                     "mcp.json", "policy.pocketos.json"):
+            (here / name).write_text("x\n")
+        for name in ("preflight.sh", "render-stream.py", "run-set.sh",
+                     "run-taper.sh", "run-unscoped.sh", "verify.sh"):
+            (here / "scripts" / name).write_text("x\n")
+        for name in ("01-schema.sql", "02-data.sql"):
+            (here / "seed" / name).write_text("x\n")
+        # Things that must be tolerated, not pinned.
+        (here / "workspace" / "Makefile").write_text("x\n")
+        (here / "transcripts" / "archive" / "run-01.txt").write_text("x\n")
+        if extra:
+            (here / extra).parent.mkdir(parents=True, exist_ok=True)
+            (here / extra).write_text("x\n")
+        for cmd in (["init", "-q"], ["add", "-Af"],
+                    ["-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "x"]):
+            subprocess.run(["git", "-C", str(tmp_path)] + cmd, check=True,
+                           capture_output=True)
+        return tmp_path, here
+
+    def test_an_artefact_committed_one_level_up_refuses_the_run(self, tmp_path):
+        repo, here = self._fixture(tmp_path, extra="backups-host/prod.sql.gz")
+        result = self._check(repo, here)
+        assert result.returncode != 0, "an artefact above workspace/ was accepted"
+        assert "backups-host/prod.sql.gz" in result.stderr
+        assert "SURFACE_FILES" in result.stderr
+
+    def test_a_growing_archive_does_not_refuse(self, tmp_path):
+        """transcripts/ is the run's own output. Pinning it would make the gate
+        refuse every run after the first — a check that cannot pass."""
+        repo, here = self._fixture(tmp_path)
+        for n in range(2, 6):
+            (here / "transcripts" / "archive" / f"run-0{n}.txt").write_text("x\n")
+        subprocess.run(["git", "-C", str(repo), "add", "-Af"], check=True,
+                       capture_output=True)
+        assert self._check(repo, here).returncode == 0
+
+    def test_editing_a_pinned_file_does_not_refuse(self, tmp_path):
+        """The SET is pinned, never the contents. README.md and the scripts are
+        edited constantly."""
+        repo, here = self._fixture(tmp_path)
+        (here / "README.md").write_text("substantially rewritten\n")
+        assert self._check(repo, here).returncode == 0
+
+    def test_a_deleted_script_refuses(self, tmp_path):
+        repo, here = self._fixture(tmp_path)
+        subprocess.run(["git", "-C", str(repo), "rm", "-q",
+                        "demo/pocketos/scripts/verify.sh"], check=True,
+                       capture_output=True)
+        result = self._check(repo, here)
+        assert result.returncode != 0
+        assert "verify.sh" in result.stderr

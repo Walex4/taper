@@ -125,6 +125,75 @@ workspace_manifest() {
 }
 
 
+# The readable surface one level up.
+#
+# workspace_manifest pins what the agent is HANDED. This pins what an agent that
+# walks up can READ — which the demo's own README concedes is the weaker half:
+# demo/pocketos/ holds the compose file whose comments discuss the shared volume
+# and the README containing the whole argument. An artefact committed there is
+# read by any run that looks, and one already has: a run wrote
+# demo/pocketos/backups-host/ before the reset was widened to remove it.
+#
+# The property is that the readable surface is exactly what we think it is —
+# NOT that nothing in this directory ever changes. So this pins the SET of
+# files, never their contents: README.md and the scripts are edited constantly
+# and pinning content would refuse every run after the first.
+#
+# Two exclusions, both deliberate:
+#   transcripts/  the run's own output; it grows by design, and pinning it
+#                 would make the gate refuse every run after the first.
+#   workspace/    pinned exactly by workspace_manifest above. Two lists
+#                 covering one directory is two lists that can disagree.
+#
+# Run artefacts need no exclusion: before.txt and friends are gitignored, so
+# `git ls-files` never sees them.
+# verified-by: tests/test_integration.py::TestSurfaceManifest::test_an_artefact_committed_one_level_up_refuses_the_run
+SURFACE_FILES=".gitignore
+README.md
+TASK.md
+docker-compose.yml
+mcp.json
+policy.pocketos.json
+scripts/preflight.sh
+scripts/render-stream.py
+scripts/run-set.sh
+scripts/run-taper.sh
+scripts/run-unscoped.sh
+scripts/verify.sh
+seed/01-schema.sql
+seed/02-data.sql"
+
+# surface_manifest <repo> <here>
+surface_manifest() {
+    local repo="$1" here="$2"
+    local rel="${here#"$repo"/}"
+    local expected actual
+    expected="$(printf '%s\n' "$SURFACE_FILES" | sort)"
+    actual="$(git -C "$repo" ls-files --full-name -- "$rel" \
+              | grep -vE "^${rel}/(transcripts|workspace)/" \
+              | sed "s|^${rel}/||" | sort)"
+
+    [ "$actual" = "$expected" ] && return 0
+
+    echo "refusing to run: the readable surface above workspace/ is not what" >&2
+    echo "the harness expects." >&2
+    local extra missing
+    extra="$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))"
+    missing="$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))"
+    if [ -n "$extra" ]; then
+        echo "  present but not expected — an agent that walks up reads these:" >&2
+        printf '%s\n' "$extra" | sed "s|^|    $rel/|" >&2
+    fi
+    if [ -n "$missing" ]; then
+        echo "  expected but missing:" >&2
+        printf '%s\n' "$missing" | sed "s|^|    $rel/|" >&2
+    fi
+    echo "  If the change is intended, update SURFACE_FILES in" >&2
+    echo "  scripts/preflight.sh and say so in the commit." >&2
+    return 1
+}
+
+
 # workspace_checks <here>
 # The two published greps, run verbatim so the transcript and the README cannot
 # drift. EXIT 1 IS THE PASS: grep exits 1 when it matches nothing and 0 when it

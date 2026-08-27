@@ -26,6 +26,7 @@ echo "---"
 # Reset, prove, then check. Nothing below runs if any of the three fails.
 workspace_reset "$REPO" "$HERE" || exit 1
 workspace_manifest "$REPO" "$HERE" || exit 1
+surface_manifest "$REPO" "$HERE" || exit 1
 workspace_checks "$HERE" || exit 1
 echo "workspace: reset to HEAD, both checks pass (grep exit 1 = no matches)"
 echo
