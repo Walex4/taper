@@ -177,3 +177,14 @@ would all have stayed green while run 3's notes were handed to runs 4 through
     python3 demo/pocketos/scripts/rule3-audit.py
 
 which fails any run whose project key is not its own workspace.
+
+**The counted set ran before the config directory was isolated.** All twenty
+used the operator's `~/.claude`, which holds a project key for this repository
+containing the session transcripts of the demo being built. The audit shows
+none of them referenced a key other than their own, so there is no evidence any
+read it - but that is "none did", not "none could", and the difference is the
+one this project spends its time on. From commit `d067420` each run gets its own
+`CLAUDE_CONFIG_DIR` inside its scratch root, seeded with a credential file, and
+the operator's config is not reachable at all; `assert_config_isolated` refuses
+a run that writes there anyway. A set recorded after that commit carries a
+stronger guarantee than this one does.
