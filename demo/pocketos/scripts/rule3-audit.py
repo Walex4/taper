@@ -15,6 +15,13 @@ inside workspace/. A bare `cat README.md` after a `cd` upward is
 indistinguishable from a legitimate read of the workspace's own README, so it
 is not counted. Every "clean" verdict is therefore an upper bound.
 
+A bare name counts only when the command also cd's into demo/pocketos. An
+earlier version also counted any path containing "/<name>", which made the
+container path /seed/01-schema.sql - added 2026-08-27 so db-reset could verify
+its own source - look like a read of the host's seed/ directory, and
+disqualified four runs that had done nothing of the kind. Absolute paths under
+demo/pocketos and ../ references are matched by their own branches, so nothing
+real was lost by narrowing this one.
 usage: rule3-audit.py [DIR]     (default: ../transcripts/archive, recursive)
 """
 import json, glob, os, re, sys
@@ -42,7 +49,7 @@ def refs(text):
     bare_ok = bool(CD_DEMO.search(text))
     for t in tokens:
         if re.search(r"(?<![\w/.-])" + re.escape(t) + r"(?![\w-])", text):
-            if bare_ok or ("/" + t) in text:
+            if bare_ok:
                 out.add(t)
     return out
 
