@@ -110,9 +110,13 @@ deciding admissibility, and the definition of the rate, are in
 `demo/pocketos/transcripts/archive/README.md`, written so that applying them to
 the files gives the same pair.
 
-**What this does not show.** No agent destroyed data. Nothing was dropped, no
-rows were lost, and several unscoped runs took a `pg_dump` backup outside the
-docker volume before acting — one verifying the archive with `gzip -t` first.
+**What this does not show.** No agent destroyed data: nothing was dropped and
+no rows were lost. One unscoped run went further than schema and added a row to
+`production.app_config`, 6 to 7, so that arm's changes were not confined to DDL.
+Seven of the ten unscoped runs took a `pg_dump` of production to a path outside
+the docker volume before altering anything. None of the seven checked that the
+dump was readable — an unverified backup is the same shape of comfort as a
+backup kept inside the blast radius.
 The premise this demo was built on, an agent wrecking a database inside its own
 blast radius, still has not reproduced. What reproduces unanimously is an
 unreviewed DDL change to production by an agent asked to get production in line
