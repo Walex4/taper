@@ -26,6 +26,16 @@ _ws_rel() {
     printf '%s/workspace' "${here#"$repo"/}"
 }
 
+# mono - seconds on a clock that does not count suspended time.
+#
+# date(1) is wall clock. On 2026-08-27 two runs recorded 1936s and 10292s of
+# "elapsed" for roughly 90 and 120 seconds of work, because the host suspended
+# mid-run. The same property explains why `timeout` never fired on either: its
+# timer excludes suspend and the transcript's clock did not, so the field read
+# as a measurement of work and was nothing of the kind. Both are recorded now,
+# which makes the difference visible instead of hiding it in one number.
+mono() { python3 -c 'import time; print(int(time.monotonic()))'; }
+
 # workspace_reset <repo> <here>
 # Restores tracked files, removes untracked AND ignored ones, then proves the
 # result is identical to HEAD. Scoped to the workspace pathspec throughout: this
@@ -357,9 +367,15 @@ transcript_header() {
     # once in a README about a state that has changed many times since.
     #   git cat-file -p <hash>     lists exactly the files the agent was handed
     printf 'workspace tree:  %s\n' "$(workspace_tree_hash "$repo" "$here")"
+    # Two fields because they are two facts. The hash names what is COMMITTED
+    # under demo/pocketos; the dirty list names what differs from it right now.
+    # These were one line labelled "demo tree:" that printed the dirty list — a
+    # name promising a hash over a value that was never one.
+    printf 'demo tree:       %s\n' \
+        "$(git -C "$repo" rev-parse "HEAD:${here#"$repo"/}" 2>/dev/null || echo UNKNOWN)"
     local dirty
     dirty="$(git -C "$repo" status --porcelain -- "${here#"$repo"/}" | tr '\n' ' ')"
-    printf 'demo tree:       %s\n' "${dirty:-clean (matches HEAD)}"
+    printf 'demo dirty:      %s\n' "${dirty:-clean (matches HEAD)}"
 }
 
 # workspace_materialize <repo> <here>
@@ -429,6 +445,22 @@ workspace_teardown() {
     echo
     echo "=== workspace after ==="
     (cd "$ws" && find . -mindepth 1 | sed 's|^\./|  |' | sort) || true
+    # Claude Code keys project state to the working directory, so every scratch
+    # path grows a directory under ~/.claude/projects that outlives the run and
+    # can carry agent memory into the next one. Before the workspace moved, all
+    # runs shared a cwd and therefore shared that directory; a memory file
+    # written in run 3 would have been loaded by runs 4 through 10, invisible to
+    # the reset, both manifests and the tree hash. It never happened, but only
+    # because no run wrote one.
+    #
+    # The name is the path with / and . replaced by -, so it is computed rather
+    # than globbed: a wildcard delete under someone's ~/.claude is not a risk
+    # worth taking to tidy up.
+    local proj
+    proj="$HOME/.claude/projects/$(printf '%s' "$ws" | tr './' '--')"
+    case "$proj" in
+        "$HOME/.claude/projects/-tmp-"*) rm -rf -- "$proj" ;;
+    esac
     root="$(dirname "$ws")"
     case "$root" in
         /tmp/*|/var/tmp/*) rm -rf -- "$root" ;;

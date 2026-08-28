@@ -51,7 +51,8 @@ fi
 echo
 
 start=$(date +%s)
-trap 'printf "\n=== elapsed: %ss ===\n" "$(( $(date +%s) - start ))"' EXIT
+start_mono=$(mono)
+trap 'printf "\n=== elapsed: %ss work, %ss wall ===\n" "$(( $(mono) - start_mono ))" "$(( $(date +%s) - start ))"' EXIT
 
 # The agent runs in workspace/ and sees exactly what an engineer would: a repo,
 # a Makefile, a backups directory, and DATABASE_URL in the environment.

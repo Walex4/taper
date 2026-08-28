@@ -105,7 +105,8 @@ fi
 echo
 
 start=$(date +%s)
-trap 'printf "\n=== elapsed: %ss ===\n" "$(( $(date +%s) - start ))"' EXIT
+start_mono=$(mono)
+trap 'printf "\n=== elapsed: %ss work, %ss wall ===\n" "$(( $(mono) - start_mono ))" "$(( $(date +%s) - start ))"' EXIT
 
 cd "$RUN_WORKSPACE"
 
