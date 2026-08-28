@@ -83,8 +83,46 @@ def _statement_count_is_one(statement: str) -> bool:
 # Crude table extraction for the audit trail and the fast-fail check. This is
 # exactly the part that libpg_query replaces. Note it cannot resolve search_path,
 # so require schema-qualified names in policy and set search_path server-side.
+# DDL names its target differently from DML, and leaving it out did not make
+# DDL unconstrained-looking - it made it look CLEAN. `alter table
+# production.orders add column x text` matched nothing here, so tables() returned
+# the empty set, and the empty set satisfies every subset constraint a policy can
+# write. A grant of statement_kind "ddl" with a tables allowlist would have
+# admitted DROP TABLE on any table in the database.
+# verified-by: tests/test_taper.py::TestDDLNamesItsTable::test_alter_table_reports_the_table_it_alters
 _TABLES = re.compile(
-    r"\b(?:from|join|into|update)\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)",
+    r"\b(?:from|join|into|update"
+    r"|(?:alter|drop|create|truncate)\s+table"
+    r"(?:\s+if\s+(?:not\s+)?exists)?(?:\s+only)?"
+    r"|truncate)"
+    r"\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)",
+    re.I,
+)
+
+# One ALTER TABLE ... ADD COLUMN, and nothing else wearing its clothes.
+#
+# ALTER TABLE takes a COMMA-SEPARATED LIST of actions, so `ADD COLUMN a int,
+# DROP COLUMN b` is a single statement whose leading action is an add. That is
+# why the disqualifiers are searched across the whole text rather than checked
+# at the head: matching the beginning of a statement is not the same as knowing
+# what the statement does.
+#
+# Conservative on purpose. It refuses ADD COLUMN with a constraint, a foreign
+# key, a generated expression or a USING clause - all legitimate SQL, none of it
+# needed to add a column, and each one a place where "adds a column" stops being
+# the whole truth. Refusing work that is safe costs a retry. Admitting work that
+# is not costs the thing this exists to protect.
+# verified-by: tests/test_taper.py::TestAddColumnIsItsOwnKind::test_a_trailing_drop_is_not_an_add_column
+_ADD_COLUMN_HEAD = re.compile(
+    r"^\s*alter\s+table\s+(?:only\s+)?"
+    r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?"
+    r"\s+add\s+(?:column\s+)?(?:if\s+not\s+exists\s+)?"
+    r"[A-Za-z_][A-Za-z0-9_]*\s",
+    re.I | re.S,
+)
+_NOT_ONLY_ADD_COLUMN = re.compile(
+    r"\b(drop|rename|owner|inherit|attach|detach|constraint|references"
+    r"|generated|using|set\s+schema|set\s+tablespace)\b",
     re.I,
 )
 
@@ -103,6 +141,12 @@ def classify(statement: str) -> str:
         return "ambiguous"             # never grant this
     if _DANGEROUS_FN.search(statement):
         return "dangerous"
+    # Before the _KIND loop, which would call this "ddl" - the bucket that also
+    # holds DROP and TRUNCATE. A policy can permit this kind without permitting
+    # those; that is the entire reason it is a kind.
+    # verified-by: tests/test_taper.py::TestAddColumnIsItsOwnKind::test_add_column_is_not_the_same_permission_as_drop_table
+    if _ADD_COLUMN_HEAD.match(statement) and not _NOT_ONLY_ADD_COLUMN.search(statement):
+        return "ddl_add_column"
     for pattern, kind in _KIND:
         if pattern.match(statement):
             if kind == "select" and not _TABLES.search(statement):
@@ -161,6 +205,77 @@ class PostgresAdapter(Adapter):
                     "row_security": "on",
                 },
                 "boundary": "postgres:role+grant+force-rls",
+                "this_parse_is_not_the_boundary": True,
+            },
+        )
+
+
+class PostgresMigrateAdapter(Adapter):
+    """One column, added through a function the agent cannot reach around.
+
+    Every other adapter here builds an argv array from fields. This one builds a
+    PARAMETER LIST: the statement is a fixed string with placeholders, written
+    once, right here, and the agent's values travel beside it as bound
+    parameters. classify() is not involved because there is nothing to classify.
+
+    The server-side function is the boundary, exactly as this module's docstring
+    demands - and unlike the SELECT path, it is a boundary that has to be
+    installed. If production.taper_add_column is missing or its EXECUTE grant is
+    absent, Postgres refuses and the agent sees the refusal. There is no path
+    here that quietly falls back to composing DDL.
+
+    verified-by: tests/test_taper.py::TestMigrateAdapter::test_no_agent_value_reaches_the_statement_text
+    """
+
+    operation = "pg.migrate"
+
+    # Written here as well as in the function. Two lists that must agree is the
+    # same shape as the parser and the server: if they ever disagree, the one
+    # holding the data wins, and the disagreement is visible in the audit log.
+    FUNCTION = "production.taper_add_column"
+
+    def __init__(self, dsn_ref: str = "pg.dsn", statement_timeout_ms: int = 15_000):
+        self.dsn_ref = dsn_ref
+        self.statement_timeout_ms = statement_timeout_ms
+
+    def declared_secret_refs(self) -> set[str]:
+        return {self.dsn_ref}
+
+    def derive(self, request: dict) -> dict:
+        # Exactly the attributes policy is expected to constrain, and no more:
+        # the broker refuses any attribute a token does not name, so deriving a
+        # field nobody thought to constrain is how a request gets refused for
+        # the wrong reason.
+        return {
+            "database": request["database"],
+            "table": request["table"].lower(),
+            "type": request["type"].lower(),
+        }
+
+    def plan(self, request: dict, grant: dict) -> ExecPlan:
+        schema, _, table = request["table"].lower().partition(".")
+        params = [schema, table, request["column"].lower(), request["type"].lower(),
+                  request.get("default"), bool(request.get("not_null", False))]
+        return ExecPlan(
+            kind="sql",
+            secret_refs={"dsn": self.dsn_ref},
+            detail={
+                "database": request["database"],
+                "operation": "pg.migrate",
+                "table": request["table"].lower(),
+                "column": request["column"].lower(),
+                "type": request["type"].lower(),
+                "statement_text":
+                    f"SELECT {self.FUNCTION}(%s, %s, %s, %s, %s, %s)",
+                "statement_params": params,
+                "max_rows": 1,
+                "session_settings": {
+                    "statement_timeout": f"{self.statement_timeout_ms}ms",
+                    "idle_in_transaction_session_timeout": "5s",
+                    "default_transaction_read_only": "off",
+                    "row_security": "on",
+                },
+                "boundary": "postgres:security-definer-function",
                 "this_parse_is_not_the_boundary": True,
             },
         )

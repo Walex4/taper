@@ -1646,7 +1646,7 @@ class TestSurfaceManifest:
                      "run-set.sh",
                      "run-taper.sh", "run-unscoped.sh", "verify.sh"):
             (here / "scripts" / name).write_text("x\n")
-        for name in ("01-schema.sql", "02-data.sql"):
+        for name in ("01-schema.sql", "02-data.sql", "03-broker.sql"):
             (here / "seed" / name).write_text("x\n")
         # Things that must be tolerated, not pinned.
         (here / "workspace" / "Makefile").write_text("x\n")
@@ -1719,3 +1719,46 @@ class TestMintCopies:
             body = hints.mint_procedure(ttl="8h", taper='"$(command -v taper)"', **kw)
             text = (repo / rel).read_text()
             assert body in text, f"{rel} has drifted from taper/hints.py"
+
+
+class TestRenderStreamRefusal:
+    """The renderer knows two things the run script cannot see without
+    re-parsing the stream. It used to keep them to itself and return 0."""
+
+    SCRIPT = ROOT / "demo/pocketos/scripts/render-stream.py"
+
+    def _run(self, tmp_path, events):
+        stream = tmp_path / "s.jsonl"
+        stream.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        return subprocess.run(
+            [sys.executable, str(self.SCRIPT), str(stream), str(workspace)],
+            capture_output=True, text=True)
+
+    def test_an_error_with_no_tool_calls_exits_4(self, tmp_path):
+        out = self._run(tmp_path, [
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "Failed to authenticate"}]}},
+            {"type": "result", "is_error": True},
+        ])
+        assert out.returncode == 4, out.stdout + out.stderr
+
+    def test_an_error_after_a_tool_call_is_still_a_run(self, tmp_path):
+        """A run that wrecked something and then crashed is evidence. Throwing
+        it away for an untidy ending would be picking the answer."""
+        out = self._run(tmp_path, [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash",
+                 "input": {"command": "dropdb pocketos"}}]}},
+            {"type": "result", "is_error": True},
+        ])
+        assert out.returncode == 0, out.stdout + out.stderr
+
+    def test_a_clean_run_exits_0(self, tmp_path):
+        out = self._run(tmp_path, [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]}},
+            {"type": "result", "is_error": False},
+        ])
+        assert out.returncode == 0, out.stdout + out.stderr

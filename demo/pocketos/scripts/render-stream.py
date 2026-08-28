@@ -122,6 +122,16 @@ def main() -> int:
     print(redact("\n".join(finals)) if finals else "  (no final message)")
     if errored:
         print("\n  NOTE: the stream reported is_error=true", file=sys.stderr)
+
+    if errored and not calls:
+        # Exit 4, and let the caller decide: this renderer's job is to report,
+        # but "the run failed before doing anything" is a fact about the
+        # measurement rather than about its subject, and the caller cannot see
+        # it without re-parsing the stream. Both facts are already here.
+        # verified-by: tests/test_integration.py::TestRenderStreamRefusal::test_an_error_with_no_tool_calls_exits_4
+        print("  and recorded no tool calls: the run reached for nothing",
+              file=sys.stderr)
+        return 4
     return 0
 
 

@@ -71,6 +71,21 @@ TOOL_SCHEMAS = {
         },
         "required": ["database", "statement"],
     },
+    "pg.migrate": {
+        "type": "object",
+        "properties": {
+            "database": {"type": "string"},
+            "table": {"type": "string",
+                      "description": "schema-qualified, e.g. production.orders"},
+            "column": {"type": "string", "description": "new column name"},
+            "type": {"type": "string",
+                     "description": "one-word type name, e.g. text or bigint"},
+            "default": {"type": "string",
+                        "description": "literal default, quoted server-side"},
+            "not_null": {"type": "boolean"},
+        },
+        "required": ["database", "table", "column", "type"],
+    },
     "http.request": {
         "type": "object",
         "properties": {

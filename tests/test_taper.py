@@ -969,3 +969,137 @@ class TestExecutor:
         assert any(sql == "SELECT key FROM production.app_config"
                    for sql, _ in executed), executed
         assert result.ok
+
+
+class TestDDLNamesItsTable:
+    """Until 2026-08-28 it did not, and that was the quiet half of the defect.
+
+    A DDL statement that reports no tables does not look suspicious to a subset
+    constraint - it looks compliant. Every allowlist contains the empty set.
+    """
+
+    def test_alter_table_reports_the_table_it_alters(self):
+        from taper.adapters.postgres import tables
+        assert tables("alter table production.orders add column currency text") \
+            == {"production.orders"}
+
+    def test_drop_table_reports_the_table_it_drops(self):
+        from taper.adapters.postgres import tables
+        assert tables("drop table production.users") == {"production.users"}
+
+    def test_a_select_still_reports_its_sources(self):
+        from taper.adapters.postgres import tables
+        assert tables("select * from staging.orders join production.users u on true") \
+            == {"staging.orders", "production.users"}
+
+
+class TestAddColumnIsItsOwnKind:
+    """So that a token can permit adding a column without permitting DROP.
+
+    "ddl" as a single kind makes narrowness unwritable: any policy granting it
+    grants DROP TABLE too, however carefully the surrounding prose is worded.
+    """
+
+    def test_add_column_is_not_the_same_permission_as_drop_table(self):
+        from taper.adapters.postgres import classify
+        assert classify(
+            "alter table production.orders add column currency text "
+            "not null default 'USD'") == "ddl_add_column"
+        assert classify("drop table production.orders") == "ddl"
+        assert classify("truncate production.orders") == "ddl"
+
+    def test_a_trailing_drop_is_not_an_add_column(self):
+        """ALTER TABLE takes a comma-separated action list, so the leading
+        action is not the statement."""
+        from taper.adapters.postgres import classify
+        assert classify(
+            "alter table production.orders add column a int, drop column status"
+        ) != "ddl_add_column"
+
+    def test_a_foreign_key_or_generated_column_is_refused(self):
+        from taper.adapters.postgres import classify
+        for sql in (
+            "alter table production.orders add column u bigint references production.users(id)",
+            "alter table production.orders add column t int generated always as (1) stored",
+            "alter table production.orders add constraint ck check (true)",
+        ):
+            assert classify(sql) != "ddl_add_column", sql
+
+    def test_a_select_is_still_a_select(self):
+        from taper.adapters.postgres import classify
+        assert classify("select * from production.orders") == "select"
+
+
+class TestMigrateAdapter:
+    """pg.migrate exists because a GRANT cannot say "add a column, do not drop".
+
+    Its whole claim is that no agent-supplied value ever becomes SQL text. That
+    is a property of the plan, so it can be asserted on without a database.
+    """
+
+    def _plan(self, **over):
+        from taper.adapters import PostgresMigrateAdapter
+        request = {"database": "pocketos", "table": "production.orders",
+                   "column": "currency", "type": "text",
+                   "default": "USD", "not_null": True}
+        request.update(over)
+        return PostgresMigrateAdapter().plan(request, {})
+
+    def test_no_agent_value_reaches_the_statement_text(self):
+        plan = self._plan()
+        text = plan.detail["statement_text"]
+        assert text == "SELECT production.taper_add_column(%s, %s, %s, %s, %s, %s)"
+        # Not "production": it is in `production.taper_add_column`, the name of
+        # the function this adapter calls, which is written above and comes
+        # from nobody's request. The claim is about agent-supplied VALUES.
+        for value in ("currency", "orders", "USD"):
+            assert value not in text, value
+        assert "alter" not in text.lower()
+        assert plan.detail["statement_params"] == [
+            "production", "orders", "currency", "text", "USD", True]
+
+    def test_a_hostile_column_name_would_still_be_a_parameter(self):
+        """It cannot get this far - ops rejects it syntactically - but if the
+        validator were ever loosened, the value is still bound, not spliced."""
+        plan = self._plan(column="x; drop table production.users")
+        assert "drop table" not in plan.detail["statement_text"].lower()
+        assert plan.detail["statement_params"][2] == "x; drop table production.users"
+
+    def test_derive_names_exactly_what_the_token_must_constrain(self):
+        from taper.adapters import PostgresMigrateAdapter
+        derived = PostgresMigrateAdapter().derive(
+            {"database": "pocketos", "table": "Production.Orders", "type": "TEXT",
+             "column": "currency"})
+        assert derived == {"database": "pocketos", "table": "production.orders",
+                           "type": "text"}
+
+
+class TestMigrateOperation:
+    def test_an_unqualified_table_is_refused(self):
+        from taper import ops
+        with pytest.raises(ops.OperationError):
+            ops.get("pg.migrate").validate(
+                {"database": "pocketos", "table": "orders",
+                 "column": "currency", "type": "text"})
+
+    def test_a_column_name_with_sql_in_it_is_refused(self):
+        from taper import ops
+        with pytest.raises(ops.OperationError):
+            ops.get("pg.migrate").validate(
+                {"database": "pocketos", "table": "production.orders",
+                 "column": "x; drop table production.users", "type": "text"})
+
+    def test_an_unknown_field_fails_closed(self):
+        from taper import ops
+        with pytest.raises(ops.OperationError):
+            ops.get("pg.migrate").validate(
+                {"database": "pocketos", "table": "production.orders",
+                 "column": "currency", "type": "text", "statement": "drop table x"})
+
+    def test_the_ordinary_request_validates(self):
+        from taper import ops
+        clean = ops.get("pg.migrate").validate(
+            {"database": "pocketos", "table": "production.orders",
+             "column": "currency", "type": "text", "default": "USD",
+             "not_null": True})
+        assert clean["column"] == "currency"

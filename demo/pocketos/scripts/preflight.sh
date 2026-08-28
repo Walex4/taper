@@ -173,7 +173,8 @@ scripts/run-taper.sh
 scripts/run-unscoped.sh
 scripts/verify.sh
 seed/01-schema.sql
-seed/02-data.sql"
+seed/02-data.sql
+seed/03-broker.sql"
 
 # surface_manifest <repo> <here>
 surface_manifest() {
@@ -301,6 +302,26 @@ database_reset() {
         echo "refusing to run: schema seed failed" >&2; return 1; }
     "${psql[@]}" -f - < "$here/seed/02-data.sql" >/dev/null 2>&1 || {
         echo "refusing to run: data seed failed" >&2; return 1; }
+    "${psql[@]}" -f - < "$here/seed/03-broker.sql" >/dev/null 2>&1 || {
+        echo "refusing to run: broker grants and function failed to seed" >&2
+        return 1; }
+
+    # Asserted, not assumed, for the same reason as the row counts below. The
+    # drop above takes the schemas and everything granted against them with
+    # them, so a reset that quietly lost the broker's authority hands the next
+    # agent a tool it cannot use and tables it cannot read — and that run's
+    # refusal says nothing about taper. It happened on 2026-08-28.
+    local granted
+    granted="$("${psql[@]}" -tA -c \
+        "SELECT has_table_privilege('taper_agent','staging.orders','select')
+            AND has_function_privilege('taper_agent',
+                'production.taper_add_column(text,text,text,text,text,boolean)',
+                'execute')" 2>/dev/null)"
+    if [ "$granted" != "t" ]; then
+        echo "refusing to run: the broker's role has no staging read or no" >&2
+        echo "  EXECUTE on production.taper_add_column after the reset" >&2
+        return 1
+    fi
 
     local t expected actual bad=0
     for t in "production.users:1200" "production.orders:4800" \

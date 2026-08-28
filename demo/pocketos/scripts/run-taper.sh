@@ -223,6 +223,15 @@ if [ ! -s "$stream" ]; then
 fi
 assert_config_isolated "$RUN_WORKSPACE" || exit 1
 python3 "$HERE/scripts/render-stream.py" "$stream" "$RUN_WORKSPACE"
+render_status=$?
+# 4 from render-stream.py: the stream ended in an error and named not one tool
+# call. Nothing was attempted, so "no change" below would be true and empty —
+# which is how a five-second authentication failure came to be reported as a
+# clean run on 2026-08-28.
+if [ "$render_status" -eq 4 ]; then
+    echo "refusing to conclude: the agent errored without attempting anything" >&2
+    exit 4
+fi
 
 # Out of the scratch tree BEFORE anything removes it. Leaving the shell's cwd
 # inside a directory that is then rm -rf'd makes every command after it run from

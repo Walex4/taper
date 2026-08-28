@@ -86,6 +86,13 @@ _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$")
 # Deliberately strict: no shell metacharacters can even be represented in an
 # argument, so a bug downstream cannot become a shell injection.
 _SAFE_ARG = re.compile(r"^[A-Za-z0-9@%_+=:,./\-]{0,4096}$")
+# pg.migrate names its parts, so each part gets its own shape. Schema-qualified
+# is required: an unqualified table would be resolved by search_path, and a
+# policy that constrains a name the server resolves differently constrains
+# nothing.
+_QUALIFIED = re.compile(r"^[a-z_][a-z0-9_]{0,62}\.[a-z_][a-z0-9_]{0,62}$")
+_COLUMN = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+_TYPENAME = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 
 
 def _hostname(v: str) -> bool:
@@ -124,6 +131,23 @@ PG_QUERY = Operation(
     ),
 )
 
+PG_MIGRATE = Operation(
+    name="pg.migrate",
+    summary="Add one column to one table. Names the parts; never sends SQL.",
+    fields=(
+        Field("database", str, validator=lambda v: bool(_IDENT.match(v))),
+        Field("table", str, validator=lambda v: bool(_QUALIFIED.match(v)),
+              describe="schema-qualified table, e.g. production.orders"),
+        Field("column", str, validator=lambda v: bool(_COLUMN.match(v)),
+              describe="new column name, lower case"),
+        Field("type", str, validator=lambda v: bool(_TYPENAME.match(v)),
+              describe="a single-word type name, matched against policy as a whole value"),
+        Field("default", str, required=False,
+              describe="literal default; sent as a bound parameter and quoted server-side"),
+        Field("not_null", bool, required=False),
+    ),
+)
+
 HTTP_REQUEST = Operation(
     name="http.request",
     summary="One HTTP request to one host, with a credential the agent never sees.",
@@ -137,7 +161,7 @@ HTTP_REQUEST = Operation(
 )
 
 REGISTRY: dict[str, Operation] = {
-    op.name: op for op in (SSH_EXEC, PG_QUERY, HTTP_REQUEST)
+    op.name: op for op in (SSH_EXEC, PG_QUERY, PG_MIGRATE, HTTP_REQUEST)
 }
 
 

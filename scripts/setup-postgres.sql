@@ -92,3 +92,78 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 \echo '  * TRUNCATE and REFERENCES are not covered by RLS'
 \echo '  * non-leakproof functions are evaluated after the RLS filter, not before'
 \echo '  * pg_catalog remains readable: schema names are disclosed'
+
+
+-- 2026-08-28: staging reads for the schema-diff task.
+--
+-- The demo asks an agent to bring production in line with staging, which it
+-- cannot do without reading staging's shape. The token was widened first and
+-- the role was not, so every staging select was refused by Postgres while the
+-- broker said yes - the two layers disagreeing, and the right one winning.
+--
+-- SELECT only. The agent has no route to write staging, and staging is the
+-- reference it is copying FROM.
+GRANT SELECT ON staging.orders, staging.users, staging.order_items TO taper_agent;
+
+
+-- 2026-08-28: the only route by which an agent may change production's shape.
+--
+-- Postgres has no per-table ALTER privilege. ALTER TABLE requires ownership,
+-- and ownership carries DROP and TRUNCATE, so "may add a column to orders, may
+-- not drop it" is not expressible as a GRANT. It is expressible as a function:
+-- owned by the owner, SECURITY DEFINER, with its own allowlist, and EXECUTE
+-- granted to taper_agent alone.
+--
+-- The allowlists below are deliberately a SECOND copy of what the token says.
+-- If a token is ever minted more widely than intended, this still refuses.
+CREATE OR REPLACE FUNCTION production.taper_add_column(
+    p_schema   text,
+    p_table    text,
+    p_column   text,
+    p_type     text,
+    p_default  text DEFAULT NULL,
+    p_not_null boolean DEFAULT false)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $taper$
+DECLARE
+    v_tables text[] := ARRAY['production.orders', 'production.users',
+                             'production.order_items', 'production.app_config'];
+    v_types  text[] := ARRAY['text', 'integer', 'bigint', 'boolean', 'numeric',
+                             'timestamptz', 'date', 'uuid', 'jsonb'];
+    v_qual   text := lower(p_schema) || '.' || lower(p_table);
+    v_sql    text;
+BEGIN
+    IF NOT (v_qual = ANY (v_tables)) THEN
+        RAISE EXCEPTION 'taper_add_column: % is not an alterable table', v_qual;
+    END IF;
+    IF lower(p_column) !~ '^[a-z_][a-z0-9_]{0,62}$' THEN
+        RAISE EXCEPTION 'taper_add_column: % is not a permitted column name', p_column;
+    END IF;
+    IF NOT (lower(p_type) = ANY (v_types)) THEN
+        RAISE EXCEPTION 'taper_add_column: % is not a permitted type', p_type;
+    END IF;
+
+    -- format(%I) on every identifier; quote_literal on the default. The type is
+    -- interpolated as %s and is safe only because it was matched against
+    -- v_types above as a whole value - not sanitised, matched.
+    v_sql := format('ALTER TABLE %I.%I ADD COLUMN IF NOT EXISTS %I %s',
+                    lower(p_schema), lower(p_table), lower(p_column), lower(p_type));
+    IF p_default IS NOT NULL THEN
+        v_sql := v_sql || ' DEFAULT ' || quote_literal(p_default);
+    END IF;
+    IF p_not_null THEN
+        v_sql := v_sql || ' NOT NULL';
+    END IF;
+
+    EXECUTE v_sql;
+    RETURN v_sql;
+END;
+$taper$;
+
+REVOKE ALL ON FUNCTION production.taper_add_column(text, text, text, text, text, boolean)
+    FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION production.taper_add_column(text, text, text, text, text, boolean)
+    TO taper_agent;

@@ -161,7 +161,15 @@ class Executor:
                     for key, value in settings.items():
                         cur.execute("SELECT set_config(%s, %s, true)",
                                     (key, str(value)))
-                    cur.execute(statement)
+                    # Bound, not interpolated. pg.migrate sends a fixed
+                    # statement and a parameter list, so the table, column and
+                    # type an agent named never become SQL text on the way here.
+                    # verified-by: tests/test_taper.py::TestMigrateAdapter::test_no_agent_value_reaches_the_statement_text
+                    params = plan.detail.get("statement_params")
+                    if params is None:
+                        cur.execute(statement)
+                    else:
+                        cur.execute(statement, tuple(params))
                     if cur.description is None:
                         return Result(True, 0, f"{cur.rowcount} rows affected", "")
                     rows = cur.fetchmany(max_rows)

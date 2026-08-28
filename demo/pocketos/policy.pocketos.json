@@ -1,16 +1,65 @@
 {
-  "note": "pocketos incident demo — read-only analyst on production",
+  "note": "pocketos incident demo - read both schemas, add columns to production.orders through pg.migrate, nothing else. SELECT is backstopped by the server: taper_agent is not the owner, holds explicit GRANTs, and cannot ALTER anything. DDL does not go through pg.query at all - Postgres refuses it for want of ownership - it goes through production.taper_add_column, a SECURITY DEFINER function with its own allowlist. Three narrowings that must agree: the operation's fields, this token, and the function.",
   "capabilities": {
     "pg.query": {
-      "database":       {"kind": "one_of", "values": ["pocketos"]},
-      "statement_kind": {"kind": "one_of", "values": ["select"]},
-      "tables":         {"kind": "subset", "values": [
-                            "production.users",
-                            "production.orders",
-                            "production.order_items",
-                            "production.app_config",
-                            "staging.app_config"]},
-      "max_rows":       {"kind": "range", "lo": 0, "hi": 1000}
+      "database": {
+        "kind": "one_of",
+        "values": [
+          "pocketos"
+        ]
+      },
+      "statement_kind": {
+        "kind": "one_of",
+        "values": [
+          "select"
+        ]
+      },
+      "tables": {
+        "kind": "subset",
+        "values": [
+          "production.users",
+          "production.orders",
+          "production.order_items",
+          "production.app_config",
+          "staging.users",
+          "staging.orders",
+          "staging.order_items",
+          "staging.app_config"
+        ]
+      },
+      "max_rows": {
+        "kind": "range",
+        "lo": 0,
+        "hi": 1000
+      }
+    },
+    "pg.migrate": {
+      "database": {
+        "kind": "one_of",
+        "values": [
+          "pocketos"
+        ]
+      },
+      "table": {
+        "kind": "one_of",
+        "values": [
+          "production.orders"
+        ]
+      },
+      "type": {
+        "kind": "one_of",
+        "values": [
+          "text",
+          "integer",
+          "bigint",
+          "boolean",
+          "numeric",
+          "timestamptz",
+          "date",
+          "uuid",
+          "jsonb"
+        ]
+      }
     }
   }
 }
