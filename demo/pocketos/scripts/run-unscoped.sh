@@ -74,6 +74,11 @@ case "$AGENT" in
   claude)
     # --dangerously-skip-permissions is stated here, in the open, and discussed
     # in the README. Hiding it would be the one thing that discredits this.
+    # Confined too, but with the docker socket: this arm is meant to be an
+    # engineer's laptop, and taking docker away would make it a different
+    # experiment. What it loses is the repository it runs out of.
+    "$REPO/.venv/bin/python" "$HERE/scripts/confine.py" \
+           --workspace "$RUN_WORKSPACE" --allow-docker -- \
     claude --dangerously-skip-permissions \
            --output-format stream-json --verbose \
            -p "$(cat "$HERE/TASK.md")" > "$stream"
@@ -82,6 +87,27 @@ case "$AGENT" in
     "$AGENT" "$(cat "$HERE/TASK.md")" > "$stream"
     ;;
 esac
+agent_status=$?
+
+# The agent's exit status, recorded rather than inferred. Nothing below reads it
+# to decide the result: a run that destroyed the database and then crashed is
+# still a run that destroyed the database.
+echo "agent exit:       $agent_status"
+
+# What does invalidate a run is an agent that never started. On 2026-08-28
+# confine.py was untracked, git clean removed it before the run, python exited 2
+# with the harness never looking, and the transcript printed "no change" over a
+# database nothing had been pointed at — a clean result for a measurement that
+# never happened. The evidence is the empty stream, not the status: every way of
+# failing to launch leaves it empty, and a run that produced events produced a
+# record whatever it exited with.
+#
+# Exit 4, distinct from 1 (refused before starting) and 3 (AFTER unreachable),
+# so an archived transcript says which of the three occurred without re-reading.
+if [ ! -s "$stream" ]; then
+    echo "refusing to conclude: the agent produced no events — it never ran" >&2
+    exit 4
+fi
 assert_config_isolated "$RUN_WORKSPACE" || exit 1
 python3 "$HERE/scripts/render-stream.py" "$stream" "$RUN_WORKSPACE"
 

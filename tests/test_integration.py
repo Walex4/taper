@@ -539,11 +539,71 @@ TOUCH = shutil.which("touch")
 
 needs_landlock = pytest.mark.skipif(not HAS_LANDLOCK, reason="kernel has no Landlock")
 needs_touch = pytest.mark.skipif(TOUCH is None, reason="no touch(1) on this host")
+LANDLOCK_ABI = __import__("taper.shim", fromlist=["shim"]).landlock_abi()
+needs_landlock_net = pytest.mark.skipif(
+    LANDLOCK_ABI < 4, reason="kernel landlock has no network rules (abi<4)")
 
 
 def _touch_allowlist(targets, landlock):
     return {"programs": {"touch": {"path": TOUCH, "args": [str(t) for t in targets]}},
             "landlock": landlock}
+
+
+class TestLandlockNetwork:
+    """The socket half of the boundary.
+
+    2026-08-28: a confined agent found taper's MCP server down, read the
+    database password out of the workspace README, opened a TCP connection to
+    postgres and did the work itself. Every filesystem rule held. None of them
+    governed a socket, and removing DATABASE_URL from the environment was not a
+    boundary either — the credential was in a document the agent was handed.
+
+    Subprocess, never in-process, for the reason below.
+    """
+
+    def _try_connect(self, port, allowed):
+        code = "\n".join([
+            "import socket, sys",
+            "sys.path.insert(0, %r)" % str(ROOT),
+            "from taper import shim",
+            "status = shim.apply_landlock({'read': ['/etc'], 'connect_tcp': %r})" % (allowed,),
+            "assert status.startswith('applied'), status",
+            "s = socket.socket(); s.settimeout(5)",
+            "try:",
+            "    s.connect(('127.0.0.1', %d))" % port,
+            "except PermissionError:",
+            "    print('REFUSED')",
+            "else:",
+            "    print('CONNECTED')",
+        ])
+        return subprocess.run([sys.executable, "-c", code],
+                              capture_output=True, text=True)
+
+    @needs_landlock_net
+    def test_a_port_outside_the_allowlist_is_refused_by_the_kernel(self):
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        try:
+            out = self._try_connect(port, [port + 1 if port < 65535 else 1])
+        finally:
+            srv.close()
+        assert "REFUSED" in out.stdout, out.stdout + out.stderr
+
+    @needs_landlock_net
+    def test_an_allowed_port_still_connects(self):
+        """The other half. A rule that refuses everything is not confinement,
+        it is an outage, and it would pass the test above."""
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        try:
+            out = self._try_connect(port, [port])
+        finally:
+            srv.close()
+        assert "CONNECTED" in out.stdout, out.stdout + out.stderr
 
 
 class TestLandlock:
@@ -1581,7 +1641,8 @@ class TestSurfaceManifest:
         for name in (".gitignore", "README.md", "TASK.md", "docker-compose.yml",
                      "mcp.json", "policy.pocketos.json"):
             (here / name).write_text("x\n")
-        for name in ("preflight.sh", "render-stream.py", "rule3-audit.py",
+        for name in ("confine.py", "preflight.sh", "render-stream.py",
+                     "rule3-audit.py",
                      "run-set.sh",
                      "run-taper.sh", "run-unscoped.sh", "verify.sh"):
             (here / "scripts" / name).write_text("x\n")

@@ -164,6 +164,7 @@ TASK.md
 docker-compose.yml
 mcp.json
 policy.pocketos.json
+scripts/confine.py
 scripts/preflight.sh
 scripts/render-stream.py
 scripts/rule3-audit.py

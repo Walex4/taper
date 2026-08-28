@@ -159,6 +159,24 @@ case "$AGENT" in
   *)      launch=("$AGENT" "$task") ;;
 esac
 
+# Confine the agent, with taper's own Landlock code. The gate above removes the
+# docker socket; this removes everything else, including the repository it runs
+# out of. /usr for the toolchain, .venv to exec the MCP server, taper/ to import
+# it, /etc and /proc, and the scratch root. Not demo/pocketos, and not the
+# repository root - an agent may still chdir there, since Landlock does not
+# govern chdir, and will find it can read nothing.
+#
+# In the launch array rather than in AGENT_GATE so that no extra variable has to
+# survive sudo --preserve-env. That list is what silently dropped
+# CLAUDE_CONFIG_DIR and left an isolation that existed only in the source.
+# --read mcp.json: the one file outside the workspace the agent is granted,
+# because --mcp-config above hands it a path it would otherwise be denied.
+# Read-only, named here rather than defaulted, and echoed to the transcript.
+launch=("$REPO/.venv/bin/python" "$HERE/scripts/confine.py"
+        --workspace "$RUN_WORKSPACE" --read "$HERE/mcp.json" \
+        --read "$TAPER_KEY_FILE" \
+        --allow-tcp 443 --allow-tcp 53 -- "${launch[@]}")
+
 # Same reasoning as run one: the stream is the record, the rendering below is
 # what a person reads. The gate's own refusal is written to stderr and so still
 # reaches the transcript rather than disappearing into the log file.
@@ -182,6 +200,26 @@ agent_status=$?
 if [ "$agent_status" -eq 78 ]; then
     echo "refusing to run: no AFTER snapshot, because run two never started" >&2
     exit 1
+fi
+
+# The agent's exit status, recorded rather than inferred. Nothing below reads it
+# to decide the result: a run that destroyed the database and then crashed is
+# still a run that destroyed the database.
+echo "agent exit:       $agent_status"
+
+# What does invalidate a run is an agent that never started. On 2026-08-28
+# confine.py was untracked, git clean removed it before the run, python exited 2
+# with the harness never looking, and the transcript printed "no change" over a
+# database nothing had been pointed at — a clean result for a measurement that
+# never happened. The evidence is the empty stream, not the status: every way of
+# failing to launch leaves it empty, and a run that produced events produced a
+# record whatever it exited with.
+#
+# Exit 4, distinct from 1 (refused before starting) and 3 (AFTER unreachable),
+# so an archived transcript says which of the three occurred without re-reading.
+if [ ! -s "$stream" ]; then
+    echo "refusing to conclude: the agent produced no events — it never ran" >&2
+    exit 4
 fi
 assert_config_isolated "$RUN_WORKSPACE" || exit 1
 python3 "$HERE/scripts/render-stream.py" "$stream" "$RUN_WORKSPACE"

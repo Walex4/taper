@@ -104,6 +104,7 @@ LANDLOCK_CREATE_RULESET = 444
 LANDLOCK_ADD_RULE = 445
 LANDLOCK_RESTRICT_SELF = 446
 LANDLOCK_RULE_PATH_BENEATH = 1
+LANDLOCK_RULE_NET_PORT = 2                          # ABI 4
 LANDLOCK_CREATE_RULESET_VERSION = 1
 PR_SET_NO_NEW_PRIVS = 38
 
@@ -123,6 +124,14 @@ FS_MAKE_SYM = 1 << 12
 FS_REFER = 1 << 13          # ABI 2
 FS_TRUNCATE = 1 << 14       # ABI 3
 FS_IOCTL_DEV = 1 << 15      # ABI 5
+
+# The socket half. Landlock gained these in ABI 4 and they are the only rights
+# it has for the network: TCP bind and TCP connect, by port. Nothing here can
+# express "this host but not that one", so a port allowlist is the whole
+# vocabulary — which is enough when the thing being kept out of reach listens
+# on a port of its own.
+NET_BIND_TCP = 1 << 0       # ABI 4
+NET_CONNECT_TCP = 1 << 1    # ABI 4
 
 # Rights that mean something for a file. The rest — READ_DIR, the MAKE_* and
 # REMOVE_* family, REFER — describe operations on directory entries, and the
@@ -151,8 +160,18 @@ GRANTS = {
 # becomes an error in 3.19, and this file has to keep running on whatever Python
 # the target host has.
 
-def _ruleset_attr(handled_access_fs: int) -> bytes:
+def _ruleset_attr(handled_access_fs: int, handled_access_net: int = 0) -> bytes:
+    # The struct grew: v1 is 8 bytes, v2 (ABI 4) adds handled_access_net. The
+    # kernel accepts a shorter struct than it knows about and treats the missing
+    # fields as zero, so sending 8 bytes when nothing asked for network rules
+    # keeps every older kernel working exactly as before.
+    if handled_access_net:
+        return struct.pack("=QQ", handled_access_fs, handled_access_net)
     return struct.pack("=Q", handled_access_fs)
+
+
+def _net_port_attr(allowed_access: int, port: int) -> bytes:
+    return struct.pack("=QQ", allowed_access, port)
 
 
 def _path_beneath_attr(allowed_access: int, parent_fd: int) -> bytes:
@@ -193,6 +212,17 @@ def _handled_fs(abi: int) -> int:
     if abi >= 5:
         mask |= FS_IOCTL_DEV
     return mask
+
+
+def _handled_net(abi: int) -> int:
+    """TCP connect, once the kernel has it.
+
+    Only CONNECT. Handling BIND as well would refuse an agent its own listening
+    sockets — a language server, a test fixture — for no gain: the reason this
+    exists is to stop a process reaching a service it was not given, and that
+    is an outbound connection.
+    """
+    return NET_CONNECT_TCP if abi >= 4 else 0
 
 
 def _normalize(config) -> dict[str, int]:
@@ -250,6 +280,18 @@ def apply_landlock(config) -> str:
         abi = landlock_abi()
         return f"not_configured(abi={abi})" if abi else "not_configured(unavailable)"
 
+    # Pulled out before _normalize, which refuses keys it does not know — and
+    # is right to. An empty list is meaningful and must survive: it means no
+    # outbound TCP at all, which is not the same as not asking.
+    connect_tcp = None
+    if isinstance(config, dict) and "connect_tcp" in config:
+        config = dict(config)
+        connect_tcp = config.pop("connect_tcp")
+        if not isinstance(connect_tcp, list) or not all(
+                isinstance(p, int) and not isinstance(p, bool) and 1 <= p <= 65535
+                for p in connect_tcp):
+            fail("landlock connect_tcp must be a list of TCP port numbers")
+
     paths = _normalize(config)
     if not paths:
         fail("allowlist configures landlock with no paths; refusing to run")
@@ -261,7 +303,17 @@ def apply_landlock(config) -> str:
     libc = _libc()
     handled = _handled_fs(abi)
 
-    attr = _ruleset_attr(handled)
+    handled_net = 0
+    if connect_tcp is not None:
+        handled_net = _handled_net(abi)
+        if not handled_net:
+            # Fail closed, same as everywhere else here. A caller that asked for
+            # network confinement and silently did not get it would report
+            # "applied" over a process that can still dial anything.
+            fail(f"allowlist restricts outbound TCP but this kernel's landlock "
+                 f"has no network rules (abi={abi}, needs 4)")
+
+    attr = _ruleset_attr(handled, handled_net)
     ruleset_fd = libc.syscall(ctypes.c_long(LANDLOCK_CREATE_RULESET),
                               ctypes.c_char_p(attr), ctypes.c_size_t(len(attr)),
                               ctypes.c_uint32(0))
@@ -295,6 +347,15 @@ def apply_landlock(config) -> str:
             finally:
                 os.close(parent_fd)
 
+        for port in sorted(set(connect_tcp or ())):
+            rule = _net_port_attr(NET_CONNECT_TCP, port)
+            if libc.syscall(ctypes.c_long(LANDLOCK_ADD_RULE),
+                            ctypes.c_int(ruleset_fd),
+                            ctypes.c_int(LANDLOCK_RULE_NET_PORT),
+                            ctypes.c_char_p(rule), ctypes.c_uint32(0)) < 0:
+                fail(f"landlock_add_rule failed for tcp port {port}: "
+                     f"{os.strerror(ctypes.get_errno())}")
+
         # Required before restrict_self, and inherited like the ruleset: without
         # it a setuid binary in the allowed paths would be a way straight out.
         if libc.prctl(ctypes.c_int(PR_SET_NO_NEW_PRIVS), ctypes.c_ulong(1),
@@ -308,6 +369,9 @@ def apply_landlock(config) -> str:
         os.close(ruleset_fd)
 
     # Past this line the process is confined and cannot undo it.
+    if handled_net:
+        return (f"applied(abi={abi}, paths={len(paths)}, "
+                f"tcp={sorted(set(connect_tcp))})")
     return f"applied(abi={abi}, paths={len(paths)})"
 
 
