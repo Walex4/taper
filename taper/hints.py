@@ -7,6 +7,12 @@ instruction had been copied into six files and two READMEs. Every one of them
 now renders this module instead, so the next change to the procedure lands
 everywhere at once rather than in whichever copy someone remembers.
 
+The three shell copies cannot import this module - an error path in a launcher
+must not depend on the interpreter it has not managed to run yet - so they are
+generated from it and checked against it instead.
+
+verified-by: tests/test_integration.py::TestMintCopies::test_every_copy_matches_the_module
+
 Nothing here imports from the rest of the package: these strings are printed
 from error paths, and an error path that can itself fail to import is not a
 message, it is a second bug.
@@ -16,6 +22,7 @@ from __future__ import annotations
 
 import os
 import pwd
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -75,6 +82,25 @@ def broker_vault(socket_path: Path = BROKER_SOCKET) -> Optional[Path]:
     return None
 
 
+def taper_bin() -> str:
+    """The taper executable, named by absolute path.
+
+    `sudo -u` resets the environment, so the one line in the mint that changes
+    user is the one line that cannot rely on the caller's PATH. A venv install
+    puts the console script beside the interpreter running this code, so the
+    sibling of sys.executable is the right answer whenever there is one. It
+    falls back to the bare name, which is correct on a system-wide install.
+
+    Not hypothetical: on 2026-08-27 the block rendered from here failed with
+    `sudo: 'taper': command not found`, the grant produced nothing, and the
+    empty file it left behind was installed over a working token.
+
+    verified-by: tests/test_integration.py::TestMintHint::test_the_mint_names_taper_by_absolute_path
+    """
+    candidate = Path(sys.executable).with_name("taper")
+    return str(candidate) if candidate.exists() else "taper"
+
+
 WHY = """\
 # Two steps because of two facts. The root key lives in the broker's vault, so
 # the mint must run as taper-broker; and that process cannot write into
@@ -84,14 +110,20 @@ WHY = """\
 # lands in whatever file is already there. The key's directory is made BY the
 # broker for the same reason ~/.taper does not work — a 0700 directory you own
 # is one it cannot write into either. The stdout redirect runs as you, so the
-# token stages with no privilege at all."""
+# token stages with no privilege at all.
+#
+# taper is resolved to an absolute path by the caller's shell before sudo runs:
+# sudo -u resets PATH, so a bare name is the one spelling that cannot work
+# there. The whole thing is guarded because a grant that fails still leaves an
+# empty file behind, which install would then copy over a working token in
+# silence."""
 
 
 def mint_procedure(policy: str = "<policy>.json",
                    key: str = "~/.taper/agent.key",
                    token: str = "~/.taper/token",
                    ttl: str = "8h",
-                   taper: str = "taper",
+                   taper: Optional[str] = None,
                    user: str = '"$USER"',
                    why: bool = True,
                    indent: str = "") -> str:
@@ -99,17 +131,23 @@ def mint_procedure(policy: str = "<policy>.json",
     # The staged key takes the destination's stem, so a pocketos mint reads as
     # pocketos throughout. It is the mktemp directory that keeps two concurrent
     # mints apart, not the name.
+    taper = taper or taper_bin()
     stem = Path(key).stem
     body = f"""\
 d=$(sudo -u {BROKER_USER} mktemp -d)   # broker-owned 0700: only it can write the key
 t=$(mktemp)                           # yours: the stdout redirect runs as you
-sudo -u {BROKER_USER} TAPER_HOME=/home/{BROKER_USER}/.taper \\
-  {taper} grant {policy} --ttl {ttl} --key-file "$d/{stem}.key" > "$t"
-sudo install -m 600 -o {user} -g {user} "$d/{stem}.key" {key}
-install -m 600 "$t" {token}
-sudo -u {BROKER_USER} shred -u "$d/{stem}.key" && sudo -u {BROKER_USER} rmdir "$d"
+if sudo -u {BROKER_USER} TAPER_HOME=/home/{BROKER_USER}/.taper \\
+     {taper} grant {policy} --ttl {ttl} --key-file "$d/{stem}.key" > "$t" \\
+   && [ -s "$t" ] && sudo -u {BROKER_USER} test -s "$d/{stem}.key"; then
+  sudo install -m 600 -o {user} -g {user} "$d/{stem}.key" {key}
+  install -m 600 "$t" {token}
+  export TAPER_TOKEN=$(cat {token}) TAPER_KEY_FILE={key}
+else
+  echo "mint failed: {token} left as it was" >&2
+fi
 rm -f "$t"
-export TAPER_TOKEN=$(cat {token}) TAPER_KEY_FILE={key}"""
+sudo -u {BROKER_USER} shred -u "$d/{stem}.key" 2>/dev/null
+sudo -u {BROKER_USER} rmdir "$d" 2>/dev/null"""
     text = f"{WHY}\n{body}" if why else body
     if indent:
         text = "\n".join(indent + line for line in text.splitlines())
@@ -133,6 +171,6 @@ def mint_hint(policy: str = "<policy>.json",
     verified-by: tests/test_integration.py::TestMintHint::test_a_split_install_gets_the_two_step
     """
     if broker_vault() is None:
-        return (f"taper grant {policy} --ttl {ttl} --key-file {key} > {token}\n"
+        return (f"{taper_bin()} grant {policy} --ttl {ttl} --key-file {key} > {token}\n"
                 f"export TAPER_TOKEN=$(cat {token}) TAPER_KEY_FILE={key}")
     return mint_procedure(policy=policy, key=key, token=token, ttl=ttl, **kwargs)

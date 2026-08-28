@@ -1241,6 +1241,23 @@ class TestMintHint:
         assert "sudo install -m 600" in text
         assert "shred -u" in text
 
+    def test_the_mint_names_taper_by_absolute_path(self, monkeypatch):
+        """sudo -u resets PATH, so a bare name is the one spelling that cannot
+        work - and it is the spelling that was there."""
+        monkeypatch.setattr(hints, "broker_vault",
+                            lambda *a, **k: Path("/home/taper-broker/.taper"))
+        monkeypatch.setattr(hints, "taper_bin", lambda: "/opt/venv/bin/taper")
+        assert "/opt/venv/bin/taper grant" in hints.mint_hint()
+
+    def test_a_failed_grant_cannot_install_an_empty_token(self, monkeypatch):
+        """2026-08-27: it could, it did, and the failure surfaced ten runs
+        later as a refusal nobody could account for."""
+        monkeypatch.setattr(hints, "broker_vault",
+                            lambda *a, **k: Path("/home/taper-broker/.taper"))
+        text = hints.mint_hint()
+        assert '[ -s "$t" ]' in text
+        assert text.index('[ -s "$t" ]') < text.index("install -m 600")
+
     def test_the_broker_is_not_told_to_mint_for_itself(self, monkeypatch):
         """Running as the broker means the root key is already local."""
         monkeypatch.setattr(hints.os, "geteuid", lambda: 999)
@@ -1564,7 +1581,8 @@ class TestSurfaceManifest:
         for name in (".gitignore", "README.md", "TASK.md", "docker-compose.yml",
                      "mcp.json", "policy.pocketos.json"):
             (here / name).write_text("x\n")
-        for name in ("preflight.sh", "render-stream.py", "run-set.sh",
+        for name in ("preflight.sh", "render-stream.py", "rule3-audit.py",
+                     "run-set.sh",
                      "run-taper.sh", "run-unscoped.sh", "verify.sh"):
             (here / "scripts" / name).write_text("x\n")
         for name in ("01-schema.sql", "02-data.sql"):
@@ -1613,3 +1631,30 @@ class TestSurfaceManifest:
         result = self._check(repo, here)
         assert result.returncode != 0
         assert "verify.sh" in result.stderr
+
+class TestMintCopies:
+    """The mint lives in four places and only one of them is executable code.
+
+    hints.py says every copy renders it. That was true of the Python callers and
+    aspirational for the three shell copies, which are hand-carried because an
+    error path in a launcher must not depend on an interpreter it has not managed
+    to run. Nothing checked them, and on 2026-08-27 all three were still telling
+    people to run a bare `taper` under sudo, where PATH does not survive.
+    """
+    COPIES = [
+        ("demo/pocketos/scripts/run-taper.sh",
+         dict(policy="demo/pocketos/policy.pocketos.json",
+              key="~/.taper/pocketos.key", token="~/.taper/pocketos.token")),
+        ("mcp-serve.sh",
+         dict(policy="<policy>.json", key="~/.taper/agent.key",
+              token="~/.taper/token")),
+        ("demo/pocketos/README.md",
+         dict(policy="policy.pocketos.json", key="~/.taper/pocketos.key",
+              token="~/.taper/pocketos.token", indent="    ")),
+    ]
+    def test_every_copy_matches_the_module(self):
+        repo = Path(__file__).resolve().parent.parent
+        for rel, kw in self.COPIES:
+            body = hints.mint_procedure(ttl="8h", taper='"$(command -v taper)"', **kw)
+            text = (repo / rel).read_text()
+            assert body in text, f"{rel} has drifted from taper/hints.py"

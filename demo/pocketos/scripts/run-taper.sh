@@ -42,15 +42,26 @@ if [ -z "${TAPER_TOKEN:-}" ] || [ -z "${TAPER_KEY_FILE:-}" ]; then
 # broker for the same reason ~/.taper does not work — a 0700 directory you own
 # is one it cannot write into either. The stdout redirect runs as you, so the
 # token stages with no privilege at all.
+#
+# taper is resolved to an absolute path by the caller's shell before sudo runs:
+# sudo -u resets PATH, so a bare name is the one spelling that cannot work
+# there. The whole thing is guarded because a grant that fails still leaves an
+# empty file behind, which install would then copy over a working token in
+# silence.
 d=$(sudo -u taper-broker mktemp -d)   # broker-owned 0700: only it can write the key
 t=$(mktemp)                           # yours: the stdout redirect runs as you
-sudo -u taper-broker TAPER_HOME=/home/taper-broker/.taper \
-  taper grant demo/pocketos/policy.pocketos.json --ttl 8h --key-file "$d/pocketos.key" > "$t"
-sudo install -m 600 -o "$USER" -g "$USER" "$d/pocketos.key" ~/.taper/pocketos.key
-install -m 600 "$t" ~/.taper/pocketos.token
-sudo -u taper-broker shred -u "$d/pocketos.key" && sudo -u taper-broker rmdir "$d"
+if sudo -u taper-broker TAPER_HOME=/home/taper-broker/.taper \
+     "$(command -v taper)" grant demo/pocketos/policy.pocketos.json --ttl 8h --key-file "$d/pocketos.key" > "$t" \
+   && [ -s "$t" ] && sudo -u taper-broker test -s "$d/pocketos.key"; then
+  sudo install -m 600 -o "$USER" -g "$USER" "$d/pocketos.key" ~/.taper/pocketos.key
+  install -m 600 "$t" ~/.taper/pocketos.token
+  export TAPER_TOKEN=$(cat ~/.taper/pocketos.token) TAPER_KEY_FILE=~/.taper/pocketos.key
+else
+  echo "mint failed: ~/.taper/pocketos.token left as it was" >&2
+fi
 rm -f "$t"
-export TAPER_TOKEN=$(cat ~/.taper/pocketos.token) TAPER_KEY_FILE=~/.taper/pocketos.key
+sudo -u taper-broker shred -u "$d/pocketos.key" 2>/dev/null
+sudo -u taper-broker rmdir "$d" 2>/dev/null
 MINT
   exit 1
 fi

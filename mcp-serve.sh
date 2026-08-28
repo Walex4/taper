@@ -35,15 +35,26 @@ if [ ! -f "$TAPER_KEY_FILE" ]; then
 # broker for the same reason ~/.taper does not work — a 0700 directory you own
 # is one it cannot write into either. The stdout redirect runs as you, so the
 # token stages with no privilege at all.
+#
+# taper is resolved to an absolute path by the caller's shell before sudo runs:
+# sudo -u resets PATH, so a bare name is the one spelling that cannot work
+# there. The whole thing is guarded because a grant that fails still leaves an
+# empty file behind, which install would then copy over a working token in
+# silence.
 d=$(sudo -u taper-broker mktemp -d)   # broker-owned 0700: only it can write the key
 t=$(mktemp)                           # yours: the stdout redirect runs as you
-sudo -u taper-broker TAPER_HOME=/home/taper-broker/.taper \
-  taper grant <policy>.json --ttl 8h --key-file "$d/agent.key" > "$t"
-sudo install -m 600 -o "$USER" -g "$USER" "$d/agent.key" ~/.taper/agent.key
-install -m 600 "$t" ~/.taper/token
-sudo -u taper-broker shred -u "$d/agent.key" && sudo -u taper-broker rmdir "$d"
+if sudo -u taper-broker TAPER_HOME=/home/taper-broker/.taper \
+     "$(command -v taper)" grant <policy>.json --ttl 8h --key-file "$d/agent.key" > "$t" \
+   && [ -s "$t" ] && sudo -u taper-broker test -s "$d/agent.key"; then
+  sudo install -m 600 -o "$USER" -g "$USER" "$d/agent.key" ~/.taper/agent.key
+  install -m 600 "$t" ~/.taper/token
+  export TAPER_TOKEN=$(cat ~/.taper/token) TAPER_KEY_FILE=~/.taper/agent.key
+else
+  echo "mint failed: ~/.taper/token left as it was" >&2
+fi
 rm -f "$t"
-export TAPER_TOKEN=$(cat ~/.taper/token) TAPER_KEY_FILE=~/.taper/agent.key
+sudo -u taper-broker shred -u "$d/agent.key" 2>/dev/null
+sudo -u taper-broker rmdir "$d" 2>/dev/null
 MINT
   exit 2
 fi
