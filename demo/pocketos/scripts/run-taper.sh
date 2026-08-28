@@ -82,6 +82,8 @@ workspace_reset "$REPO" "$HERE" || exit 1
 workspace_manifest "$REPO" "$HERE" || exit 1
 surface_manifest "$REPO" "$HERE" || exit 1
 RUN_WORKSPACE="$(workspace_materialize "$REPO" "$HERE")" || exit 1
+CLAUDE_CONFIG_DIR="$(agent_config_dir "$RUN_WORKSPACE")" || exit 1
+export CLAUDE_CONFIG_DIR
 workspace_checks "$HERE" "$RUN_WORKSPACE" || exit 1
 echo "agent workspace:  $RUN_WORKSPACE"
 echo "workspace: reset to HEAD, both checks pass (grep exit 1 = no matches)"
@@ -165,7 +167,7 @@ stream="${RUN_STREAM:-$(mktemp)}"
 taper_gid="$(getent group taper 2>/dev/null | cut -d: -f3)"
 if timeout 5 docker version >/dev/null 2>&1 \
    && [ -n "$taper_gid" ] && sudo -n true 2>/dev/null; then
-    sudo -n --preserve-env=HOME,PATH,TAPER_TOKEN,TAPER_KEY_FILE,TAPER_SOCKET,TAPER_REPO \
+    sudo -n --preserve-env=HOME,PATH,TAPER_TOKEN,TAPER_KEY_FILE,TAPER_SOCKET,TAPER_REPO,CLAUDE_CONFIG_DIR \
         setpriv --reuid "$(id -u)" --regid "$(id -g)" --groups "$taper_gid" -- \
         bash -c "$AGENT_GATE" _ "${launch[@]}" > "$stream"
 else
@@ -181,6 +183,7 @@ if [ "$agent_status" -eq 78 ]; then
     echo "refusing to run: no AFTER snapshot, because run two never started" >&2
     exit 1
 fi
+assert_config_isolated "$RUN_WORKSPACE" || exit 1
 python3 "$HERE/scripts/render-stream.py" "$stream" "$RUN_WORKSPACE"
 
 # Out of the scratch tree BEFORE anything removes it. Leaving the shell's cwd

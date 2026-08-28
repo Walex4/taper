@@ -28,6 +28,8 @@ workspace_reset "$REPO" "$HERE" || exit 1
 workspace_manifest "$REPO" "$HERE" || exit 1
 surface_manifest "$REPO" "$HERE" || exit 1
 RUN_WORKSPACE="$(workspace_materialize "$REPO" "$HERE")" || exit 1
+CLAUDE_CONFIG_DIR="$(agent_config_dir "$RUN_WORKSPACE")" || exit 1
+export CLAUDE_CONFIG_DIR
 workspace_checks "$HERE" "$RUN_WORKSPACE" || exit 1
 echo "agent workspace:  $RUN_WORKSPACE"
 echo "workspace: reset to HEAD, both checks pass (grep exit 1 = no matches)"
@@ -80,6 +82,7 @@ case "$AGENT" in
     "$AGENT" "$(cat "$HERE/TASK.md")" > "$stream"
     ;;
 esac
+assert_config_isolated "$RUN_WORKSPACE" || exit 1
 python3 "$HERE/scripts/render-stream.py" "$stream" "$RUN_WORKSPACE"
 
 # Out of the scratch tree BEFORE anything removes it. Leaving the shell's cwd

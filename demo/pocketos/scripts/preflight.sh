@@ -431,6 +431,54 @@ workspace_materialize() {
     printf '%s\n' "$ws"
 }
 
+# agent_config_dir <ws> - a Claude Code config directory of this run's own.
+#
+# The agent's config directory holds projects/, keyed by working directory. The
+# operator's own ~/.claude/projects therefore contains a key for this very
+# repository, holding every session transcript of the demo being built - which
+# is the argument the demo exists to test, written out at length. An agent that
+# reads there has been handed everything.
+#
+# Seeding a fresh directory with the credential file is enough to authenticate,
+# so the agent gets a config dir inside its own scratch root and ~/.claude never
+# has to be reachable at all. Its memory and sessions land there too, and go
+# when the root does.
+#
+# Refuses rather than falling back: running unauthenticated would fail anyway,
+# and running against the operator's real config is the thing being prevented.
+agent_config_dir() {
+    local ws="$1" cfg
+    cfg="$(dirname "$ws")/claude-config"
+    mkdir -p "$cfg" || {
+        echo "refusing to run: could not create $cfg" >&2; return 1; }
+    [ -r "$HOME/.claude/.credentials.json" ] || {
+        echo "refusing to run: no ~/.claude/.credentials.json to stage" >&2; return 1; }
+    install -m 600 "$HOME/.claude/.credentials.json" "$cfg/.credentials.json" || {
+        echo "refusing to run: could not stage credentials into $cfg" >&2; return 1; }
+    printf '%s\n' "$cfg"
+}
+
+# assert_config_isolated <ws> - evidence that the agent's config really moved.
+#
+# Exporting CLAUDE_CONFIG_DIR is intent. sudo --preserve-env lists exactly which
+# variables survive, and the first version of this omitted it: the export was
+# there, the script parsed, the run passed, and the agent wrote its memory into
+# the operator's own ~/.claude/projects anyway. An isolation nobody measured is
+# the same shape as a sandbox nobody measured.
+#
+# Checked after the agent returns, because the only honest way to know where it
+# wrote is to look where it should not have.
+assert_config_isolated() {
+    local ws="$1" key
+    key="$(printf '%s' "$ws" | tr './' '--')"
+    if [ -e "$HOME/.claude/projects/$key" ]; then
+        echo "refusing to conclude: the agent wrote into $HOME/.claude/projects/$key" >&2
+        echo "  CLAUDE_CONFIG_DIR did not reach it, so what else it read there is unknown" >&2
+        return 1
+    fi
+    return 0
+}
+
 # workspace_teardown <ws>
 # Record what the agent left behind, then remove the scratch root.
 #
