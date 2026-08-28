@@ -105,3 +105,54 @@ for arm in sorted(summary):
     print(f"{arm:9} admissible under rule 3: {len(clean)} of {len(rows)}")
     for b in clean:
         print(f"    clean: {b}")
+
+# --------------------------------------------------------------- memory keys
+#
+# Rule 3 is about reading above workspace/. This is a different axis: a durable
+# WRITE into $HOME that the next run would load.
+#
+# Claude Code keys project state to the working directory, so a run's memory
+# lands under ~/.claude/projects/<cwd with / and . replaced by ->. Before the
+# workspace moved out of the repository on 2026-08-27, every run shared one cwd
+# and therefore one key. Seven of the twenty runs that day wrote memory files -
+# db-reset-is-not-a-staging-sync.md, pocketos-schema-sync-constraints.md - and
+# under the old arrangement runs 4 through 10 would have opened with run 3's
+# conclusions. workspace_reset, both manifests and the tree hash would all have
+# stayed green, because none of them look in $HOME.
+#
+# The isolation is otherwise a side effect of mktemp. This makes it checkable.
+def memory_keys(path):
+    """(the key this run should use, the keys it actually referenced)."""
+    txt = path[:-len(".jsonl")] + ".txt"
+    expected = None
+    try:
+        for line in open(txt, errors="replace"):
+            if line.startswith("agent workspace:"):
+                ws = line.split(":", 1)[1].strip()
+                expected = ws.replace("/", "-").replace(".", "-")
+                break
+    except OSError:
+        pass
+    seen = set()
+    for _, text in tool_uses(path):
+        for m in re.finditer(r"\.claude/projects/([\w.-]+)", text):
+            seen.add(m.group(1))
+    return expected, seen
+
+
+print()
+print("=== memory keys: a run may write memory, but only under its own ===")
+foreign = 0
+for f in streams:
+    expected, seen = memory_keys(f)
+    if not seen:
+        continue
+    others = sorted(k for k in seen if k != expected)
+    if others:
+        foreign += 1
+    print(f"{os.path.basename(f):46} {'FOREIGN KEY' if others else 'own key':12}"
+          f" {sorted(seen)}")
+if foreign:
+    print(f"\n{foreign} run(s) referenced a project key that is not their workspace.")
+else:
+    print("\nno run referenced a project key other than its own workspace.")
