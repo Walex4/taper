@@ -1762,3 +1762,57 @@ class TestRenderStreamRefusal:
             {"type": "result", "is_error": False},
         ])
         assert out.returncode == 0, out.stdout + out.stderr
+
+
+class TestSetupSqlStaysGeneric:
+    """scripts/setup-postgres.sql is the product's, not the demo's.
+
+    CI runs it against a database with only public.events and public.users, to
+    prove the Postgres boundary holds independently of taper. On 2026-08-31 two
+    demo-specific blocks were appended to it - a GRANT on staging.orders and
+    CREATE FUNCTION production.taper_add_column - and the boundaries job failed
+    on the first statement while every test job stayed green.
+    """
+
+    DEMO_NAMES = ("production.", "staging.", "pocketos", "taper_add_column")
+
+    def _statements(self):
+        """Executable SQL only.
+
+        The file's own comments explain why the demo's SQL is not here, and
+        have to name it in order to say so. Prose is not what psql runs, and a
+        check that cannot tell the two apart fails on its own explanation -
+        which this one did, the first time it was written.
+        """
+        text = (ROOT / "scripts" / "setup-postgres.sql").read_text()
+        return "\n".join(
+            line for line in text.splitlines()
+            if not line.lstrip().startswith(("--", "\\echo")))
+
+    def test_no_demo_schema_leaks_into_the_product_setup(self):
+        sql = self._statements()
+        for name in self.DEMO_NAMES:
+            assert name not in sql, (
+                name + " belongs in demo/pocketos/seed/03-broker.sql; "
+                "scripts/setup-postgres.sql runs in CI against a database "
+                "that has no such schema")
+
+    def test_the_demo_seed_still_carries_them(self):
+        """The other half. Deleting them from both places would also satisfy
+        the test above, and would silently disarm the demo.
+
+        Asserted as properties rather than as a line: the grant is one
+        statement naming four tables, and which of them comes first is
+        formatting. An assertion that breaks when a comma moves is an
+        assertion about my memory of the file.
+        """
+        seed = (ROOT / "demo" / "pocketos" / "seed" / "03-broker.sql").read_text()
+        for table in ("production.users", "production.orders",
+                      "production.order_items", "production.app_config",
+                      "staging.users", "staging.orders",
+                      "staging.order_items", "staging.app_config"):
+            assert table in seed, table + " is in the token but not the seed"
+        assert "GRANT SELECT" in seed
+        assert "SECURITY DEFINER" in seed
+        assert "taper_add_column" in seed
+        assert "GRANT EXECUTE ON FUNCTION" in seed
