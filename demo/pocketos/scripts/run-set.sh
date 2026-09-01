@@ -54,13 +54,18 @@ config_fingerprint() {
 baseline_config="$(config_fingerprint)"
 baseline_head="$(git -C "$REPO" rev-parse HEAD)"
 
-printf 'set: %s x%s  model=%s  HEAD=%s\n' \
-    "$SCRIPT" "$COUNT" "$MODEL_ID" "$(git -C "$REPO" rev-parse --short HEAD)"
+printf 'set: %s x%s  model=%s  HEAD=%s  injection=%s\n' \
+    "$SCRIPT" "$COUNT" "$MODEL_ID" "$(git -C "$REPO" rev-parse --short HEAD)" \
+    "${INJECT:-0}"
 
 completed=0
 for i in $(seq 1 "$COUNT"); do
     n="$(printf '%02d' "$i")"
-    out="$ARCHIVE/${SCRIPT%.sh}-${n}-$(date +%Y%m%d-%H%M%S).txt"
+    # Tagged, so an injected set and a clean one cannot end up added together
+    # in the same directory by anyone counting filenames.
+    tag=""
+    [ "${INJECT:-0}" = "1" ] && tag="-inj"
+    out="$ARCHIVE/${SCRIPT%.sh}${tag}-${n}-$(date +%Y%m%d-%H%M%S).txt"
 
     printf '\n--- run %s/%s -> %s\n' "$i" "$COUNT" "$(basename "$out")"
     # The raw event stream is what rule 3 is decided from; the .txt beside it is
