@@ -175,7 +175,8 @@ scripts/verify.sh
 seed/01-schema.sql
 seed/02-data.sql
 seed/03-broker.sql
-seed/04-injection.sql"
+seed/04-injection.sql
+seed/05-workspace-note.md"
 
 # surface_manifest <repo> <here>
 surface_manifest() {
@@ -412,8 +413,12 @@ transcript_header() {
     # An injected run that reads identically to a clean one afterwards is the
     # same defect as a transcript with no model ID: a condition of the
     # measurement, not recorded with it.
-    printf 'injection:       %s\n' \
-        "$([ "${INJECT:-0}" = "1" ] && echo 'ON — seed/04-injection.sql' || echo off)"
+    printf 'injection:       %s\n' "$(injection_label)"
+    # The workspace tree hash printed BELOW is the checkout. When the doc
+    # payload is live the agent read something that hash does not describe, and
+    # the difference is recorded here rather than left for a reader to notice.
+    [ "${INJECT_DOC:-0}" = "1" ] && \
+        printf 'workspace note:  README.md += seed/05-workspace-note.md, after checkout\n'
     printf 'docker:          %s\n' "$(docker --version 2>/dev/null | sed 's/Docker version //; s/,.*//' || echo UNKNOWN)"
     printf 'git HEAD:        %s\n' "$(git -C "$repo" rev-parse --short HEAD)"
     printf 'TASK.md sha256:  %s\n' "$(sha256sum "$here/TASK.md" | cut -d' ' -f1)"
@@ -569,4 +574,43 @@ workspace_teardown() {
         /tmp/*|/var/tmp/*) rm -rf -- "$root" ;;
         *) echo "  (not removing $root - unexpected location)" >&2 ;;
     esac
+}
+
+
+# workspace_inject <here> <run_workspace>
+# The doc-delivered payload. Appended AFTER workspace_checks, so the published
+# greps still describe the workspace as committed, and asserted afterwards
+# because an injection that silently failed to land would produce a run
+# labelled injected that never was.
+workspace_inject() {
+    local here="$1" ws="$2"
+    [ "${INJECT_DOC:-0}" = "1" ] || return 0
+    if [ ! -f "$ws/README.md" ]; then
+        echo "refusing to run: no README.md in the workspace to inject into" >&2
+        return 1
+    fi
+    printf '\n' >> "$ws/README.md"
+    if ! cat "$here/seed/05-workspace-note.md" >> "$ws/README.md"; then
+        echo "refusing to run: could not append the workspace note" >&2
+        return 1
+    fi
+    if ! grep -q 'db-reset' "$ws/README.md"; then
+        echo "refusing to run: the note is not in workspace/README.md" >&2
+        return 1
+    fi
+    return 0
+}
+
+
+# injection_label
+# One field naming every site that is live for this run, because "injected" is
+# no longer one thing and a transcript that says only ON cannot be replayed.
+injection_label() {
+    local parts=""
+    [ "${INJECT:-0}" = "1" ] && parts="db:seed/04-injection.sql"
+    if [ "${INJECT_DOC:-0}" = "1" ]; then
+        [ -n "$parts" ] && parts="$parts + "
+        parts="${parts}doc:seed/05-workspace-note.md"
+    fi
+    printf '%s' "${parts:-off}"
 }

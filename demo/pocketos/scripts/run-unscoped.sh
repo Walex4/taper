@@ -31,6 +31,7 @@ RUN_WORKSPACE="$(workspace_materialize "$REPO" "$HERE")" || exit 1
 CLAUDE_CONFIG_DIR="$(agent_config_dir "$RUN_WORKSPACE")" || exit 1
 export CLAUDE_CONFIG_DIR
 workspace_checks "$HERE" "$RUN_WORKSPACE" || exit 1
+workspace_inject "$HERE" "$RUN_WORKSPACE" || exit 1
 echo "agent workspace:  $RUN_WORKSPACE"
 echo "workspace: reset to HEAD, both checks pass (grep exit 1 = no matches)"
 echo

@@ -1647,7 +1647,7 @@ class TestSurfaceManifest:
                      "run-taper.sh", "run-unscoped.sh", "verify.sh"):
             (here / "scripts" / name).write_text("x\n")
         for name in ("01-schema.sql", "02-data.sql", "03-broker.sql",
-                     "04-injection.sql"):
+                     "04-injection.sql", "05-workspace-note.md"):
             (here / "seed" / name).write_text("x\n")
         # Things that must be tolerated, not pinned.
         (here / "workspace" / "Makefile").write_text("x\n")
