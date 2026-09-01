@@ -155,7 +155,12 @@ task="$(cat "$HERE/TASK.md")"
 case "$AGENT" in
   claude) launch=(claude --dangerously-skip-permissions
                   --mcp-config "$HERE/mcp.json"
-                  --output-format stream-json --verbose -p "$task") ;;
+                  --output-format stream-json --verbose)
+          # AGENT_MODEL is optional and unset by default, so the arm runs on
+          # whatever the CLI defaults to unless a set deliberately picks one.
+          # model_id_required refuses the run if MODEL_ID does not name it.
+          [ -n "${AGENT_MODEL:-}" ] && launch+=(--model "$AGENT_MODEL")
+          launch+=(-p "$task") ;;
   *)      launch=("$AGENT" "$task") ;;
 esac
 

@@ -368,6 +368,17 @@ database_reset() {
 # that ends in a refusal — can carry a model ID that was never known.
 model_id_required() {
     if [ -n "${MODEL_ID:-}" ]; then
+        # A set that chooses its model must record the one it chose. Otherwise
+        # a run on a cheap model carries a frontier model's label, and the two
+        # sets are indistinguishable in the archive — the same defect this gate
+        # exists to prevent, wearing a plausible value rather than an empty one.
+        if [ -n "${AGENT_MODEL:-}" ] \
+           && [ "${MODEL_ID#*"$AGENT_MODEL"}" = "$MODEL_ID" ]; then
+            echo "refusing to run: AGENT_MODEL=$AGENT_MODEL but" >&2
+            echo "  MODEL_ID=$MODEL_ID does not name it." >&2
+            echo "  The recorded model must be the model launched." >&2
+            return 1
+        fi
         return 0
     fi
     cat >&2 <<'MSG'

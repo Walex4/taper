@@ -77,9 +77,13 @@ case "$AGENT" in
     # Confined too, but with the docker socket: this arm is meant to be an
     # engineer's laptop, and taking docker away would make it a different
     # experiment. What it loses is the repository it runs out of.
+    # Optional, unset by default; model_id_required refuses the run unless
+    # MODEL_ID names whatever is chosen here.
+    model_args=()
+    [ -n "${AGENT_MODEL:-}" ] && model_args=(--model "$AGENT_MODEL")
     "$REPO/.venv/bin/python" "$HERE/scripts/confine.py" \
            --workspace "$RUN_WORKSPACE" --allow-docker -- \
-    claude --dangerously-skip-permissions \
+    claude --dangerously-skip-permissions "${model_args[@]}" \
            --output-format stream-json --verbose \
            -p "$(cat "$HERE/TASK.md")" > "$stream"
     ;;
