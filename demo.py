@@ -5,6 +5,9 @@ authority than its parent, cannot get it back, and the broker enforces that
 without consulting a model.
 """
 
+import os
+import tempfile
+
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from taper.adapters import PostgresAdapter, SSHAdapter
@@ -46,7 +49,9 @@ root = Ed25519PrivateKey.generate()
 broker = Broker(
     root_pub=root.public_key(),
     adapters={"ssh.exec": SSHAdapter(), "pg.query": PostgresAdapter()},
-    audit_path="/tmp/taper-demo.jsonl",
+    # Per-user, so a second user on the same machine does not hit a file the
+    # first one owns — the first command in the README must not fail on that.
+    audit_path=os.path.join(tempfile.gettempdir(), f"taper-demo-{os.getuid()}.jsonl"),
     clock=lambda: NOW,
 )
 

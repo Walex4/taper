@@ -437,7 +437,7 @@ part, and leaving it out keeps the suite side-effect free.
 ```bash
 taper init                              # root keypair, 0600
 taper secret set ssh.cert < ~/.ssh/id   # into the vault
-taper grant policy.example.json --ttl 1h
+TOKEN=$(taper grant policy.example.json --key-file ~/.taper/agent.key --ttl 1h)
 taper inspect "$TOKEN"                  # what does this actually permit?
 taper doctor                            # is this machine set up correctly?
 TAPER_TOKEN="$TOKEN" taper serve --in-process   # dev only — see below

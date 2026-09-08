@@ -2,7 +2,8 @@
 
     taper init                      create the root keypair and directories
     taper secret set <ref>          read a secret from stdin into the vault
-    taper grant <file> [--ttl 1h]   issue a token from a policy file
+    taper grant <file> --key-file k [--ttl 1h]
+                                    issue a token; proving key to k, 0600
     taper narrow <token> <file>     attenuate an existing token
     taper inspect <token>           show what a token actually permits
     taper doctor                    check the local setup
