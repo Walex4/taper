@@ -694,12 +694,17 @@ class TestLandlock:
         assert out["landlock"].startswith("applied("), out["landlock"]
 
     def test_a_ruleset_that_cannot_be_applied_refuses_the_request(self, tmp_path):
-        """Fail closed. Configured-but-broken must never mean unconfined."""
+        """Fail closed. Configured-but-broken must never mean unconfined.
+        On a kernel without Landlock the shim refuses one step earlier, for a
+        different reason — but it must still refuse."""
         out = run_shim(json.dumps({"program": "echo", "args": ["hello"]}),
                        {**ECHO_ALLOWLIST,
                         "landlock": [str(tmp_path / "does-not-exist")]}, tmp_path)
         assert out["ok"] is False
-        assert "cannot be opened" in out["error"]
+        if HAS_LANDLOCK:
+            assert "cannot be opened" in out["error"]
+        else:
+            assert "kernel has none" in out["error"]
 
     def test_an_unknown_grant_is_refused_rather_than_ignored(self, tmp_path):
         out = run_shim(json.dumps({"program": "echo", "args": ["hello"]}),
