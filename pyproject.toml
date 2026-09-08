@@ -1,11 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "taper"
+# The distribution is `taper-broker` (the bare name `taper` on PyPI belongs to an
+# unrelated project). The import and the CLI are still `taper`.
+name = "taper-broker"
 version = "0.1.0"
 description = "Narrowing-only capability tokens and a credential broker for AI agents"
+readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
+authors = [{ name = "Wale Oyerinde" }]
+keywords = [
+    "ai-agents", "capability-tokens", "credential-broker", "least-privilege",
+    "mcp", "landlock", "attenuation", "security",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration :: Authentication/Directory",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = ["cryptography>=42"]
+
+[project.urls]
+Homepage = "https://github.com/Walex4/taper"
+Documentation = "https://github.com/Walex4/taper#readme"
+Design = "https://github.com/Walex4/taper/blob/main/DESIGN.md"
+Security = "https://github.com/Walex4/taper/blob/main/SECURITY.md"
+Changelog = "https://github.com/Walex4/taper/blob/main/CHANGELOG.md"
+Issues = "https://github.com/Walex4/taper/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

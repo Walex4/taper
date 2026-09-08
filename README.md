@@ -50,6 +50,14 @@ pip install -e .
 python demo.py
 ```
 
+Or, without the clone, from PyPI — the distribution is `taper-broker` (the bare
+name belongs to an unrelated project); the import and the command are `taper`:
+
+```bash
+pip install taper-broker
+taper doctor
+```
+
 If `python3 -m venv` still reports that `ensurepip` is unavailable, install the
 version-specific package it names — `python3.12-venv`, `python3.14-venv` — since
 `python3-venv` tracks only the distribution's default interpreter.

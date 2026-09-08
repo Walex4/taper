@@ -1,0 +1,72 @@
+name: release
+
+# Publishes to PyPI when a v* tag is pushed. Uses PyPI trusted publishing
+# (OIDC) — there is no API token anywhere in this repository, which is the
+# only acceptable arrangement for a project whose subject is credentials.
+#
+# One-time setup on PyPI (project "taper-broker"): Publishing → add a GitHub
+# publisher with owner Walex4, repository taper, workflow release.yml,
+# environment pypi.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  # The release is gated on the same checks as every push. A tag does not get
+  # to skip the red team.
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+      - run: python validate/redteam.py
+
+  build:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Tag must match the package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(python -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+          test "$tag" = "$pkg" || { echo "tag v$tag != pyproject $pkg"; exit 1; }
+      - run: pip install build twine
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write      # OIDC for trusted publishing
+      contents: write      # attach the artefacts to the GitHub release
+    steps:
+      - uses: actions/checkout@v5     # for CHANGELOG.md
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+      - name: GitHub release with the built artefacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file <(awk '/^## /{n++} n==1' CHANGELOG.md) \
+            || gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
