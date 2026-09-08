@@ -530,6 +530,8 @@ stacked statements classifying as `SELECT`, the real pgAdmin backslash payload
 getting through, `pg_read_file` passing as a plain select because it touched no
 table, and `/v1/../../admin` satisfying a `/v1/` prefix. All four are fixed and
 pinned by regression tests. Expect it to find more when you extend the adapters.
+[`docs/redteam.md`](docs/redteam.md) walks through all fifty-nine cases, the
+four bypasses with their fixes, and what the harness does not prove.
 
 ## Production notes
 
