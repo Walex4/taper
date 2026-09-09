@@ -624,9 +624,22 @@ a Cedar policy engine, SSH and DB connectors, *and* a kernel-level local daemon
 (Leash) that already enforces policy but deliberately doesn't hold credentials.
 They are one product decision away. Assume 12–18 months.
 
-## License
+## License and trademark
 
 Apache License 2.0 — see [LICENSE](LICENSE). Apache rather than MIT for the
 explicit patent grant and the requirement that changes be marked, both of which
 matter more than adoption for something whose value is that you can check what
 it does.
+
+**The fence, stated before there is anything behind it.** Everything in this
+repository — the token, the broker, the adapters, the shim, the red team, the
+validation scripts, the demo — is and stays Apache-2.0. If a commercial layer
+is ever built (a fleet directory, a compliance artefact, a hosted control
+plane), it will live in a separate repository under the Business Source
+License 1.1 with a four-year conversion to Apache-2.0, and that will be stated
+in its README on the day it appears. Nothing that makes Taper's security claims
+verifiable will ever move behind that fence.
+
+**The name is not the code.** "Taper" is a trademark; the Apache License
+grants no rights to it (§6). Fork freely, and call the fork something else.
+[TRADEMARK.md](TRADEMARK.md) says what is and is not fine.
