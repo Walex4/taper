@@ -33,8 +33,26 @@ so a subagent cannot exceed its parent.
 ## Try it
 
 **In the browser, nothing to install:** [walex4.github.io/taper](https://walex4.github.io/taper/)
-runs the real library in your tab — mint a token, narrow it, fire the red
-team's payloads, watch the audit chain.
+runs the real library in your tab. Six steps, one property each:
+
+1. **Mint the root token.** Read the policy — three operations, each with typed
+   constraints — and mint. That is the agent's entire authority, written down.
+2. **Narrow it for a subagent.** One host, one program, one argument, five
+   minutes, and `pg.query` gone. No server is contacted; the parent signs a new
+   block with an ephemeral key.
+3. **Try to widen it back.** The subagent asks for a second host it never had.
+   Refused by construction, not by a policy that could be misconfigured.
+4. **Send a request, then attack.** An allowed request shows the exact `argv`
+   the broker would execute. The attack buttons are the payloads from
+   `validate/redteam.py`, including the four that got through the first time.
+5. **Steal the token.** Untick "with proof of possession" and resend: that is
+   someone who copied the token text from a log. They get nothing.
+6. **Revoke, expire, tamper.** Revoking the root kills the subagent too; the
+   clock can be advanced past the TTL; and deleting a record from the audit
+   panel makes the hash chain report exactly where.
+
+Or click "Run the whole tour for me" and watch it do all six in about ninety
+seconds. Nothing is mocked and nothing leaves the tab.
 
 Your agent never holds a credential. It holds a token that says what it may do,
 and it can narrow that token for a subagent without asking anyone — but it can
@@ -70,6 +88,35 @@ Without the virtual environment, `pip install -e .` fails with
 `error: externally-managed-environment` on any PEP 668 distribution, which is
 every current Debian and Ubuntu. That is pip protecting the system Python, not
 a problem with this package.
+
+## Explaining it
+
+**In one sentence.** AI coding agents keep deleting production databases
+because they are handed the keys; Taper is a locked box that holds the keys and
+only does the specific, narrow things the agent is allowed to ask for.
+
+**The analogy.** Today's agents get the hotel's master key: it opens every door,
+and if the agent is confused or tricked, the wrong door opens. Taper is the
+front desk. The agent never touches a key. It says "open room 412," the desk
+checks its list, and a staff member opens that one door. The agent can hand a
+helper a shorter list — just 412, just for five minutes — but can never write a
+longer one. And every request, allowed or refused, goes in a ledger where
+tearing out a page leaves a visible gap.
+
+**The sixty-second version, for an engineer.** The agent holds a signed token
+that names typed operations with constraints: `ssh.exec` on `build-1` running
+`git`, or `pg.query`, `SELECT` only, on these tables. A broker in a separate
+process under a different Unix user holds the real credentials, checks the
+token, and executes the operation itself, so the credential is never in the
+agent's memory, environment, or shell. Tokens only narrow: a subagent gets a
+strictly smaller one, signed offline, and a widening block is rejected
+structurally rather than by policy. Shell injection is not filtered, it is
+inexpressible, because the SSH adapter builds `argv` directly. And Taper is
+never the only boundary: the database role and `sshd` are configured to refuse
+the dangerous operation on their own. It is unaudited, about two thousand
+lines, and the measured result so far is deliberately modest — in a rebuild of
+the PocketOS incident, both arms did the job ten out of ten. Taper does not
+stop an agent working; it bounds what else it could have done.
 
 ## Why this exists
 
