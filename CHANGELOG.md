@@ -3,6 +3,21 @@
 The first section is what `release.yml` attaches to the GitHub release, so it
 is written to be read on its own.
 
+## v0.1.1 — 2026-09-09
+
+A small release so that what people install matches what the README says.
+
+- `taper --help` and the README quickstart now show `--key-file`, which
+  `taper grant` requires; both omitted it, so copying either produced an error.
+- `demo.py` writes its audit log per user under the temp directory instead of
+  a fixed `/tmp` path, so the first command in the README no longer fails for
+  the second user on a machine.
+- The wheel now carries `NOTICE` and `TRADEMARK.md` beside `LICENSE`. The
+  code is Apache-2.0; the name is a trademark. Forks are welcome and must be
+  called something else.
+- The playground at walex4.github.io/taper — the real library in the
+  browser — is linked from the README.
+
 ## v0.1.0 — 2026-09-08
 
 First public release. Unaudited; not yet suitable for production credentials —
