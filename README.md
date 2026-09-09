@@ -32,6 +32,10 @@ so a subagent cannot exceed its parent.
 
 ## Try it
 
+**In the browser, nothing to install:** [walex4.github.io/taper](https://walex4.github.io/taper/)
+runs the real library in your tab — mint a token, narrow it, fire the red
+team's payloads, watch the audit chain.
+
 Your agent never holds a credential. It holds a token that says what it may do,
 and it can narrow that token for a subagent without asking anyone — but it can
 never widen it.

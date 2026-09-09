@@ -166,6 +166,12 @@ pip install taper-broker
 taper doctor
 ```
 
+Or, before installing anything, the playground at
+[walex4.github.io/taper](https://walex4.github.io/taper/) runs the real
+library in your browser: mint a token, narrow it for a subagent, try to widen
+it back, fire the red team's payloads at the broker, and delete a record from
+the audit log to see the chain break.
+
 Source, design document, the twenty transcripts with every tool call, and the
 superseded sets with the reasons they were superseded:
 [github.com/Walex4/taper](https://github.com/Walex4/taper). Vulnerability
@@ -204,4 +210,6 @@ that will otherwise be the top replies):**
 >
 > It's unaudited, ~2k lines of Python by one person. Please try to break it;
 > the red-team harness found four bypasses in my own code on its first run and
-> they're all written up with payloads.
+> they're all written up with payloads. If you'd rather not install anything,
+> walex4.github.io/taper runs the actual library in your browser — the attack
+> buttons there are the harness's own payloads.

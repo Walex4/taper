@@ -1,0 +1,49 @@
+name: pages
+
+# Publishes site/ to GitHub Pages. The playground there is static: it loads
+# Pyodide from a CDN and installs taper-broker from PyPI inside the visitor's
+# browser, so there is no server, no account, and nothing to secure.
+#
+# One-time setup: repository Settings → Pages → Source: "GitHub Actions".
+
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: The bridge must at least import and run under CPython
+        run: |
+          pip install -q -e . && python - <<'EOF'
+          import sys, json; sys.path.insert(0, "site")
+          import bridge
+          bridge.reset()
+          caps = json.dumps(json.load(open("policy.example.json"))["capabilities"])
+          assert json.loads(bridge.mint("dev", caps, 60, ""))["ok"]
+          d = json.loads(bridge.ask("dev", "ssh.exec", json.dumps({"host": "build-1.internal", "program": "git", "args": ["status; rm"]})))
+          assert d["ok"] and not d["allowed"], d
+          print("bridge ok")
+          EOF
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+      - id: deployment
+        uses: actions/deploy-pages@v4
