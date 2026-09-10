@@ -192,23 +192,24 @@ the titles above; this document is what readers land on.
 readers expect the author's framing there, and it pre-empts the two objections
 that will otherwise be the top replies):**
 
-> Author here. Two things up front so nobody has to dig for them.
+> Author here. Two clarifications up front so nobody has to dig for them.
 >
-> 1. The twenty-run table shows *no difference between the arms* — both did
+> First: the twenty-run table shows no difference between the arms — both did
 > the migration, ten out of ten. That's the result, not a wrinkle. An earlier
-> set showed the broker arm at zero and it read as safety; it wasn't, the token
-> just couldn't write. The claim is narrower than "agents are dangerous": it's
-> that the blast radius shouldn't depend on the agent's judgement that day,
-> and no run in this set actually tested that bound. The write-up says so.
+> set showed the broker arm at zero and looked like safety; it wasn't. That
+> token simply couldn't write. The claim is narrower than "agents are
+> dangerous": the blast radius shouldn't depend on the agent's judgement that
+> day, and none of these runs actually exercised that bound. The write-up says
+> so.
 >
-> 2. The token construction is Biscuit's, not mine, and the design doc has a
-> prior-art table saying who did what first. What I think is new is the
+> Second: the token construction is Biscuit's, not mine. The design doc has a
+> prior-art table spelling out who did what first. What I think is new is the
 > pairing — a broker that executes the operation itself, plus a token that
 > attenuates offline — aimed at SSH/Postgres/internal HTTP rather than SaaS
 > APIs, where you control both ends.
 >
-> It's unaudited, ~2k lines of Python by one person. Please try to break it;
-> the red-team harness found four bypasses in my own code on its first run and
-> they're all written up with payloads. If you'd rather not install anything,
-> walex4.github.io/taper runs the actual library in your browser — the attack
-> buttons there are the harness's own payloads.
+> It's unaudited, ~2k lines of Python by one person. Please try to break it.
+> The red-team harness found four bypasses in my own adapters on its first
+> run, and they're all written up with payloads. If you'd rather not install
+> anything, walex4.github.io/taper runs the actual library in your browser —
+> the attack buttons there are the harness's own payloads.
