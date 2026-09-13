@@ -3,7 +3,14 @@
 The first section is what `release.yml` attaches to the GitHub release, so it
 is written to be read on its own.
 
-## Unreleased
+## v0.1.2 — 2026-09-13
+
+The release after the first outside review. The elhaz maintainer's fourth
+condition was "policy pressure" — grants widening under ordinary use until
+the abstraction gives way — and this release makes that pressure visible in
+three places: at grant time, in the audit log, and in the one capability the
+twenty runs showed was missing. Still unaudited; the status block in the
+README stands.
 
 - `pg.describe`: a new operation that reads one table's shape — columns,
   types, nullability, defaults, constraints, indexes — and never its rows.
@@ -19,7 +26,6 @@ is written to be read on its own.
   the newline — argv is never a shell, and table names travel as bound
   parameters — but the validators claimed a newline was inexpressible and it
   was not. Found while writing the `pg.describe` tests.
-
 - `taper grant` and `taper inspect` warn, on stderr, for every field granted
   `any` and for every field a grant leaves out. The first is the wildcard the
   design document names as its second falsification criterion — policy
