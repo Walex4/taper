@@ -1822,3 +1822,65 @@ class TestSetupSqlStaysGeneric:
         assert "SECURITY DEFINER" in seed
         assert "taper_add_column" in seed
         assert "GRANT EXECUTE ON FUNCTION" in seed
+
+
+# --------------------------------------------------- policy pressure warnings
+
+WIDE_POLICY = {"note": "wide grant",
+               "capabilities": {"ssh.exec": {
+                   "host": {"kind": "any"},
+                   "program": {"kind": "one_of", "values": ["git"]}}}}
+
+
+class TestPolicyPressureWarnings:
+    """The warning has to reach the operator without touching the token.
+
+    `taper grant` promises stdout is the token and nothing else; a warning on
+    that channel would be captured into every `$(taper grant ...)`. So the
+    warning goes to stderr, and this test pins both halves: it is there, and
+    stdout is still exactly one line.
+    """
+
+    def test_grant_warns_on_stderr_and_keeps_stdout_clean(
+            self, tmp_path, monkeypatch, capsys):
+        home = tmp_path / "home"
+        for name, value in [("HOME", home), ("ROOT_KEY", home / "root.key"),
+                            ("ROOT_PUB", home / "root.pub"),
+                            ("SECRETS", home / "secrets"),
+                            ("AUDIT", home / "audit.jsonl")]:
+            monkeypatch.setattr(cli, name, value)
+        assert cli.main(["init"]) == 0
+        capsys.readouterr()
+        policy = tmp_path / "policy.json"
+        policy.write_text(json.dumps(WIDE_POLICY))
+        code = cli.main(["grant", str(policy), "--key-file", str(tmp_path / "k")])
+        out, err = capsys.readouterr()
+        assert code == 0                                   # a warning, not a refusal
+        lines = [line for line in out.splitlines() if line.strip()]
+        assert len(lines) == 1 and Token.deserialize(lines[0])
+        assert "policy pressure" in err
+        assert "ssh.exec.host is `any`" in err
+        assert "ssh.exec.args is not constrained" in err
+        assert "program" not in err.split("policy pressure", 1)[1]
+
+    def test_inspect_warns_on_the_effective_capabilities(
+            self, tmp_path, monkeypatch, capsys):
+        home = tmp_path / "home"
+        for name, value in [("HOME", home), ("ROOT_KEY", home / "root.key"),
+                            ("ROOT_PUB", home / "root.pub"),
+                            ("SECRETS", home / "secrets"),
+                            ("AUDIT", home / "audit.jsonl")]:
+            monkeypatch.setattr(cli, name, value)
+        assert cli.main(["init"]) == 0
+        policy = tmp_path / "policy.json"
+        policy.write_text(json.dumps(WIDE_POLICY))
+        assert cli.main(["grant", str(policy), "--key-file", str(tmp_path / "k")]) == 0
+        token = [l for l in capsys.readouterr().out.splitlines() if l.strip()][-1]
+        assert cli.main(["inspect", token]) == 0
+        out, err = capsys.readouterr()
+        assert "effective capabilities" in out
+        assert "ssh.exec.host is `any`" in err
+
+    def test_a_narrow_grant_produces_no_warning(self, tmp_path, monkeypatch, capsys):
+        code, out, err = _grant(tmp_path, monkeypatch, capsys, tmp_path / "k")
+        assert code == 0 and "policy pressure" not in err

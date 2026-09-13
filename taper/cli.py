@@ -37,7 +37,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from .audit import AuditLog
-from .caps import caps_from_json, caps_to_json
+from .caps import caps_from_json, caps_to_json, policy_pressure
 from .chain import ChainError, Token, verify
 from .secrets import SecretNotFound, SecretUnreadable
 from .hints import broker_socket, broker_vault, mint_procedure
@@ -149,6 +149,29 @@ def cmd_secret_set(args) -> int:
     return 0
 
 
+def _warn_policy_pressure(caps) -> int:
+    """Print the wildcard/missing-field warnings for a grant. Returns the count.
+
+    Always stderr, never stdout: `taper grant` promises that stdout is the token
+    and nothing else, and a warning on the token's channel would break every
+    `$(taper grant ...)` in every unit file.
+
+    verified-by: tests/test_integration.py::TestPolicyPressureWarnings::test_grant_warns_on_stderr_and_keeps_stdout_clean
+    verified-by: tests/test_integration.py::TestPolicyPressureWarnings::test_inspect_warns_on_the_effective_capabilities
+    """
+    lines = policy_pressure(caps)
+    if not lines:
+        return 0
+    print(f"{YELLOW}policy pressure:{OFF} {len(lines)} "
+          f"{'field' if len(lines) == 1 else 'fields'} to look at", file=sys.stderr)
+    for line in lines:
+        print(f"  {YELLOW}!{OFF} {line}", file=sys.stderr)
+    print(f"{DIM}# DESIGN.md, \"What would falsify this design\", item 2. "
+          f"A grant that keeps drifting to `any` is the design telling you "
+          f"something.{OFF}", file=sys.stderr)
+    return len(lines)
+
+
 def cmd_grant(args) -> int:
     """Mint a token, and write its proving key to a file of its own.
 
@@ -192,6 +215,7 @@ def cmd_grant(args) -> int:
           file=sys.stderr)
     print(f"{DIM}# the key is not printed anywhere and cannot be recovered from "
           f"the token — keep it, or mint again{OFF}", file=sys.stderr)
+    _warn_policy_pressure(caps)
     return 0
 
 
@@ -229,6 +253,7 @@ def cmd_inspect(args) -> int:
     print(f"\n{BOLD}expires{OFF} in {colour}{remaining}s{OFF}")
     print(f"\n{BOLD}effective capabilities{OFF}  {DIM}(intersection of all blocks){OFF}")
     print(json.dumps(caps_to_json(caps), indent=2))
+    _warn_policy_pressure(caps)
     return 0
 
 

@@ -175,7 +175,7 @@ Two or three paid installation engagements at $10–15k in months four through n
 
 Thirty consecutive days running your real work through it. Landlock applied. Policy file moved to root ownership. The isolation check scanning contents rather than filenames. Certificate renewal a single command.
 
-**Kill criterion.** If you add an escape hatch — an arbitrary command, a raw statement — to get your own work done, Rule 1 has failed in practice and the design needs revisiting before anything else happens.
+**Kill criterion: policy pressure.** If normal use keeps forcing grants toward wildcards — `any` on the attributes that matter, or an escape hatch such as an arbitrary command or a raw statement — the abstraction is too narrow for the job. The escape hatch is the symptom; the pressure is the mechanism, and it shows up first as a policy file that widens week by week. `taper grant` and `taper inspect` warn on every `any` so the drift is visible at the moment it happens rather than in hindsight. If the warnings become routine, Rule 1 has failed in practice and the design needs revisiting before anything else happens.
 
 ### Month 3–4 — Strangers install it
 

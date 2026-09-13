@@ -286,6 +286,53 @@ def caps_from_json(d: dict) -> dict[str, dict[str, Constraint]]:
     }
 
 
+def policy_pressure(caps: dict[str, dict[str, Constraint]],
+                    known_fields: dict[str, Iterable[str]] | None = None) -> list[str]:
+    """Name every place a grant has drifted to a wildcard, one line each.
+
+    `any` is legal — a root grant has to start somewhere — but it is exactly
+    what policy pressure pushes toward: a field that was narrowed last week and
+    is `any` this week because the narrow form got in the way. DESIGN.md lists
+    that drift as the second way the design could be falsified, and the only
+    way to notice drift is to be told about it at the moment it is written
+    down. So `taper grant` and `taper inspect` print these to stderr, loudly,
+    every time. They are warnings and not errors: the operator may have a
+    reason, and the point is that they had to see it.
+
+    A field that is simply missing is reported too, but for the opposite
+    reason. It is not a wildcard — the broker fails closed on an attribute
+    nobody constrained — so a request that carries the attribute will be
+    refused, and the operator should learn that from the grant, not from the
+    first denial.
+
+    `known_fields` maps operation name to the attribute names an adapter
+    accepts; it defaults to the registry in ops.py. Operations the registry
+    does not know are skipped rather than guessed at.
+
+    verified-by: tests/test_taper.py::TestPolicyPressure::test_every_any_is_named
+    verified-by: tests/test_taper.py::TestPolicyPressure::test_a_missing_field_is_named_as_fail_closed
+    verified-by: tests/test_taper.py::TestPolicyPressure::test_a_fully_narrowed_grant_is_silent
+    """
+    if known_fields is None:
+        from .ops import REGISTRY
+        known_fields = {name: [f.name for f in op.fields]
+                        for name, op in REGISTRY.items()}
+
+    lines: list[str] = []
+    for op in sorted(caps):
+        fields = caps[op]
+        for field in sorted(fields):
+            if isinstance(fields[field], Any_):
+                lines.append(f"{op}.{field} is `any`: every value is permitted. "
+                             f"Narrow it (one_of, prefix, range, subset) "
+                             f"unless this really is the root grant.")
+        for field in known_fields.get(op, ()):
+            if field not in fields:
+                lines.append(f"{op}.{field} is not constrained: the broker "
+                             f"refuses any request that carries it. Name it.")
+    return lines
+
+
 def canonical(caps: dict[str, dict[str, Constraint]]) -> bytes:
     """Deterministic bytes for signing. Sorted keys, no whitespace."""
     return json.dumps(caps_to_json(caps), sort_keys=True, separators=(",", ":")).encode()

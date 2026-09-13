@@ -18,8 +18,10 @@ from taper.adapters import HTTPAdapter, PostgresAdapter, SSHAdapter
 from taper.audit import AuditLog
 from taper.broker import Broker
 from taper.caps import (
-    Any_, Never, OneOf, Prefix, Range, Subset, from_json, intersect, subsumes,
+    Any_, Never, OneOf, Prefix, Range, Subset, caps_from_json, from_json,
+    intersect, subsumes,
 )
+from taper.caps import policy_pressure
 from taper.chain import MAX_DEPTH, ChainError, Token, verify
 from taper.pop import NonceCache, PopError, canonical, prove, verify_proof
 
@@ -1103,3 +1105,54 @@ class TestMigrateOperation:
              "column": "currency", "type": "text", "default": "USD",
              "not_null": True})
         assert clean["column"] == "currency"
+
+
+class TestPolicyPressure:
+    """DESIGN.md's second falsification: grants drifting toward `any`.
+
+    The check does not stop anything — `any` is legal, and a root grant needs
+    it — but every wildcard has to be named at the moment it is written, so the
+    drift is visible while it is happening and not in hindsight.
+    """
+
+    KNOWN = {"ssh.exec": ["host", "program", "args"]}
+
+    def test_every_any_is_named(self):
+        caps = caps_from_json({"ssh.exec": {
+            "host": {"kind": "any"},
+            "program": {"kind": "one_of", "values": ["git"]},
+            "args": {"kind": "any"}}})
+        lines = policy_pressure(caps, self.KNOWN)
+        assert len(lines) == 2
+        assert lines[0].startswith("ssh.exec.args is `any`")
+        assert lines[1].startswith("ssh.exec.host is `any`")
+        assert not any("program" in line for line in lines)
+
+    def test_a_missing_field_is_named_as_fail_closed(self):
+        """Absent is not a wildcard: the broker refuses an attribute nobody
+        constrained. The warning says so, and says it differently."""
+        caps = caps_from_json({"ssh.exec": {
+            "host": {"kind": "one_of", "values": ["build-1"]},
+            "program": {"kind": "one_of", "values": ["git"]}}})
+        lines = policy_pressure(caps, self.KNOWN)
+        assert lines == ["ssh.exec.args is not constrained: the broker refuses "
+                         "any request that carries it. Name it."]
+
+    def test_a_fully_narrowed_grant_is_silent(self):
+        caps = caps_from_json({"ssh.exec": {
+            "host": {"kind": "one_of", "values": ["build-1"]},
+            "program": {"kind": "one_of", "values": ["git"]},
+            "args": {"kind": "subset", "values": ["status"]}}})
+        assert policy_pressure(caps, self.KNOWN) == []
+
+    def test_defaults_to_the_registry_and_skips_unknown_operations(self):
+        caps = caps_from_json({"pg.migrate": {"database": {"kind": "any"}},
+                               "not.an.op": {"x": {"kind": "any"}}})
+        lines = policy_pressure(caps)
+        assert any(line.startswith("pg.migrate.database is `any`") for line in lines)
+        # the four other pg.migrate fields are reported as unconstrained
+        assert sum("is not constrained" in line for line in lines) == 5
+        # the unknown op's explicit `any` is still named; its fields are not guessed
+        assert any(line.startswith("not.an.op.x is `any`") for line in lines)
+        assert not any("not.an.op." in line and "not constrained" in line
+                       for line in lines)

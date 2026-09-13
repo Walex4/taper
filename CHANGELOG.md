@@ -3,6 +3,19 @@
 The first section is what `release.yml` attaches to the GitHub release, so it
 is written to be read on its own.
 
+## Unreleased
+
+- `taper grant` and `taper inspect` warn, on stderr, for every field granted
+  `any` and for every field a grant leaves out. The first is the wildcard the
+  design document names as its second falsification criterion — policy
+  pressure — surfaced at the moment it is written down rather than found in
+  hindsight. The second is not a wildcard: the broker refuses an attribute
+  nobody constrained, so the grant is where an operator should learn that.
+  Warnings only; stdout is still exactly the token.
+- PLAN.md and DESIGN.md name the month 1–2 kill criterion "policy pressure":
+  an escape hatch is the symptom, grants drifting toward wildcards under
+  ordinary use is the mechanism.
+
 ## v0.1.1 — 2026-09-09
 
 A small release so that what people install matches what the README says.
