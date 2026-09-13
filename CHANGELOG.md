@@ -12,6 +12,12 @@ is written to be read on its own.
   hindsight. The second is not a wildcard: the broker refuses an attribute
   nobody constrained, so the grant is where an operator should learn that.
   Warnings only; stdout is still exactly the token.
+- `taper audit --refusals` sorts the log's denials into identity, schema,
+  attack-shaped, and policy, and groups the policy ones by operation, field,
+  and wanted value. The policy bucket is the policy-pressure metric; the
+  grouping is what an operator changes. Refusals of hostile statements are
+  counted as attack-shaped, not policy, so the report never argues for
+  widening a grant to admit an attack.
 - PLAN.md and DESIGN.md name the month 1–2 kill criterion "policy pressure":
   an escape hatch is the symptom, grants drifting toward wildcards under
   ordinary use is the mechanism.

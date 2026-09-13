@@ -492,7 +492,20 @@ TOKEN=$(taper grant policy.example.json --key-file ~/.taper/agent.key --ttl 1h)
 taper inspect "$TOKEN"                  # what does this actually permit?
 taper doctor                            # is this machine set up correctly?
 TAPER_TOKEN="$TOKEN" taper serve --in-process   # dev only — see below
+taper audit --refusals                  # what did the grant not cover?
 ```
+
+`taper grant` and `taper inspect` warn on every field granted `any` and on
+every field a grant leaves out. `taper audit --refusals` sorts the log's
+denials into four kinds — identity (not the holder), schema (malformed),
+attack-shaped (the statement itself is hostile), and policy (a well-formed
+request the grant did not cover) — and groups the policy ones by field and
+wanted value. That last bucket is the policy-pressure metric from the design
+document's falsification list: a field that keeps appearing there is either a
+grant that is too narrow for the job or a job the grant was never meant to
+cover, and the report cannot tell you which. In the twenty-run demo it shows
+three `ssh.exec.program` refusals wanting `psql` — the agents looking for a
+table's shape, which `SELECT` does not give and no capability yet does.
 
 Those are the single-uid shapes. Once the broker runs as its own user the root
 key is in its vault and `taper grant` above stops working from your uid — the

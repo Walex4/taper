@@ -36,7 +36,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey, Ed25519PublicKey,
 )
 
-from .audit import AuditLog
+from .audit import AuditLog, BUCKETS, POLICY, summarize_refusals
 from .caps import caps_from_json, caps_to_json, policy_pressure
 from .chain import ChainError, Token, verify
 from .secrets import SecretNotFound, SecretUnreadable
@@ -477,10 +477,55 @@ def cmd_audit(args) -> int:
         print(f"{RED}BROKEN{OFF} at record {index} — the log has been altered")
         return 1
 
+    if args.refusals:
+        return _print_refusals(summarize_refusals(log.read()))
+
     for record in log.read():
         body = record["body"]
         mark = f"{GREEN}allow{OFF}" if body["allowed"] else f"{RED}deny {OFF}"
         print(f"{mark} {body['operation']:<14} {body.get('reason','')[:70]}")
+    return 0
+
+
+def _print_refusals(summary: dict) -> int:
+    """The policy-pressure report.
+
+    Four buckets, one of which matters for the design question: `policy` is a
+    well-formed request from a legitimate task that the grant did not cover.
+    Its share of all refusals, tracked over weeks, is the number DESIGN.md's
+    second falsification criterion asks for. The report ends with the grouped
+    view - which field, wanting which value, how many times - because that is
+    what an operator changes, and a count alone is not actionable.
+
+    verified-by: tests/test_integration.py::TestRefusalsReport::test_the_report_names_the_gap
+    """
+    total, refused = summary["decisions"], summary["refused"]
+    print(f"{BOLD}decisions{OFF}  {total}   {GREEN}allowed{OFF} {summary['allowed']}   "
+          f"{RED}refused{OFF} {refused}")
+    if refused == 0:
+        print(f"{DIM}no refusals recorded{OFF}")
+        return 0
+    print(f"\n{BOLD}refusals by kind{OFF}")
+    for name in BUCKETS:
+        count = summary["buckets"][name]
+        if count == 0:
+            continue
+        share = 100 * count / refused
+        mark = YELLOW if name == POLICY else DIM
+        print(f"  {mark}{name:<14}{OFF} {count:>5}  {DIM}{share:5.1f}%{OFF}")
+    policy = summary["policy"]
+    if not policy:
+        print(f"\n{DIM}# no policy refusals: nothing legitimate fell outside a grant{OFF}")
+        return 0
+    print(f"\n{BOLD}policy pressure{OFF}  {DIM}(what a legitimate request wanted and "
+          f"the grant did not cover){OFF}")
+    for (op, field), entry in sorted(policy.items(), key=lambda kv: -kv[1]["count"]):
+        print(f"  {YELLOW}{op}.{field}{OFF}  ×{entry['count']}")
+        for wanted, n in sorted(entry["wanted"].items(), key=lambda kv: -kv[1]):
+            print(f"      wanted {wanted}  ×{n}")
+    print(f"{DIM}# a field that keeps appearing here is a grant that is too narrow "
+          f"for the job, or a job the grant was never meant to cover. Decide "
+          f"which. DESIGN.md, falsification item 2.{OFF}")
     return 0
 
 
@@ -874,6 +919,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("audit", help="read or verify the audit log")
     p.add_argument("--verify", action="store_true")
+    p.add_argument("--refusals", action="store_true",
+                   help="summarize denials by kind; the policy bucket is the "
+                        "policy-pressure metric")
     p.set_defaults(func=cmd_audit)
 
     p = sub.add_parser("doctor", help="check the local setup")

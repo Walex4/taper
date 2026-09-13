@@ -1156,3 +1156,83 @@ class TestPolicyPressure:
         assert any(line.startswith("not.an.op.x is `any`") for line in lines)
         assert not any("not.an.op." in line and "not constrained" in line
                        for line in lines)
+
+
+class TestRefusals:
+    """`taper audit --refusals`: the policy-pressure metric, from real reasons.
+
+    Every record here is produced by driving the broker, not by writing reason
+    strings into a log by hand - so if decide() ever rewords a denial, the
+    bucketing breaks here and not silently in an operator's report.
+    """
+
+    def _drive(self, broker, root, broad_caps):
+        token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
+        ok = decide(broker, token, "ssh.exec",
+                    {"host": "build-1.internal", "program": "git", "args": ["status"]})
+        assert ok.allowed
+        # policy: host outside the grant, twice, then a table outside the grant
+        for _ in range(2):
+            decide(broker, token, "ssh.exec", {"host": "prod-db.internal", "program": "git"})
+        decide(broker, token, "pg.query",
+               {"database": "analytics", "statement": "SELECT * FROM staging.orders"})
+        # policy: an operation the token does not grant at all
+        ssh_only = Token.issue(root, {"ssh.exec": broad_caps["ssh.exec"]},
+                               ttl_seconds=3600, now=NOW)
+        decide(broker, ssh_only, "pg.query",
+               {"database": "analytics", "statement": "SELECT 1 FROM public.users"})
+        # attack-shaped: stacked statements, a dangerous function
+        decide(broker, token, "pg.query",
+               {"database": "analytics", "statement": "SELECT 1; DROP TABLE public.users"})
+        decide(broker, token, "pg.query",
+               {"database": "analytics",
+                "statement": "SELECT pg_read_file('/etc/passwd') FROM public.users"})
+        # schema: an unknown field, a wrong type
+        decide(broker, token, "ssh.exec",
+               {"host": "build-1.internal", "program": "git", "shell": "bash"})
+        decide(broker, token, "ssh.exec", {"host": 7, "program": "git"})
+        # identity: no proof, then an expired token, then a revoked one
+        broker.decide(token.serialize(), "ssh.exec",
+                      {"host": "build-1.internal", "program": "git"})
+        old = Token.issue(root, broad_caps, ttl_seconds=1, now=NOW - 100)
+        decide(broker, old, "ssh.exec", {"host": "build-1.internal", "program": "git"})
+        broker.revoke(token.revocation_ids()[0])
+        decide(broker, token, "ssh.exec", {"host": "build-1.internal", "program": "git"})
+        return token
+
+    def test_each_denial_kind_lands_in_its_bucket(self, broker, root, broad_caps):
+        from taper.audit import ATTACK, IDENTITY, POLICY, SCHEMA, bucket
+        self._drive(broker, root, broad_caps)
+        kinds = [bucket(r["body"]) for r in broker.audit.read()
+                 if not r["body"]["allowed"]]
+        assert kinds == [POLICY, POLICY, POLICY, POLICY, ATTACK, ATTACK,
+                         SCHEMA, SCHEMA, IDENTITY, IDENTITY, IDENTITY]
+
+    def test_a_hostile_statement_is_attack_shaped_not_policy(self, broker, root, broad_caps):
+        """The classifier refusing `SELECT 1; DROP TABLE` is the design working.
+        Counting it as policy pressure would argue for widening the grant to
+        admit the attack - the exact wrong conclusion."""
+        from taper.audit import ATTACK, bucket
+        token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
+        d = decide(broker, token, "pg.query",
+                   {"database": "analytics", "statement": "SELECT 1; DROP TABLE public.users"})
+        assert not d.allowed and "statement_kind" in d.reason
+        assert bucket({"allowed": False, "operation": "pg.query", "reason": d.reason}) == ATTACK
+
+    def test_summary_counts_and_groups_policy_denials(self, broker, root, broad_caps):
+        from taper.audit import summarize_refusals
+        self._drive(broker, root, broad_caps)
+        s = summarize_refusals(broker.audit.read())
+        assert (s["decisions"], s["allowed"], s["refused"]) == (12, 1, 11)
+        assert s["buckets"] == {"identity": 3, "schema": 2, "attack-shaped": 2,
+                                "policy": 4, "other": 0}
+        host = s["policy"][("ssh.exec", "host")]
+        assert host["count"] == 2 and host["wanted"] == {"'prod-db.internal'": 2}
+        assert s["policy"][("pg.query", "(operation)")]["count"] == 1
+        tables = s["policy"][("pg.query", "tables")]
+        assert tables["count"] == 1 and "staging.orders" in next(iter(tables["wanted"]))
+
+    def test_allowed_records_have_no_bucket(self):
+        from taper.audit import bucket
+        with pytest.raises(ValueError):
+            bucket({"allowed": True})

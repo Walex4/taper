@@ -1884,3 +1884,43 @@ class TestPolicyPressureWarnings:
     def test_a_narrow_grant_produces_no_warning(self, tmp_path, monkeypatch, capsys):
         code, out, err = _grant(tmp_path, monkeypatch, capsys, tmp_path / "k")
         assert code == 0 and "policy pressure" not in err
+
+
+# ------------------------------------------------------------ refusals report
+
+class TestRefusalsReport:
+    """`taper audit --refusals` reads the log the broker wrote and names the gap."""
+
+    def test_the_report_names_the_gap(self, tmp_path, monkeypatch, capsys):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from taper.adapters import SSHAdapter
+        from taper.broker import Broker
+        from taper.caps import OneOf, Subset
+        from taper.pop import prove
+
+        root = Ed25519PrivateKey.generate()
+        log = tmp_path / "audit.jsonl"
+        broker = Broker(root_pub=root.public_key(), adapters={"ssh.exec": SSHAdapter()},
+                        audit_path=log)
+        caps = {"ssh.exec": {"host": OneOf(["build-1"]), "program": OneOf(["git"]),
+                             "args": Subset(["status"])}}
+        token = Token.issue(root, caps, ttl_seconds=3600)
+        wire = token.serialize()
+        for host in ("build-1", "prod-db", "prod-db", "prod-db"):
+            req = {"host": host, "program": "git"}
+            broker.decide(wire, "ssh.exec", req,
+                          proof=prove(token.proving_key(), wire, "ssh.exec", req))
+
+        monkeypatch.setattr(cli, "AUDIT", log)
+        assert cli.main(["audit", "--refusals"]) == 0
+        out = capsys.readouterr().out
+        assert "refused" in out and "policy" in out
+        assert "ssh.exec.host" in out and "×3" in out
+        assert "wanted 'prod-db'" in out
+
+    def test_an_empty_log_reports_no_refusals(self, tmp_path, monkeypatch, capsys):
+        log = tmp_path / "audit.jsonl"
+        log.write_text("")
+        monkeypatch.setattr(cli, "AUDIT", log)
+        assert cli.main(["audit", "--refusals"]) == 0
+        assert "no refusals" in capsys.readouterr().out

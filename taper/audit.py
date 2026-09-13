@@ -64,3 +64,100 @@ class AuditLog:
                 return False, index
             prev = record["hash"]
         return True, None
+
+
+# ------------------------------------------------------------------ refusals
+
+# The audit log records every denial with the reason the broker gave. Read in
+# bulk, the reasons sort into a small number of kinds, and one of those kinds
+# is the metric DESIGN.md asks for and nothing else measures: how often a
+# well-formed request from a legitimate task fell outside its grant. That is
+# policy pressure, counted. The other kinds are noise for that purpose - an
+# expired token is not the grant being too narrow - so they are separated out
+# rather than dropped.
+
+IDENTITY = "identity"        # chain, proof, expiry, revocation: not the holder
+SCHEMA = "schema"            # malformed request: unknown field, wrong type
+ATTACK = "attack-shaped"     # well-formed, but the statement itself is hostile
+POLICY = "policy"            # well-formed, legitimate shape, outside the grant
+OTHER = "other"
+
+BUCKETS = (IDENTITY, SCHEMA, ATTACK, POLICY, OTHER)
+
+# classify() returns these for statements no policy should ever permit; a
+# denial on them is the classifier working, not the grant being narrow.
+_HOSTILE_KINDS = {"multi", "ambiguous", "dangerous"}
+
+
+def bucket(body: dict) -> str:
+    """Name the kind of a denial record. Allowed records have no bucket.
+
+    Matches on the reason strings the broker actually writes, in the order the
+    broker's decide() produces them, so a change to a reason string fails the
+    tests that pin these rather than silently re-bucketing the log.
+
+    verified-by: tests/test_taper.py::TestRefusals::test_each_denial_kind_lands_in_its_bucket
+    verified-by: tests/test_taper.py::TestRefusals::test_a_hostile_statement_is_attack_shaped_not_policy
+    """
+    if body.get("allowed", True):
+        raise ValueError("allowed records have no bucket")
+    reason = body.get("reason", "")
+    if reason.startswith("token rejected:") or reason.startswith("proof of possession failed"):
+        return IDENTITY
+    if reason.startswith("no adapter for") or reason.startswith("unknown operation"):
+        return SCHEMA
+    op = body.get("operation", "")
+    if (reason.startswith(f"{op}: ") or reason.startswith(f"unknown fields for {op}")
+            or (reason.startswith(f"{op}.") and reason.endswith("failed validation"))
+            or (reason.startswith(f"{op}.") and ": expected " in reason)):
+        return SCHEMA
+    if reason.startswith("token does not grant") or " is unconstrained in this token" in reason:
+        return POLICY
+    if " not permitted by " in reason:
+        head = reason.split(" not permitted by ", 1)[0]       # "op.field=value"
+        field, _, value = head.partition("=")
+        if field.endswith(".statement_kind") and value.strip("'\"") in _HOSTILE_KINDS:
+            return ATTACK
+        return POLICY
+    return OTHER
+
+
+def summarize_refusals(records: "Iterator[dict] | list[dict]") -> dict:
+    """Counts per bucket, plus the policy denials grouped by what they hit.
+
+    The grouping is the actionable half: three refusals on pg.query.tables
+    all wanting staging.orders are one gap in one grant, not three incidents.
+
+    verified-by: tests/test_taper.py::TestRefusals::test_summary_counts_and_groups_policy_denials
+    """
+    counts = {name: 0 for name in BUCKETS}
+    policy: dict[tuple[str, str], dict] = {}
+    total = allowed = 0
+    for record in records:
+        body = record.get("body", record)
+        if body.get("record", "decision") != "decision":
+            continue
+        total += 1
+        if body.get("allowed"):
+            allowed += 1
+            continue
+        kind = bucket(body)
+        counts[kind] += 1
+        if kind != POLICY:
+            continue
+        op = body.get("operation", "?")
+        reason = body.get("reason", "")
+        if reason.startswith("token does not grant"):
+            key, wanted = (op, "(operation)"), op
+        elif " is unconstrained in this token" in reason:
+            field = reason.split(" is unconstrained", 1)[0].removeprefix(f"{op}.")
+            key, wanted = (op, field), "(unconstrained)"
+        else:
+            head = reason.split(" not permitted by ", 1)[0]
+            field, _, wanted = head.partition("=")
+            key = (op, field.removeprefix(f"{op}."))
+        entry = policy.setdefault(key, {"count": 0, "wanted": {}})
+        entry["count"] += 1
+        entry["wanted"][wanted] = entry["wanted"].get(wanted, 0) + 1
+    return {"decisions": total, "allowed": allowed, "refused": total - allowed,
+            "buckets": counts, "policy": policy}
