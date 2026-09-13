@@ -81,18 +81,24 @@ class Operation:
 
 # --------------------------------------------------------------- shared validators
 
-_HOSTNAME = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9\-.]{0,251}[A-Za-z0-9])?$")
-_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$")
+# \Z, not $. Python's $ also matches just before a trailing newline, so every
+# one of these patterns accepted "value\n" - a newline the validators claim
+# cannot be represented. Nothing downstream would have parsed it (argv is
+# never a shell, table names are bound parameters), but a validator that says
+# "strict" and is not is the kind of claim this repo's lint exists to catch.
+# verified-by: tests/test_taper.py::TestOperations::test_a_trailing_newline_is_not_representable_either
+_HOSTNAME = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9\-.]{0,251}[A-Za-z0-9])?\Z")
+_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?\Z")
 # Deliberately strict: no shell metacharacters can even be represented in an
 # argument, so a bug downstream cannot become a shell injection.
-_SAFE_ARG = re.compile(r"^[A-Za-z0-9@%_+=:,./\-]{0,4096}$")
+_SAFE_ARG = re.compile(r"^[A-Za-z0-9@%_+=:,./\-]{0,4096}\Z")
 # pg.migrate names its parts, so each part gets its own shape. Schema-qualified
 # is required: an unqualified table would be resolved by search_path, and a
 # policy that constrains a name the server resolves differently constrains
 # nothing.
-_QUALIFIED = re.compile(r"^[a-z_][a-z0-9_]{0,62}\.[a-z_][a-z0-9_]{0,62}$")
-_COLUMN = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
-_TYPENAME = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
+_QUALIFIED = re.compile(r"^[a-z_][a-z0-9_]{0,62}\.[a-z_][a-z0-9_]{0,62}\Z")
+_COLUMN = re.compile(r"^[a-z_][a-z0-9_]{0,62}\Z")
+_TYPENAME = re.compile(r"^[a-z][a-z0-9_]{0,62}\Z")
 
 
 def _hostname(v: str) -> bool:
@@ -148,6 +154,16 @@ PG_MIGRATE = Operation(
     ),
 )
 
+PG_DESCRIBE = Operation(
+    name="pg.describe",
+    summary="Read one table's shape - columns, constraints, indexes - and no rows.",
+    fields=(
+        Field("database", str, validator=lambda v: bool(_IDENT.match(v))),
+        Field("table", str, validator=lambda v: bool(_QUALIFIED.match(v)),
+              describe="schema-qualified table, e.g. staging.orders"),
+    ),
+)
+
 HTTP_REQUEST = Operation(
     name="http.request",
     summary="One HTTP request to one host, with a credential the agent never sees.",
@@ -161,7 +177,7 @@ HTTP_REQUEST = Operation(
 )
 
 REGISTRY: dict[str, Operation] = {
-    op.name: op for op in (SSH_EXEC, PG_QUERY, PG_MIGRATE, HTTP_REQUEST)
+    op.name: op for op in (SSH_EXEC, PG_QUERY, PG_MIGRATE, PG_DESCRIBE, HTTP_REQUEST)
 }
 
 

@@ -86,6 +86,17 @@ TOOL_SCHEMAS = {
         },
         "required": ["database", "table", "column", "type"],
     },
+    "pg.describe": {
+        "type": "object",
+        "properties": {
+            "database": {"type": "string"},
+            "table": {"type": "string",
+                      "description": "schema-qualified, e.g. staging.orders; "
+                                     "returns columns, constraints and indexes, "
+                                     "never rows"},
+        },
+        "required": ["database", "table"],
+    },
     "http.request": {
         "type": "object",
         "properties": {

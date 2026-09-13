@@ -7,7 +7,7 @@ a string to be handed to a shell, and nothing in this package imports `shell=Tru
 
 from .base import ExecPlan, Adapter
 from .ssh import SSHAdapter
-from .postgres import PostgresAdapter, PostgresMigrateAdapter
+from .postgres import PostgresAdapter, PostgresDescribeAdapter, PostgresMigrateAdapter
 from .http import HTTPAdapter
 
 
@@ -22,8 +22,10 @@ def default_adapters() -> dict[str, Adapter]:
     return {"ssh.exec": SSHAdapter(),
             "pg.query": PostgresAdapter(),
             "pg.migrate": PostgresMigrateAdapter(),
+            "pg.describe": PostgresDescribeAdapter(),
             "http.request": HTTPAdapter()}
 
 
 __all__ = ["ExecPlan", "Adapter", "SSHAdapter", "PostgresAdapter",
-           "PostgresMigrateAdapter", "HTTPAdapter", "default_adapters"]
+           "PostgresMigrateAdapter", "PostgresDescribeAdapter", "HTTPAdapter",
+           "default_adapters"]

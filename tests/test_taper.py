@@ -311,6 +311,25 @@ class TestOperations:
                 ops.get("ssh.exec").validate(
                     {"host": "a.internal", "program": "git", "args": [bad]})
 
+    def test_a_trailing_newline_is_not_representable_either(self):
+        """Python's `$` matches before a trailing newline. Every validator used
+        it, so "git\n" was a valid program and "staging.orders\n" a valid
+        table. Harmless downstream - no shell, bound parameters - and still a
+        validator saying strict when it was not."""
+        cases = [
+            ("ssh.exec", {"host": "a.internal\n", "program": "git"}),
+            ("ssh.exec", {"host": "a.internal", "program": "git\n"}),
+            ("ssh.exec", {"host": "a.internal", "program": "git", "args": ["status\n"]}),
+            ("pg.query", {"database": "db\n", "statement": "SELECT 1"}),
+            ("pg.migrate", {"database": "db", "table": "s.t\n", "column": "c", "type": "text"}),
+            ("pg.migrate", {"database": "db", "table": "s.t", "column": "c\n", "type": "text"}),
+            ("pg.migrate", {"database": "db", "table": "s.t", "column": "c", "type": "text\n"}),
+            ("pg.describe", {"database": "db", "table": "s.t\n"}),
+        ]
+        for name, request in cases:
+            with pytest.raises(ops.OperationError):
+                ops.get(name).validate(request)
+
     def test_wrong_types_rejected(self):
         with pytest.raises(ops.OperationError, match="expected list"):
             ops.get("ssh.exec").validate(
@@ -1236,3 +1255,146 @@ class TestRefusals:
         from taper.audit import bucket
         with pytest.raises(ValueError):
             bucket({"allowed": True})
+
+
+class TestDescribeAdapter:
+    """pg.describe: the table's shape, never its rows.
+
+    Three of ten demo runs asked for `\\d staging.orders` through ssh.exec and
+    were refused. This is the capability that answers that request, and these
+    tests pin the two things that make it safe to grant: the agent's values
+    are parameters, and the transaction cannot write.
+    """
+
+    def _plan(self, table="staging.orders"):
+        from taper.adapters import PostgresDescribeAdapter
+        return PostgresDescribeAdapter().plan(
+            {"database": "pocketos", "table": table}, {})
+
+    def test_no_agent_value_reaches_the_statement_text(self):
+        plan = self._plan("Staging.Orders")
+        text = plan.detail["statement_text"]
+        assert "staging" not in text.lower() and "orders" not in text.lower()
+        assert plan.detail["statement_params"] == ["staging", "orders"]
+        assert text.count("%s") == 2
+
+    def test_the_transaction_is_read_only(self):
+        plan = self._plan()
+        assert plan.detail["session_settings"]["default_transaction_read_only"] == "on"
+        assert plan.detail["max_rows"] == 1
+        # and the statement reads the catalogue, not the table
+        text = plan.detail["statement_text"].lower()
+        assert "pg_catalog.pg_attribute" in text and "from staging" not in text
+
+    def test_the_statement_names_only_the_catalogue(self):
+        """Every relation the statement reads is in pg_catalog, so a role with
+        no privilege on the described table still gets its shape, and a role
+        with every privilege still gets no rows."""
+        import re
+        text = self._plan().detail["statement_text"]
+        relations = re.findall(r"\bFROM\s+([\w.]+)|\bJOIN\s+([\w.]+)", text, re.I)
+        names = {a or b for a, b in relations}
+        assert names and all(n.startswith("pg_catalog.") for n in names), names
+
+    def test_the_operation_validates_its_fields(self):
+        op = ops.get("pg.describe")
+        assert op.validate({"database": "pocketos", "table": "staging.orders"})
+        for bad in ("orders", "staging.orders; DROP", "staging.orders\n", "a.b.c"):
+            with pytest.raises(ops.OperationError):
+                op.validate({"database": "pocketos", "table": bad})
+        with pytest.raises(ops.OperationError):
+            op.validate({"database": "pocketos", "table": "staging.orders", "rows": 5})
+
+
+class TestDescribeGrant:
+    """A describe grant is not a select grant, in either direction."""
+
+    @pytest.fixture
+    def pg_broker(self, root, tmp_path):
+        from taper.adapters import PostgresDescribeAdapter
+        return Broker(
+            root_pub=root.public_key(),
+            adapters={"pg.query": PostgresAdapter(),
+                      "pg.describe": PostgresDescribeAdapter()},
+            audit_path=tmp_path / "audit.jsonl",
+            clock=lambda: NOW,
+        )
+
+    def test_describe_permits_shape_and_not_rows(self, pg_broker, root):
+        caps = {"pg.describe": {"database": OneOf(["pocketos"]),
+                                "table": OneOf(["staging.orders"])}}
+        token = Token.issue(root, caps, ttl_seconds=3600, now=NOW)
+        d = decide(pg_broker, token, "pg.describe",
+                   {"database": "pocketos", "table": "staging.orders"})
+        assert d.allowed, d.reason
+        assert d.plan.detail["statement_params"] == ["staging", "orders"]
+        d = decide(pg_broker, token, "pg.query",
+                   {"database": "pocketos", "statement": "SELECT * FROM staging.orders"})
+        assert not d.allowed and "does not grant pg.query" in d.reason
+
+    def test_select_does_not_imply_describe(self, pg_broker, root):
+        caps = {"pg.query": {"database": OneOf(["pocketos"]),
+                             "statement_kind": OneOf(["select"]),
+                             "tables": Subset(["staging.orders"]),
+                             "max_rows": Range(0, 10)}}
+        token = Token.issue(root, caps, ttl_seconds=3600, now=NOW)
+        d = decide(pg_broker, token, "pg.describe",
+                   {"database": "pocketos", "table": "staging.orders"})
+        assert not d.allowed and "does not grant pg.describe" in d.reason
+
+    def test_a_table_outside_the_grant_is_refused_with_the_constraint(self, pg_broker, root):
+        caps = {"pg.describe": {"database": OneOf(["pocketos"]),
+                                "table": OneOf(["staging.orders", "staging.users"])}}
+        token = Token.issue(root, caps, ttl_seconds=3600, now=NOW)
+        d = decide(pg_broker, token, "pg.describe",
+                   {"database": "pocketos", "table": "production.orders"})
+        assert not d.allowed and "production.orders" in d.reason and "one_of" in d.reason
+        # and the same token still permits what it names
+        d = decide(pg_broker, token, "pg.describe",
+                   {"database": "pocketos", "table": "staging.users"})
+        assert d.allowed, d.reason
+
+    def test_the_executor_binds_the_parameters(self, pg_broker, root):
+        """End to end through the fake psycopg: the shape statement runs with
+        the schema and table bound, not spliced."""
+        caps = {"pg.describe": {"database": OneOf(["pocketos"]),
+                                "table": OneOf(["staging.orders"])}}
+        token = Token.issue(root, caps, ttl_seconds=3600, now=NOW)
+        d = decide(pg_broker, token, "pg.describe",
+                   {"database": "pocketos", "table": "staging.orders"})
+        import sys, types
+        executed = []
+
+        class Cursor:
+            description = None
+            rowcount = 0
+            def execute(self, sql, params=None): executed.append((sql, params))
+            def fetchmany(self, n): return []
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        class Conn:
+            def cursor(self): return Cursor()
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        fake = types.ModuleType("psycopg")
+        fake.connect = lambda dsn, connect_timeout=None: Conn()
+        real = sys.modules.get("psycopg")
+        sys.modules["psycopg"] = fake
+        try:
+            from taper.execute import Executor
+            from taper.secrets import ChainProvider
+
+            class Fixed:
+                def get(self, ref): return "postgresql://u@h/db"
+            result = Executor(ChainProvider(Fixed())).run(d.plan)
+        finally:
+            if real is not None:
+                sys.modules["psycopg"] = real
+            else:
+                del sys.modules["psycopg"]
+        assert result.ok, result.stderr
+        sql, params = [e for e in executed if "pg_class" in e[0]][0]
+        assert params == ("staging", "orders")
+        assert "staging" not in sql

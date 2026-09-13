@@ -279,3 +279,98 @@ class PostgresMigrateAdapter(Adapter):
                 "this_parse_is_not_the_boundary": True,
             },
         )
+
+
+class PostgresDescribeAdapter(Adapter):
+    """A table's shape, without its rows.
+
+    Three of ten broker runs in the PocketOS demo reached for
+    `psql -c "\\d staging.orders"` through ssh.exec and were refused. They were
+    not escaping; a migration needs the table's columns, types, nullability,
+    defaults and constraints, and a SELECT grant hands over rows without any
+    of that. The gap was in the capability vocabulary, and this is the
+    capability.
+
+    Same construction as pg.migrate: one fixed statement, written here, with
+    the schema and table name travelling as bound parameters. classify() is
+    not involved. The statement reads pg_catalog rather than
+    information_schema on purpose - information_schema filters by column
+    privilege, so a grant that permits describing a table the role cannot
+    SELECT would return an empty shape and look like a broken install.
+
+    What the target adds here, stated rather than implied: Postgres shows
+    catalog structure to every login role, so on this one operation the token
+    is the only thing narrowing WHICH tables may be asked about. What the
+    target does enforce is what matters more - the transaction is read-only,
+    the role holds no write privilege, and nothing in the statement takes a
+    value the agent chose except as a parameter. A describe cannot become a
+    read of rows or a write of anything.
+
+    verified-by: tests/test_taper.py::TestDescribeAdapter::test_no_agent_value_reaches_the_statement_text
+    verified-by: tests/test_taper.py::TestDescribeAdapter::test_the_transaction_is_read_only
+    """
+
+    operation = "pg.describe"
+
+    STATEMENT = """\
+SELECT json_build_object(
+  'table', n.nspname || '.' || c.relname,
+  'kind', c.relkind,
+  'columns', (
+    SELECT coalesce(json_agg(json_build_object(
+      'name', a.attname,
+      'type', pg_catalog.format_type(a.atttypid, a.atttypmod),
+      'nullable', NOT a.attnotnull,
+      'default', pg_catalog.pg_get_expr(d.adbin, d.adrelid)) ORDER BY a.attnum), '[]'::json)
+    FROM pg_catalog.pg_attribute a
+    LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+    WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped),
+  'constraints', (
+    SELECT coalesce(json_agg(json_build_object(
+      'name', x.conname,
+      'type', x.contype,
+      'definition', pg_catalog.pg_get_constraintdef(x.oid)) ORDER BY x.conname), '[]'::json)
+    FROM pg_catalog.pg_constraint x WHERE x.conrelid = c.oid),
+  'indexes', (
+    SELECT coalesce(json_agg(pg_catalog.pg_get_indexdef(i.indexrelid) ORDER BY i.indexrelid), '[]'::json)
+    FROM pg_catalog.pg_index i WHERE i.indrelid = c.oid)
+) AS shape
+FROM pg_catalog.pg_class c
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('r', 'p', 'v', 'm')"""
+
+    def __init__(self, dsn_ref: str = "pg.dsn", statement_timeout_ms: int = 15_000):
+        self.dsn_ref = dsn_ref
+        self.statement_timeout_ms = statement_timeout_ms
+
+    def declared_secret_refs(self) -> set[str]:
+        return {self.dsn_ref}
+
+    def derive(self, request: dict) -> dict:
+        return {
+            "database": request["database"],
+            "table": request["table"].lower(),
+        }
+
+    def plan(self, request: dict, grant: dict) -> ExecPlan:
+        schema, _, table = request["table"].lower().partition(".")
+        return ExecPlan(
+            kind="sql",
+            secret_refs={"dsn": self.dsn_ref},
+            detail={
+                "database": request["database"],
+                "operation": "pg.describe",
+                "table": request["table"].lower(),
+                "statement_text": self.STATEMENT,
+                "statement_params": [schema, table],
+                "max_rows": 1,
+                "session_settings": {
+                    "statement_timeout": f"{self.statement_timeout_ms}ms",
+                    "idle_in_transaction_session_timeout": "5s",
+                    "default_transaction_read_only": "on",
+                    "row_security": "on",
+                },
+                "boundary": "postgres:read-only-transaction+role",
+                "this_parse_is_not_the_boundary": True,
+            },
+        )

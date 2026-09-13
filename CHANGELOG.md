@@ -5,6 +5,21 @@ is written to be read on its own.
 
 ## Unreleased
 
+- `pg.describe`: a new operation that reads one table's shape — columns,
+  types, nullability, defaults, constraints, indexes — and never its rows.
+  Three of ten broker runs in the demo asked for `\d staging.orders` through
+  `ssh.exec` and were refused; a migration needs the shape and a `SELECT`
+  grant does not give it. Same construction as `pg.migrate`: one fixed
+  catalogue statement, the schema and table bound as parameters, in a
+  read-only transaction. A `pg.describe` grant does not imply `pg.query`, or
+  the reverse. Nine new red-team cases; sixty-eight in all.
+- Every field validator now ends in `\Z` rather than `$`. Python's `$` also
+  matches before a trailing newline, so `"git\n"` was a valid program and
+  `"staging.orders\n"` a valid table. Nothing downstream would have parsed
+  the newline — argv is never a shell, and table names travel as bound
+  parameters — but the validators claimed a newline was inexpressible and it
+  was not. Found while writing the `pg.describe` tests.
+
 - `taper grant` and `taper inspect` warn, on stderr, for every field granted
   `any` and for every field a grant leaves out. The first is the wildcard the
   design document names as its second falsification criterion — policy

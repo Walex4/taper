@@ -23,7 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: E402
 
 import taper.chain as chain_mod                                                  # noqa: E402
-from taper.adapters import HTTPAdapter, PostgresAdapter, SSHAdapter              # noqa: E402
+from taper.adapters import (HTTPAdapter, PostgresAdapter, PostgresDescribeAdapter,  # noqa: E402
+                            SSHAdapter)
 from taper.broker import Broker                                                  # noqa: E402
 from taper.caps import Never, OneOf, Prefix, Range, Subset                       # noqa: E402
 from taper.chain import ChainError, Token, verify                                # noqa: E402
@@ -74,6 +75,10 @@ FULL = {
         "host": OneOf(["api.example.com"]),
         "path": Prefix("/v1/"),
     },
+    "pg.describe": {
+        "database": OneOf(["analytics"]),
+        "table": OneOf(["public.events"]),
+    },
 }
 
 
@@ -81,6 +86,7 @@ def new_broker(tmp: Path) -> Broker:
     return Broker(
         root_pub=root.public_key(),
         adapters={"ssh.exec": SSHAdapter(), "pg.query": PostgresAdapter(),
+                  "pg.describe": PostgresDescribeAdapter(),
                   "http.request": HTTPAdapter()},
         audit_path=tmp / "redteam-audit.jsonl",
         clock=lambda: NOW,
@@ -170,6 +176,34 @@ def run(report: Report, tmp: Path) -> None:
     print(f"\n  {YELLOW}note{OFF} the classifier is a fast-fail, not the boundary. "
           f"validate/check_postgres.py\n       proves the DATABASE refuses these "
           f"independently. Run both.")
+
+    # ---------------------------------------------------------------------
+    section("5b. pg.describe — shape only, and only of what was named")
+    for label, request in [
+        ("table outside grant", {"database": "analytics", "table": "public.users"}),
+        ("catalogue itself", {"database": "analytics", "table": "pg_catalog.pg_shadow"}),
+        ("unqualified name", {"database": "analytics", "table": "events"}),
+        ("injection in the name", {"database": "analytics",
+                                   "table": "public.events; DROP TABLE public.events"}),
+        ("trailing newline", {"database": "analytics", "table": "public.events\n"}),
+        ("three-part name", {"database": "analytics", "table": "a.public.events"}),
+        ("extra field", {"database": "analytics", "table": "public.events",
+                         "statement": "SELECT * FROM public.events"}),
+        ("wrong database", {"database": "production", "table": "public.events"}),
+    ]:
+        ok, reason = denied("pg.describe", request)
+        report.check(f"describe: {label}", ok, reason if not ok else "")
+    # The permitted describe must not be able to carry rows: the plan is a
+    # fixed catalogue statement with the name bound, in a read-only transaction.
+    from taper.pop import prove
+    permitted = {"database": "analytics", "table": "public.events"}
+    d = broker.decide(wire, "pg.describe", permitted,
+                      proof=prove(token.proving_key(), wire, "pg.describe", permitted, now=NOW))
+    ok = (d.allowed and d.plan.detail["statement_params"] == ["public", "events"]
+          and "events" not in d.plan.detail["statement_text"]
+          and d.plan.detail["session_settings"]["default_transaction_read_only"] == "on")
+    report.check("describe: a permitted request cannot carry rows or a write", ok,
+                 "" if ok else d.reason)
 
     # ---------------------------------------------------------------------
     section("6. HTTP — path traversal and credential redirection")

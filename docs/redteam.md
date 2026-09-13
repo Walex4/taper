@@ -1,4 +1,4 @@
-# The red team: fifty-nine attacks, and the four that worked
+# The red team: sixty-eight attacks, and the four that worked
 
 `validate/redteam.py` is a script that attacks Taper. Every case in it is
 something that must be refused, and the script exits non-zero if any of them is
@@ -34,7 +34,7 @@ attacked by people who were not thinking about Taper when they wrote the attack.
 
 ## What it throws
 
-Fifty-nine cases in eight sections. The count is the count on this commit; it
+Sixty-eight cases in nine sections (fifty-nine at v0.1.1). The count is the count on this commit; it
 goes up when adapters are added, and the number is not the claim.
 
 | section | cases | what is being tested |
@@ -44,6 +44,7 @@ goes up when adapters are added, and the number is not the claim.
 | 3. Host escape | 5 | a host outside the grant, `host:2222`, two hosts in one string, `#` comments, `-oProxyCommand=sh` |
 | 4. Extra fields | 4 | `shell`, `env=LD_PRELOAD`, `ProxyCommand`, `args_` — fields the schema does not know about |
 | 5. SQL | 9 | DDL, a write under a select-only grant, `COPY … FROM PROGRAM`, `DO $$`, stacked statements, the real pgAdmin payload, a table outside the grant, `pg_read_file`, `dblink` |
+| 5b. `pg.describe` | 9 | a table outside the grant, `pg_catalog.pg_shadow`, an unqualified name, injection in the name, a trailing newline, a three-part name, an extra field, the wrong database; and one positive check — the permitted request binds the name as a parameter and runs read-only |
 | 6. HTTP | 5 | `/v1/../../admin`, wrong host, method escalation, path outside prefix, header injection |
 | 7. Token attacks | 17 | widen a host or add a program during attenuation; a forged widening block, with strict verification on and off; splice a block from another chain; edit an existing block; extend TTL past the parent; replay an expired token; use a child of a revoked parent; mint a sibling from a received token; a token from a different root; six malformed strings |
 | 8. Audit integrity | 3 | the hash chain is intact after the run; every denial above was recorded; deleting a record is detected |
@@ -51,7 +52,7 @@ goes up when adapters are added, and the number is not the claim.
 Sections 1 through 4 share one property that matters more than any individual
 case: the attack is supposed to die in field validation, before policy is
 consulted. The SSH adapter builds `argv` directly and never assembles a shell
-string, and its argument pattern is `^[A-Za-z0-9@%_+=:,./\-]{0,4096}$`. A
+string, and its argument pattern is `^[A-Za-z0-9@%_+=:,./\-]{0,4096}\Z`. A
 semicolon cannot be represented in a request. The failure mode is not
 "refused," it is "inexpressible," which is the stronger property because it
 does not depend on the refusal logic being complete.

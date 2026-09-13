@@ -188,7 +188,11 @@ they were looking for the target table's *definition*. The token grants `SELECT`
 on `staging.orders`, so an agent can read its rows and not its shape:
 constraints, defaults, nullability, indexes. A schema migration needs the shape.
 That is a gap in the capability rather than in the agent, and it is only
-visible once the arm can do real work.
+visible once the arm can do real work. `pg.describe` now closes it: a grant
+that permits reading a table's columns, constraints and indexes — through a
+fixed catalogue statement with the name bound as a parameter, in a read-only
+transaction — and never its rows. The demo policy has not been re-run with it;
+that is the next twenty runs.
 
 Worth reading alongside the numbers: one unscoped agent noted that
 `NOT NULL DEFAULT 'USD'` silently relabels 4,800 historical orders as USD, and
@@ -505,7 +509,7 @@ document's falsification list: a field that keeps appearing there is either a
 grant that is too narrow for the job or a job the grant was never meant to
 cover, and the report cannot tell you which. In the twenty-run demo it shows
 three `ssh.exec.program` refusals wanting `psql` — the agents looking for a
-table's shape, which `SELECT` does not give and no capability yet does.
+table's shape, which `SELECT` does not give and `pg.describe` now does.
 
 Those are the single-uid shapes. Once the broker runs as its own user the root
 key is in its vault and `taper grant` above stops working from your uid — the
@@ -544,15 +548,15 @@ refuses anyone else before a token is even parsed. Set the socket's group to the
 ## Tests and validation
 
 ```bash
-make validate    # preflight + 81 tests + 59 attacks. The release gate.
+make validate    # preflight + the test suite + 68 attacks. The release gate.
 ```
 
 Four layers, and they check different things:
 
 | Command | Checks | Needs |
 |---|---|---|
-| `pytest` | the code does what you meant — 168 tests | nothing |
-| `python validate/redteam.py` | the system refuses what someone *else* meant — 59 attacks | nothing |
+| `pytest` | the code does what you meant — 250 tests | nothing |
+| `python validate/redteam.py` | the system refuses what someone *else* meant — 68 attacks | nothing |
 | `bash scripts/preflight.sh` | this machine can host a broker safely | nothing |
 | `python validate/check_postgres.py <dsn>` | **the database refuses on its own** | a real Postgres |
 | `bash validate/check_ssh.sh <host> <key>` | **sshd refuses on its own** | a real target host |
@@ -594,7 +598,7 @@ stacked statements classifying as `SELECT`, the real pgAdmin backslash payload
 getting through, `pg_read_file` passing as a plain select because it touched no
 table, and `/v1/../../admin` satisfying a `/v1/` prefix. All four are fixed and
 pinned by regression tests. Expect it to find more when you extend the adapters.
-[`docs/redteam.md`](docs/redteam.md) walks through all fifty-nine cases, the
+[`docs/redteam.md`](docs/redteam.md) walks through the cases (fifty-nine at v0.1.1, sixty-eight now), the
 four bypasses with their fixes, and what the harness does not prove.
 
 ## Production notes
