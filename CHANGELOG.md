@@ -12,6 +12,14 @@ is written to be read on its own.
   `scripts/build-diagrams.py` lifts the same fences into `site/diagrams.html`
   for GitHub Pages; `--check` fails if the page is stale. Linked from
   DESIGN.md, docs/no-vault.md and the README. No code changes.
+- Prior art, after a search for anyone who had already built Tower:
+  `docs/no-vault.md` gains "Found after the note was written" — infrabroker,
+  1Password Credential Broker, hoop.dev, Teleport Access Requests and the
+  Agent Control Protocol paper, each with where it agrees and where this
+  design differs. One sentence of the note was wrong and is corrected: in
+  infrabroker, as here, an approval mints a certificate rather than
+  unlocking a stored secret. The claim of novelty is restated narrower.
+  DESIGN.md's prior-art table gains infrabroker and hoop.dev.
 
 ## v0.2.1 — 2026-09-14
 

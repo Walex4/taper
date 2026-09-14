@@ -173,9 +173,104 @@ carrying the human's name**, bound by **proof of possession**, checked against
 the **resource's own invariants**, and *only then* — and only with a
 **second party's co-signature**, human or tower — **causing a credential to
 exist for that one operation**, whose issuance is itself on the hash chain.
-In every existing design the approval unlocks something stored. Here the
-approval is the thing that makes the credential exist, and it cannot exist
-any other way. The clearance is the credential.
+In the PAM and access-request designs the approval unlocks something stored,
+or opens a window on a role. Here the approval is the thing that makes the
+credential exist, and it cannot exist any other way. The clearance is the
+credential.
+
+### Found after the note was written
+
+A search on 14 September, after stage 1 shipped, for anyone who had already
+built this. Five are close enough to name, and the first one changes a
+sentence above.
+
+- **infrabroker** — Luis González Fernández, Go, GPL-3, 2026. Three
+  processes: a *broker* that executes and holds ephemeral keys in RAM only, a
+  *signer* that holds the CA key and the policy, and an optional control
+  plane that gates `require_approval` commands behind out-of-band approval,
+  with escalation on novelty (a new host or a command not seen before). It
+  mints SSH Ed25519 certificates with minutes-long TTLs, source-address
+  pinning and optional `force-command`, and per-operation Kubernetes bound
+  service-account tokens. The audit log is append-only, Ed25519-signed and
+  SHA-256-chained, correlated by certificate serial across signer, broker and
+  sshd. It states its non-goals: exec sessions are preflighted but not
+  host-enforced, no KRL, secrets logged verbatim.
+
+  This is the closest thing to Tower stage 1 that someone else has built,
+  and on one point it is ahead: the signer is a separate process today,
+  which is Tower's stage 2. So the sentence "in every existing design the
+  approval unlocks something stored" was wrong as written and is corrected
+  above — in infrabroker, as here, the approval causes a certificate to be
+  minted. Where the two differ is in what the signer is shown. infrabroker's
+  trust is the caller's identity — broker mTLS groups and per-user OIDC
+  groups — and its policy is a POSIX-sh AST parse of the command string with
+  allow, deny and require-approval rules. There is no delegation token, so a
+  subagent cannot be handed less than its parent without a new policy
+  entry, and the signer cannot check that the decision it is asked to sign
+  is about a chain it verified, because there is no chain. Tower's signer
+  re-verifies the chain and the proof of possession with its own state and
+  refuses a decision about any other chain or subject. The command-string
+  parse is the boundary DESIGN.md's second rule argues against; Taper does
+  not accept a command string. And the target has no say: nothing asks the
+  host whether the operation is safe now. Those three — the narrowing chain
+  with the subject, the co-signer checking the chain rather than the caller,
+  and the target's invariants — are what remain of the claim.
+
+- **1Password Credential Broker** — beta, June 2026, GitHub Actions first,
+  agents "later in 2026". Workload identity federation: the job proves who
+  it is with a platform-issued signed credential, and 1Password delivers
+  "exactly what that job is approved to retrieve", short-lived, with full
+  attribution (repo, branch, workflow, commit) on every access. It agrees
+  that a workload should hold no credential it does not currently need. It
+  is delivery, not clearance: the credential is handed to the workload,
+  which then holds it for the job, and how long it lives upstream "still
+  depends on that system's own policies". The decision is who is asking,
+  not what one operation is being asked. Tower never hands the credential
+  to the requester; the broker performs the operation.
+
+- **hoop.dev** — a gateway in front of databases, SSH, Kubernetes, cloud
+  CLIs and HTTP, with an MCP server so agents pass through the same
+  controls. It injects credentials so the user never sees them, evaluates an
+  ordered deny list against every statement, masks data in responses,
+  records sessions, and has *Action Access Requests* — approval for an
+  individual command before it runs, from Slack or Teams. That is the
+  strongest shipping answer to "approve this one operation", and Tower's
+  holds are the same experience by a different mechanism. The difference is
+  what the approval does: at hoop the gateway holds the standing credential
+  and the approval lets it be used, which is the vault with a good lock,
+  moved to a proxy; here the approval makes the credential exist. The
+  statement deny list is a parser boundary, and there is no narrowing token,
+  no proof of possession, and no question put to the target.
+
+- **Teleport Access Requests** — a user requests a role or a
+  resource; reviewers approve, with thresholds (two reviewers for FedRAMP);
+  the approval yields temporary elevated permissions, delivered as a
+  short-lived certificate for a limited period. It agrees on certificates
+  rather than passwords, on approval by someone other than the requester,
+  and on short lifetimes. The unit is different: the approval opens a window
+  on a role, and inside the window the holder may do anything the role
+  permits. A clearance is one operation and sixty seconds, and the tower
+  re-verifies that operation.
+
+- **Agent Control Protocol (ACP)** — Marcelo Fernandez, arXiv 2603.18829,
+  March 2026. Admission control over the *sequence* of an agent's actions:
+  deterministic, history-aware risk scoring with accumulation and cooldown,
+  escalating after a few actions and denying after more, so that five
+  hundred individually valid requests do not all run. It issues no
+  credential and has no delegation; it answers allow or deny. It names a gap
+  this design has. Nothing in Taper or Tower reads the sequence at decision
+  time: the tape records it, `taper audit` summarises it afterwards, and the
+  one history-shaped signal — `another_agent_active` — comes from the target,
+  not from the broker. "Escalate to a hold after N of these" is a shape a
+  stage-2 hold could take, and ACP is the reference for it.
+
+The corrected claim, then: nobody else couples a narrowing chain carrying
+the human's name, a co-signer that verifies the chain rather than the caller,
+and the target's own invariants, into the issuance of a per-operation
+credential. infrabroker has the co-signer and the per-operation certificate
+and not the other two; hoop and Teleport have the approval and not the
+minting; ACP has the history and none of the rest. That is a narrower claim
+than the one this note opened with, and a truer one.
 
 ## What this is not
 
