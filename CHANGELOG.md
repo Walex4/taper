@@ -3,7 +3,14 @@
 The first section is what `release.yml` attaches to the GitHub release, so it
 is written to be read on its own.
 
-## Unreleased
+## v0.2.0 — 2026-09-14
+
+The first release with something in it that is not a vault. Tower is a
+separate package inside this one: it depends on Taper, changes one seam in
+it, and does nothing unless `TAPER_TOWER` is set. With it set, the Postgres
+password leaves the vault and every allowed operation mints a sixty-second
+certificate with the human's name in it. `docs/no-vault.md` is the design;
+the token also now carries who it acts for. Still unaudited.
 
 - **Tower, stage 1 (Postgres): clearance, not custody.** A separate package,
   `tower`, that depends on `taper` and changes one seam in it. With
