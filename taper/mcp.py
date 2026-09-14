@@ -167,7 +167,8 @@ class Server:
         # broker's adapters — the IPC protocol carries a request, not a catalogue —
         # so it offers all known schemas and lets the broker refuse by name. That
         # fails closed and the denial says which operation is missing.
-        self._operations = list(operations) if operations is not None else list(TOOL_SCHEMAS)
+        self._operations = (list(operations) if operations is not None
+                            else list(TOOL_SCHEMAS) + list(ops.DECLARED_SCHEMAS))
 
     # -------------------------------------------------------------- dispatch
 
@@ -203,7 +204,12 @@ class Server:
 
     def _tools(self) -> list[dict]:
         tools = []
-        for name, schema in TOOL_SCHEMAS.items():
+        # Built-ins carry their schemas here; declared operations carry theirs
+        # in ops.DECLARED_SCHEMAS, compiled from the same fields the broker
+        # validates against, so the tool the model sees and the operation the
+        # broker checks cannot drift apart.
+        schemas = {**TOOL_SCHEMAS, **ops.DECLARED_SCHEMAS}
+        for name, schema in schemas.items():
             if name not in self._operations:
                 continue
             tools.append({
@@ -263,6 +269,11 @@ def serve(root_pub: Optional[Ed25519PublicKey] = None,
         # The real shape. Note what this branch does NOT do: no root key, no vault
         # provider, no audit handle. This process could not reach a credential if
         # it tried, and that is the whole point of running it as its own user.
+        # Offer the declared operations too, read from the same directory the
+        # broker reads. Reading is all this process does with them: the
+        # broker refuses any the grant does not commit to.
+        from .cli import _catalog
+        _catalog(fatal=False)
         server = Server(BrokerClient(socket_path), token)
         # Name the socket's owner. If it is this uid the boundary is decorative,
         # and the operator should be able to see that from the first line of
@@ -294,9 +305,9 @@ def serve(root_pub: Optional[Ed25519PublicKey] = None,
         except PopError as exc:
             print(f"cannot read the proving key: {exc}", file=sys.stderr)
             return 2
-        from .cli import _broker_and_executor
+        from .cli import _adapters, _broker_and_executor
         broker, executor, tower = _broker_and_executor(
-            root_pub, default_adapters(), audit_path, secrets,
+            root_pub, _adapters(), audit_path, secrets,
             require_proof=proving_key is not None)
         backend = LocalBackend(broker, executor, proving_key=proving_key)
         if tower is not None:

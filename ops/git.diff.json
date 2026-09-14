@@ -1,0 +1,33 @@
+{
+  "operation": "git.diff",
+  "summary": "The diff between two refs in one repository, statistics only.",
+  "kind": "process",
+  "fields": {
+    "repo": {
+      "type": "string",
+      "pattern": "/srv/repos/[a-z0-9][a-z0-9_.-]{0,63}"
+    },
+    "base": {
+      "type": "string",
+      "pattern": "[A-Za-z0-9][A-Za-z0-9_./-]{0,127}"
+    },
+    "head": {
+      "type": "string",
+      "pattern": "[A-Za-z0-9][A-Za-z0-9_./-]{0,127}"
+    }
+  },
+  "argv": [
+    "git",
+    "-C",
+    "{repo}",
+    "diff",
+    "--stat",
+    "{base}",
+    "{head}",
+    "--"
+  ],
+  "layer2": {
+    "enforced_by": "The filesystem, as for git.log: read-only for the broker's uid.",
+    "check": "sudo -u taper-broker touch /srv/repos/<repo>/x  ->  Permission denied"
+  }
+}

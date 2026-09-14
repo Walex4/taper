@@ -263,6 +263,26 @@ What this is not: Posta's model also lets the resource *challenge* — return "c
 
 verified-by: tests/test_taper.py::TestInvariants::test_a_raised_invariant_the_grant_does_not_name_refuses_before_the_write
 
+### Declared operations
+
+*Decision recorded 14 September 2026, before the code was written, so that the conditions exist before the temptation does.*
+
+Rule 1 has a cost that §10's second and third failure modes feed on directly: every kind of thing an agent might do needs an adapter, and an adapter is Python — schema, `derive()`, `plan()`, tests. Five exist. The first operator whose agent runs `kubectl`, `git` or the AWS CLI meets the wall in ten minutes, and the pressure at that wall is toward a wider operation that does exist, or an escape hatch. A proxy needs no adapters because it fronts any protocol and injects the whole credential, which is the design this one rejects. So the question was whether operations can be made cheap to add without becoming cheap to abuse.
+
+A **declared operation** is a typed operation defined in a file rather than in Python: a name, a summary, named fields each with a type and a validator, a plan template, and a statement of what enforces it on the far side. The broker compiles the file into the same `Operation` and `Adapter` a hand-written one produces; the agent sees no difference, and neither does policy. It is still a closed set of typed fields, and the shape of what can be expressed is still fixed by the operator before any request exists. That is Rule 1 kept, not relaxed. The compiler parses the operator's file at load time, which is trusted configuration on the same footing as the policy JSON; agent input still meets validators and an argv array, never a parser. That is Rule 2 kept. What a declaration cannot express is judgement: `pg.query` classifies a statement to decide what to send, and anything that derives attributes from a value stays a Python adapter with layer 2 behind it.
+
+Four conditions make it an improvement rather than a hole, and each is enforced by the loader or the chain, not by advice:
+
+1. **A placeholder is one thing.** In an argv template, an element is either a literal or exactly `{field}` — one field, one element, never a field inside a literal, never two fields in one element, no defaults computed from other fields, no conditionals. In a SQL template the statement is fixed text and every field is a bound parameter. In an HTTP template the method is a literal and the path is segments. The grammar is frozen here; a spec that needs more is a Python adapter. Every declared string field must match the same alphabet `ssh.exec`'s arguments must match, and its own pattern or enumeration only narrows that. Shell metacharacters and whitespace are inexpressible in a declared value, so a bug downstream cannot become an injection.
+
+2. **A field may not be a command.** The loader refuses a spec whose first argv element is not a literal, whose placeholder follows a shell-style flag (`-c`, `-e`, `--command`, `--exec`, `--eval` and their kin), or whose optional field's placeholder sits directly after a flag literal, where its absence would leave the flag dangling. A declared `kubectl.exec` with a free `command` field is refused at load with the reason, not at review. Policy-pressure warnings extend to declarations.
+
+3. **Layer 2 is named or its absence is loud.** Every hand-written adapter arrived with its target-side refusal — the role that cannot `ALTER`, `force-command`, the invariants function. A catalog can grow faster than that, and then the broker is the only thing saying no, which is §10's fourth failure arriving quietly. A declaration therefore carries a `layer2` block naming what enforces it on the target and how to check, or it is marked `layer 1 only`, and `taper inspect` and `taper grant` say so for every grant that includes one.
+
+4. **The grant commits to the definition.** The canonical hash of each declared operation a grant names is signed into the root block, beside the subject, and the broker refuses a request whose loaded definition does not match the hash the chain carries — a swapped or edited file on the broker host fails verification rather than running something else under the same name. The tower checks the same. No prior design signs the operation's definition into the delegation; this is the part that makes declared operations a strengthening of the token rather than only a relief of adoption pressure.
+
+What this does not do: it does not make Taper a proxy, does not reach SaaS, and does not remove the need to configure each target to refuse on its own. The closest precedent is IAM, a catalog of typed actions with condition keys, and nobody argues IAM should accept shell strings.
+
 ## Trust boundaries
 
 Three layers. The design's central commitment is that the broker is never the only one.

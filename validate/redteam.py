@@ -14,6 +14,7 @@ already handles.
 
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,7 +28,7 @@ from taper.adapters import (HTTPAdapter, PostgresAdapter, PostgresDescribeAdapte
                             SSHAdapter)
 from taper.broker import Broker                                                  # noqa: E402
 from taper.caps import Never, OneOf, Prefix, Range, Subset                       # noqa: E402
-from taper.chain import ChainError, Token, verify                                # noqa: E402
+from taper.chain import ChainError, Token, _b64, _unb64, verify                              # noqa: E402
 from taper.pop import prove                                                      # noqa: E402
 
 NOW = 1_756_000_000.0
@@ -445,6 +446,115 @@ def run(report: Report, tmp: Path) -> None:
         report.check("tower: a clearance's material taken twice", True, str(exc))
     intact, _ = tower_.audit.verify()
     report.check("tower: every refusal and the one clearance are on an intact tape", intact)
+
+    # ---------------------------------------------------------------------
+    section("10. Declared operations — a file is not a richer grammar in disguise")
+    from taper import ops as _ops
+    from taper.declared import DeclaredAdapter as _DA, SpecError as _SpecError, compile_spec as _compile
+
+    def base_spec(**over):
+        spec = {
+            "operation": "kubectl.get", "summary": "read-only", "kind": "process",
+            "fields": {
+                "namespace": {"type": "string", "pattern": "[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?"},
+                "resource": {"type": "string", "enum": ["pods", "deployments"]},
+                "name": {"type": "string", "required": False,
+                         "pattern": "[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?"},
+            },
+            "argv": ["kubectl", "get", "{resource}", "{name}", "--namespace", "{namespace}",
+                     "--output", "json"],
+            "secrets": {"env": {"KUBECONFIG": {"file": "kube.config"}}},
+            "layer2": {"enforced_by": "RBAC", "check": "auth can-i"},
+        }
+        spec.update(over)
+        return {k: v for k, v in spec.items() if v is not None}   # None drops a key
+
+    def refused_at_load(label, **over):
+        try:
+            _compile(base_spec(**over))
+            report.check(f"declared: {label}", False, "THE DECLARATION LOADED")
+        except _SpecError as exc:
+            report.check(f"declared: {label}", True, str(exc)[:110])
+
+    # the loader: a spec that smuggles a command is refused before any grant
+    refused_at_load("a free field after -c",
+                    argv=["kubectl", "exec", "web", "--", "sh", "-c", "{name}"])
+    refused_at_load("a free field after --command",
+                    argv=["kubectl", "exec", "web", "--command", "{name}"])
+    refused_at_load("bash as the program", argv=["bash", "{name}"])
+    refused_at_load("sudo as the program", argv=["sudo", "kubectl", "get", "{resource}"])
+    refused_at_load("the program from a field", argv=["{resource}", "get", "pods"])
+    refused_at_load("a field inside a literal", argv=["kubectl", "get", "--namespace={namespace}"])
+    refused_at_load("two fields in one element", argv=["kubectl", "get", "{resource}{name}"])
+    refused_at_load("an optional field right after a flag",
+                    argv=["kubectl", "get", "{resource}", "-n", "{name}", "--output", "json"])
+    refused_at_load("a literal with a shell fragment in it",
+                    argv=["kubectl", "get", "{resource}", "&&", "id"])
+    refused_at_load("shadowing a built-in", operation="ssh.exec")
+    refused_at_load("a statement with a field written into it", kind="sql",
+                    database="shop", statement="SELECT * FROM {name}", params=[],
+                    tables=["public.t"], argv=None, secrets=None)
+    refused_at_load("two statements", kind="sql", database="shop",
+                    statement="SELECT 1; DROP TABLE public.t", params=[],
+                    tables=["public.t"], argv=None, secrets=None)
+    refused_at_load("a path segment with a slash", kind="http", method="GET",
+                    host="api.internal", path=["v1/../admin", "{name}"], argv=None, secrets=None)
+    refused_at_load("a method from a field", kind="http", method="{resource}",
+                    host="api.internal", path=["v1"], argv=None, secrets=None)
+    refused_at_load("no layer2 key at all", layer2=None)   # dropped, not null
+
+    # the broker: a good declaration, then every value that must be inexpressible
+    decl = _compile(base_spec())
+    _ops.REGISTRY[decl.name] = decl.operation()
+    _ops.POLICY_ATTRIBUTES[decl.name] = decl.policy_attributes()
+    dbroker = Broker(root_pub=root.public_key(), adapters={decl.name: _DA(decl)},
+                     audit_path=tmp / "declared-audit.jsonl", clock=lambda: NOW)
+    dcaps = {"kubectl.get": {"namespace": OneOf(["dev"]), "resource": OneOf(["pods"]),
+                             "name": Prefix("web-")}}
+    dtok = Token.issue(root, dcaps, ttl_seconds=3600, now=NOW, subject="alice@example.com",
+                       definitions={"kubectl.get": decl.definition_hash()})
+    dw = dtok.serialize()
+
+    def declared_denied(label, request, wire_=dw, tok=dtok):
+        d = dbroker.decide(wire_, "kubectl.get", request,
+                           proof=prove(tok.proving_key(), wire_, "kubectl.get", request, now=NOW))
+        report.check(f"declared: {label}", not d.allowed,
+                     d.reason if not d.allowed else f"ALLOWED argv={d.plan.argv}")
+
+    ok = dbroker.decide(dw, "kubectl.get", {"namespace": "dev", "resource": "pods", "name": "web-1"},
+                        proof=prove(dtok.proving_key(), dw, "kubectl.get",
+                                    {"namespace": "dev", "resource": "pods", "name": "web-1"}, now=NOW))
+    report.check("declared: the honest request is allowed and argv is exactly the template",
+                 ok.allowed and ok.plan.argv == ["kubectl", "get", "pods", "web-1",
+                                                 "--namespace", "dev", "--output", "json"],
+                 str(ok.plan.argv) if ok.allowed else ok.reason)
+    for bad in ("web-1;id", "web-1 --all-namespaces", "web-1$(id)", "web-1`id`", "web-1|cat",
+                "web-1\n--output=yaml", "web-1'", "{namespace}", "../web-1", "--all-namespaces"):
+        declared_denied(f"name={bad!r}", {"namespace": "dev", "resource": "pods", "name": bad})
+    declared_denied("a resource outside the enum", {"namespace": "dev", "resource": "secrets"})
+    declared_denied("a namespace outside the grant", {"namespace": "kube-system", "resource": "pods"})
+    declared_denied("an unknown field", {"namespace": "dev", "resource": "pods", "flags": "-A"})
+    declared_denied("a wrong type", {"namespace": "dev", "resource": "pods", "name": 1})
+
+    # the definition: edit the file, keep the grant
+    edited = _compile(base_spec(argv=["kubectl", "delete", "{resource}", "{name}",
+                                      "--namespace", "{namespace}"]))
+    dbroker.adapters = {decl.name: _DA(edited)}
+    declared_denied("the file was edited after the grant (get became delete)",
+                    {"namespace": "dev", "resource": "pods", "name": "web-1"})
+    dbroker.adapters = {decl.name: _DA(decl)}
+    plain = Token.issue(root, dcaps, ttl_seconds=3600, now=NOW, subject="alice@example.com")
+    declared_denied("a grant that never committed to a definition",
+                    {"namespace": "dev", "resource": "pods", "name": "web-1"},
+                    wire_=plain.serialize(), tok=plain)
+    child = dtok.attenuate(dcaps, now=NOW)
+    data = json.loads(_unb64(child.serialize()))
+    data["b"][1]["defs"] = {"kubectl.get": edited.definition_hash()}
+    declared_denied("a child block that carries its own definitions",
+                    {"namespace": "dev", "resource": "pods", "name": "web-1"},
+                    wire_=_b64(json.dumps(data).encode()), tok=child)
+    intact, _ = dbroker.audit.verify()
+    report.check("declared: every refusal is on an intact tape", intact)
 
     # ---------------------------------------------------------------------
     section("8. Audit integrity")

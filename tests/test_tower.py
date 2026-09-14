@@ -146,6 +146,49 @@ class TestTower:
         with pytest.raises(ClearanceRefused, match="proof does not verify"):
             tower.clear(wire, "pg.query", SELECT, None, allow, "taper_agent")
 
+    def test_a_definition_the_tower_knows_differently_is_not_cleared(self, tower, root):
+        """A declared operation's definition is signed into the grant. The
+        tower keeps its own copy of what each definition is and clears only
+        when the grant, the tower and the request agree - the broker's word
+        about the file is not the tower's evidence."""
+        op = "orders.close"
+        good = "ab" * 32
+        caps = {op: {"database": OneOf(["pocketos"]), "customer": Range(1, 100)}}
+        request = {"database": "pocketos", "customer": 7}
+        token = Token.issue(root, caps, ttl_seconds=3600, now=NOW,
+                            subject="alice@example.com", definitions={op: good})
+        wire = token.serialize()
+        proof = prove(token.proving_key(), wire, op, request, now=NOW)
+        allow = Decision(True, "ok", op, {}, token_ids=token.revocation_ids(),
+                         subject="alice@example.com")
+
+        tower.definitions = {op: good}
+        assert tower.clear(wire, op, request, proof, allow, "taper_agent").operation == op
+
+        tower.definitions = {op: "cd" * 32}                  # the tower's file differs
+        proof = prove(token.proving_key(), wire, op, request, now=NOW)
+        with pytest.raises(ClearanceRefused, match="does not match the grant"):
+            tower.clear(wire, op, request, proof, allow, "taper_agent")
+
+        tower.definitions = {}                               # the tower never loaded it
+        proof = prove(token.proving_key(), wire, op, request, now=NOW)
+        with pytest.raises(ClearanceRefused, match="knows no definition"):
+            tower.clear(wire, op, request, proof, allow, "taper_agent")
+
+        # a grant that does not commit, against a tower that knows the operation
+        tower.definitions = {op: good}
+        plain = Token.issue(root, caps, ttl_seconds=3600, now=NOW, subject="alice@example.com")
+        pw = plain.serialize()
+        pp = prove(plain.proving_key(), pw, op, request, now=NOW)
+        lie = Decision(True, "ok", op, {}, token_ids=plain.revocation_ids(),
+                       subject="alice@example.com")
+        with pytest.raises(ClearanceRefused, match="does not commit"):
+            tower.clear(pw, op, request, pp, lie, "taper_agent")
+        # every refusal is on the tape
+        bodies = [json.loads(l)["body"] for l in tower.audit.path.read_text().splitlines()]
+        assert sum(b.get("record") == "clearance" and b.get("refused") is not None
+                   for b in bodies) == 3
+
     def test_a_denied_decision_gets_no_clearance(self, tower, root):
         token = Token.issue(root, CAPS, ttl_seconds=3600, now=NOW)
         wire = token.serialize()

@@ -1,0 +1,43 @@
+{
+  "operation": "aws.s3ls",
+  "summary": "List the objects under one prefix of one bucket.",
+  "kind": "process",
+  "fields": {
+    "bucket": {
+      "type": "string",
+      "pattern": "[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]"
+    },
+    "prefix": {
+      "type": "string",
+      "pattern": "[A-Za-z0-9_./-]{0,512}",
+      "describe": "the key prefix; policy narrows it with a prefix constraint. Required so the flag never dangles; may be empty."
+    }
+  },
+  "argv": [
+    "aws",
+    "s3api",
+    "list-objects-v2",
+    "--bucket",
+    "{bucket}",
+    "--prefix",
+    "{prefix}",
+    "--max-items",
+    "1000",
+    "--output",
+    "json"
+  ],
+  "secrets": {
+    "env": {
+      "AWS_ACCESS_KEY_ID": {
+        "value": "aws.access_key_id"
+      },
+      "AWS_SECRET_ACCESS_KEY": {
+        "value": "aws.secret_access_key"
+      }
+    }
+  },
+  "layer2": {
+    "enforced_by": "IAM: the access key in the vault belongs to a user or role whose policy allows s3:ListBucket on the named buckets and nothing else. Tower stage 1 for AWS replaces the stored key with an STS session per operation; until then the vault holds it.",
+    "check": "aws s3api put-object --bucket <b> --key x --body /dev/null  ->  AccessDenied; aws iam list-users  ->  AccessDenied"
+  }
+}

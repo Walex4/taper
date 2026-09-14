@@ -57,6 +57,51 @@ CERT_RENEW_FAILED = Path("/run/taper/cert-renew-FAILED")
 # deployment sets TAPER_SOCKET=/run/taper/broker.sock, where the directory is
 # owned by the broker user and the socket's group is the agent's.
 SOCKET = Path(os.environ.get("TAPER_SOCKET", str(HOME / "broker.sock"))).expanduser()
+# Declared operations: one JSON file each. The broker, the MCP server, grant
+# and inspect all read the same directory, so a grant is minted against the
+# definitions the broker will serve.
+OPS = Path(os.environ.get("TAPER_OPS", str(HOME / "ops"))).expanduser()
+
+
+def _catalog(fatal: bool = True):
+    """Load and register the declared operations. A file that does not
+    compile is fatal for anything that would serve or mint against it, and
+    a warning for anything that only reads."""
+    from .declared import load_dir
+
+    catalog = load_dir(OPS)
+    for line in catalog.errors:
+        print(f"{RED}declared operation refused:{OFF} {line}", file=sys.stderr)
+    if catalog.errors and fatal:
+        sys.exit(f"{len(catalog.errors)} declared operation(s) in {OPS} did not "
+                 f"compile; fix or remove them. `taper ops check` explains each.")
+    catalog.register()
+    return catalog
+
+
+def _adapters(fatal: bool = True):
+    """The built-in five plus every declared operation, as one registry."""
+    from .adapters import default_adapters
+
+    adapters = default_adapters()
+    catalog = _catalog(fatal=fatal)
+    adapters.update(catalog.adapters(ssh_adapter=adapters["ssh.exec"],
+                                     http_adapter=adapters["http.request"]))
+    return adapters
+
+
+def _warn_layer1_only(caps, catalog) -> None:
+    """Condition 3 of DESIGN.md §7: a grant that includes a declared
+    operation with nothing on the target refusing it says so, every time.
+    verified-by: tests/test_integration.py::TestDeclaredCLI::test_grant_and_inspect_say_layer_1_only
+    """
+    for name in sorted(caps):
+        decl = catalog.declarations.get(name)
+        if decl is not None and decl.layer1_only():
+            print(f"{YELLOW}layer 1 only:{OFF} {name} is declared with layer2: null - "
+                  f"nothing on the target refuses it on its own; the broker is the "
+                  f"only thing saying no. Name what enforces it, or accept that.",
+                  file=sys.stderr)
 
 GREEN, RED, YELLOW, DIM, BOLD, OFF = (
     "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[1m", "\033[0m")
@@ -200,9 +245,23 @@ def cmd_grant(args) -> int:
     # with no subject is recorded as acting for nobody in particular, and
     # inspect says so, because that is the honest description of it.
     subject = args.subject if args.subject is not None else policy.get("subject", "")
+    # Condition 4 of DESIGN.md §7: the grant commits to the definition of every
+    # declared operation it names. An operation nobody serves is minted anyway
+    # - the broker refuses it, fail closed - but the operator is told now.
+    # verified-by: tests/test_integration.py::TestDeclaredCLI::test_grant_commits_to_the_definition
+    from . import ops as _ops
+    catalog = _catalog(fatal=True)
+    hashes = catalog.hashes()
+    definitions = {name: hashes[name] for name in caps if name in hashes}
+    for name in sorted(caps):
+        if name not in _ops.REGISTRY:
+            print(f"{YELLOW}!{OFF} {name}: no built-in or declared operation by that "
+                  f"name; the broker will refuse it. Declare it in {OPS}.",
+                  file=sys.stderr)
     try:
         token = Token.issue(load_root_private(), caps, ttl_seconds=ttl,
-                            note=policy.get("note", ""), subject=subject)
+                            note=policy.get("note", ""), subject=subject,
+                            definitions=definitions)
     except ChainError as exc:
         sys.exit(str(exc))
 
@@ -231,6 +290,10 @@ def cmd_grant(args) -> int:
           file=sys.stderr)
     print(f"{DIM}# the key is not printed anywhere and cannot be recovered from "
           f"the token — keep it, or mint again{OFF}", file=sys.stderr)
+    if definitions:
+        print(f"{DIM}# commits to the definition of {', '.join(sorted(definitions))}; "
+              f"an edited file is refused until re-minted{OFF}", file=sys.stderr)
+    _warn_layer1_only(caps, catalog)
     _warn_policy_pressure(caps)
     return 0
 
@@ -275,8 +338,190 @@ def cmd_inspect(args) -> int:
               f"{DIM}(no subject was named at mint){OFF}")
     print(f"\n{BOLD}effective capabilities{OFF}  {DIM}(intersection of all blocks){OFF}")
     print(json.dumps(caps_to_json(caps), indent=2))
+    catalog = _catalog(fatal=False)
+    definitions = token.definitions()
+    if definitions:
+        print(f"\n{BOLD}definitions{OFF}  {DIM}(root-signed; the broker refuses an "
+              f"operation whose file no longer matches){OFF}")
+        known = catalog.hashes()
+        for name, digest in sorted(definitions.items()):
+            if name not in known:
+                state = f"{YELLOW}not declared here{OFF}"
+            elif known[name] == digest:
+                state = f"{GREEN}matches{OFF}"
+            else:
+                state = f"{RED}changed since mint{OFF}"
+            print(f"  {name}  {DIM}{digest[:16]}{OFF}  {state}")
+    _warn_layer1_only(caps, catalog)
     _warn_policy_pressure(caps)
     return 0
+
+
+
+# ------------------------------------------------------------ declared operations
+
+def cmd_ops_list(args) -> int:
+    """Every operation the broker here would serve: the built-in five and the
+    declared ones, with what enforces each on the target."""
+    from . import ops as _ops
+
+    catalog = _catalog(fatal=False)
+    print(f"{BOLD}built-in{OFF}")
+    for name in sorted(_ops.BUILTIN):
+        print(f"  {name:<18} {DIM}{_ops.get(name).summary}{OFF}")
+    print(f"\n{BOLD}declared{OFF}  {DIM}({OPS}){OFF}")
+    if not catalog.declarations:
+        print(f"  {DIM}none. A declaration is one JSON file; `taper ops example` "
+              f"prints one.{OFF}")
+    for name, decl in sorted(catalog.declarations.items()):
+        l2 = (f"{YELLOW}layer 1 only{OFF}" if decl.layer1_only()
+              else f"{GREEN}layer 2:{OFF} {decl.layer2.enforced_by}")
+        print(f"  {name:<18} {decl.kind:<8} {DIM}{decl.definition_hash()[:12]}{OFF}  {l2}")
+        print(f"  {'':<18} {DIM}{decl.summary}{OFF}")
+    for line in catalog.warnings:
+        print(f"{YELLOW}!{OFF} {line}", file=sys.stderr)
+    return 1 if catalog.errors else 0
+
+
+def cmd_ops_check(args) -> int:
+    """Compile one file, or every file in the directory, and say exactly why
+    any of them is refused. The same compiler the broker runs."""
+    from .declared import SpecError, load_dir, load_file
+
+    targets = [Path(t).expanduser() for t in (args.path or [str(OPS)])]
+    failed = 0
+    for target in targets:
+        if target.is_dir():
+            catalog = load_dir(target)
+            for name, decl in sorted(catalog.declarations.items()):
+                print(f"{GREEN}ok{OFF}  {decl.source}  {name}  "
+                      f"{DIM}{decl.definition_hash()[:12]}{OFF}")
+            for line in catalog.warnings:
+                print(f"{YELLOW}!{OFF}   {line}")
+            for line in catalog.errors:
+                print(f"{RED}refused{OFF}  {line}")
+            failed += len(catalog.errors)
+            continue
+        try:
+            decl = load_file(target)
+        except (SpecError, OSError) as exc:
+            print(f"{RED}refused{OFF}  {exc}")
+            failed += 1
+            continue
+        print(f"{GREEN}ok{OFF}  {target}  {decl.name}  {DIM}{decl.definition_hash()}{OFF}")
+        for line in decl.warnings:
+            print(f"{YELLOW}!{OFF}   {line}")
+    return 1 if failed else 0
+
+
+EXAMPLE_DECLARATION = {
+    "operation": "kubectl.get",
+    "summary": "List one kind of resource in one namespace, as JSON. Read-only.",
+    "kind": "process",
+    "fields": {
+        "namespace": {"type": "string",
+                      "pattern": "[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?",
+                      "describe": "the namespace; policy names which"},
+        "resource": {"type": "string",
+                     "enum": ["pods", "deployments", "services", "configmaps", "jobs"]},
+        "name": {"type": "string", "required": False,
+                 "pattern": "[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?",
+                 "describe": "one object, or all of the kind when absent"},
+    },
+    "argv": ["kubectl", "get", "{resource}", "{name}", "--namespace", "{namespace}",
+             "--output", "json"],
+    "secrets": {"env": {"KUBECONFIG": {"file": "kube.config"}}},
+    "layer2": {
+        "enforced_by": "Kubernetes RBAC: the kubeconfig's ServiceAccount is bound "
+                       "to a Role with get and list only, on the listed kinds.",
+        "check": "kubectl auth can-i delete pods --namespace <ns>  ->  no",
+    },
+}
+
+
+def cmd_ops_example(args) -> int:
+    print(json.dumps(EXAMPLE_DECLARATION, indent=2))
+    return 0
+
+
+def cmd_coverage(args) -> int:
+    """Which of an agent's actual commands the operations here cover.
+
+    Input: one command per line - a tool list, a transcript's commands, a
+    shell history. Output: each line with the operation that would carry it,
+    or nothing. The match is by program and leading literals only; it says
+    an operation EXISTS for the command's shape, not that a grant permits
+    the values. That is the adoption question - "will this cover what my
+    agent does?" - answered before anything is installed.
+    verified-by: tests/test_integration.py::TestDeclaredCLI::test_coverage_names_the_operation_or_the_gap
+    """
+    import shlex
+    from . import ops as _ops
+
+    catalog = _catalog(fatal=False)
+    def leading(template: list[str]) -> list[str]:
+        # the program and the literal words before the first field: the
+        # verb of the operation, which is what a command line is matched on.
+        # Flags after that vary by spelling (-n, --namespace) and are not.
+        out = []
+        for element in template:
+            if element.startswith("{") or element.startswith("-"):
+                break
+            out.append(element)
+        return out
+
+    shapes: list[tuple[str, list[str]]] = []
+    for name, decl in catalog.declarations.items():
+        spec = decl.spec
+        if decl.kind == "process":
+            shapes.append((name, leading(spec["argv"])))
+        elif decl.kind == "ssh":
+            shapes.append((name, leading([spec["program"], *spec.get("args", [])])))
+    builtin_programs = {"ssh": "ssh.exec", "psql": "pg.query", "curl": "http.request",
+                        "wget": "http.request", "http": "http.request"}
+
+    text = Path(args.file).expanduser().read_text() if args.file != "-" else sys.stdin.read()
+    covered = gaps = 0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            words = shlex.split(line)
+        except ValueError:
+            words = line.split()
+        if not words:
+            continue
+        program = words[0].rsplit("/", 1)[-1]
+        hit = None
+        for name, leading in shapes:
+            if not leading or leading[0].rsplit("/", 1)[-1] != program:
+                continue
+            # every literal of the shape must appear, in order, in the line
+            pos, ok = 0, True
+            for lit in leading:
+                try:
+                    pos = words.index(lit, pos) + 1
+                except ValueError:
+                    ok = False
+                    break
+            if ok:
+                hit = name
+                break
+        if hit is None and program in builtin_programs:
+            hit = builtin_programs[program]
+        if hit:
+            covered += 1
+            print(f"{GREEN}{hit:<18}{OFF} {line}")
+        else:
+            gaps += 1
+            print(f"{RED}{'-':<18}{OFF} {line}")
+    total = covered + gaps
+    if total:
+        print(f"\n{BOLD}{covered} of {total}{OFF} covered; {gaps} "
+              f"{'gap' if gaps == 1 else 'gaps'}. A gap is one JSON file: "
+              f"`taper ops example`.", file=sys.stderr)
+    return 0 if gaps == 0 else 1
 
 
 # ------------------------------------------------------------------ certificates
@@ -615,10 +860,9 @@ def cmd_doctor(args) -> int:
     # reason that names no cause. A grant is not usable just because it verifies.
     # verified-by: tests/test_integration.py::TestMintHint::test_doctor_names_policy_secrets_the_vault_lacks
     if getattr(args, "policy", None):
-        from .adapters import default_adapters
         from .secrets import default_provider
 
-        adapters = default_adapters()
+        adapters = _adapters(fatal=False)
         provider = default_provider()
         for policy_path in args.policy:
             path = Path(policy_path).expanduser()
@@ -664,6 +908,18 @@ def cmd_doctor(args) -> int:
         check(intact, "audit chain intact", f"audit chain broken at record {index}")
 
     check(os.geteuid() != 0, "not running as root", "running as root — do not")
+
+    # Declared operations: every file compiles, or the broker will not start.
+    if OPS.is_dir():
+        from .declared import load_dir
+        catalog = load_dir(OPS)
+        n = len(catalog.declarations)
+        layer1 = sorted(d.name for d in catalog.declarations.values() if d.layer1_only())
+        check(not catalog.errors,
+              f"{n} declared operation{'s' if n != 1 else ''} in {OPS} compile"
+              + (f"; layer 1 only: {', '.join(layer1)}" if layer1 else ""),
+              f"{len(catalog.errors)} declared operation(s) in {OPS} refused — "
+              f"the broker will not start: `taper ops check`")
 
     # Certificate validity, read from the certificate itself. Deliberately
     # independent of the renewal timer: two signals, so a timer that silently
@@ -833,7 +1089,7 @@ def cmd_broker(args) -> int:
 
     secrets = default_provider()
     broker, executor, tower = _broker_and_executor(
-        load_root_public(), default_adapters(), AUDIT, secrets)
+        load_root_public(), _adapters(), AUDIT, secrets)
     server = BrokerServer(
         broker, executor, socket_path,
         allowed_uids=allowed,
@@ -988,6 +1244,20 @@ def build_parser() -> argparse.ArgumentParser:
                    help="summarize denials by kind; the policy bucket is the "
                         "policy-pressure metric")
     p.set_defaults(func=cmd_audit)
+
+    ops_p = sub.add_parser("ops", help="declared operations: list, check, example")
+    ops_sub = ops_p.add_subparsers(dest="ops_cmd", required=True)
+    p = ops_sub.add_parser("list", help="every operation the broker here would serve")
+    p.set_defaults(func=cmd_ops_list)
+    p = ops_sub.add_parser("check", help="compile declarations and explain refusals")
+    p.add_argument("path", nargs="*", help="files or directories (default: $TAPER_OPS)")
+    p.set_defaults(func=cmd_ops_check)
+    p = ops_sub.add_parser("example", help="print an example declaration")
+    p.set_defaults(func=cmd_ops_example)
+
+    p = sub.add_parser("coverage", help="which of an agent's commands an operation covers")
+    p.add_argument("file", help="one command per line, or - for stdin")
+    p.set_defaults(func=cmd_coverage)
 
     p = sub.add_parser("doctor", help="check the local setup")
     p.add_argument("--agent-user", metavar="NAME",

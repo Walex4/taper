@@ -142,6 +142,37 @@ class Broker:
             self._record(decision, peer)
             return decision
 
+        # 2b. The definition. A declared operation is a file; the grant was
+        # signed against a hash of that file. Before any attribute is derived
+        # from it, the loaded definition must be the one the issuer saw. A
+        # grant that names a declared operation without committing to its
+        # definition is refused too: "whatever kubectl.get means today" is
+        # not a grant.
+        # verified-by: tests/test_taper.py::TestDeclared::test_an_edited_definition_no_longer_matches_the_grant
+        # verified-by: tests/test_taper.py::TestDeclared::test_a_grant_that_does_not_commit_to_a_definition_is_refused
+        loaded = getattr(adapter, "definition_hash", None)
+        if loaded is not None:
+            committed = token.definitions().get(operation)
+            if committed is None:
+                decision = Decision(
+                    False,
+                    f"{operation} is a declared operation and this grant does not "
+                    f"commit to its definition; mint it with the operation's file "
+                    f"present so the grant carries the definition hash",
+                    operation, {}, token_ids=token_ids, subject=subject)
+                self._record(decision, peer)
+                return decision
+            if committed != loaded:
+                decision = Decision(
+                    False,
+                    f"the definition of {operation} loaded here does not match the "
+                    f"one this grant was minted against ({loaded[:12]} vs "
+                    f"{committed[:12]}); the file changed since the grant was "
+                    f"issued. Re-mint, or restore the file",
+                    operation, {}, token_ids=token_ids, subject=subject)
+                self._record(decision, peer)
+                return decision
+
         # 3 + 4. Derive attributes and check each against the effective grant.
         attributes = adapter.derive(clean)
         granted = caps.get(operation)

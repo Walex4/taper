@@ -1969,3 +1969,113 @@ class TestSubjectOnTheCommandLine:
     def test_no_subject_is_said_out_loud(self, tmp_path, monkeypatch, capsys):
         code, out, err = _grant(tmp_path, monkeypatch, capsys, tmp_path / "k")
         assert code == 0 and "no subject" in err
+
+
+class TestDeclaredCLI:
+    """Declared operations through the command line: the directory is read,
+    the grant commits, inspect reports, coverage names the gap.
+
+    Every test here points TAPER's home at a temp directory and writes one
+    declaration into its ops/ folder, the way an operator would.
+    """
+
+    def _home(self, tmp_path, monkeypatch, capsys):
+        home = tmp_path / "home"
+        for name, value in [("HOME", home), ("ROOT_KEY", home / "root.key"),
+                            ("ROOT_PUB", home / "root.pub"),
+                            ("SECRETS", home / "secrets"),
+                            ("AUDIT", home / "audit.jsonl"),
+                            ("OPS", home / "ops")]:
+            monkeypatch.setattr(cli, name, value)
+        assert cli.main(["init"]) == 0
+        capsys.readouterr()
+        (home / "ops").mkdir()
+        return home
+
+    def _declare(self, home, **overrides):
+        spec = dict(cli.EXAMPLE_DECLARATION)
+        spec.update(overrides)
+        (home / "ops" / f"{spec['operation']}.json").write_text(json.dumps(spec))
+        return spec
+
+    POLICY = {"capabilities": {"kubectl.get": {
+        "namespace": {"kind": "one_of", "values": ["dev"]},
+        "resource": {"kind": "one_of", "values": ["pods"]},
+        "name": {"kind": "any"}}}}
+
+    def test_grant_commits_to_the_definition(self, tmp_path, monkeypatch, capsys):
+        from taper.declared import definition_hash
+        home = self._home(tmp_path, monkeypatch, capsys)
+        spec = self._declare(home)
+        policy = tmp_path / "policy.json"
+        policy.write_text(json.dumps(self.POLICY))
+        assert cli.main(["grant", str(policy), "--key-file", str(tmp_path / "k")]) == 0
+        out, err = capsys.readouterr()
+        token = Token.deserialize([l for l in out.splitlines() if l.strip()][0])
+        assert token.definitions() == {"kubectl.get": definition_hash(spec)}
+        assert "commits to the definition of kubectl.get" in err
+        assert "layer 1 only" not in err                     # the example names RBAC
+
+        # inspect reads the same directory and says the file still matches
+        assert cli.main(["inspect", token.serialize()]) == 0
+        out, _ = capsys.readouterr()
+        assert "kubectl.get" in out and "matches" in out
+        # ...until it does not
+        self._declare(home, argv=["kubectl", "delete", "{resource}", "--namespace", "{namespace}"])
+        assert cli.main(["inspect", token.serialize()]) == 0
+        out, _ = capsys.readouterr()
+        assert "changed since mint" in out
+
+    def test_grant_and_inspect_say_layer_1_only(self, tmp_path, monkeypatch, capsys):
+        home = self._home(tmp_path, monkeypatch, capsys)
+        self._declare(home, layer2=None)
+        policy = tmp_path / "policy.json"
+        policy.write_text(json.dumps(self.POLICY))
+        assert cli.main(["grant", str(policy), "--key-file", str(tmp_path / "k")]) == 0
+        out, err = capsys.readouterr()
+        assert "layer 1 only" in err and "kubectl.get" in err
+        token = [l for l in out.splitlines() if l.strip()][0]
+        assert cli.main(["inspect", token]) == 0
+        _, err = capsys.readouterr()
+        assert "layer 1 only" in err
+
+    def test_a_declaration_that_does_not_compile_stops_the_mint(self, tmp_path, monkeypatch, capsys):
+        home = self._home(tmp_path, monkeypatch, capsys)
+        self._declare(home, operation="kubectl.exec",
+                      argv=["kubectl", "exec", "web", "--", "app", "-c", "{name}"])
+        policy = tmp_path / "policy.json"
+        policy.write_text(json.dumps(self.POLICY))
+        with pytest.raises(SystemExit):
+            cli.main(["grant", str(policy), "--key-file", str(tmp_path / "k")])
+        _, err = capsys.readouterr()
+        assert "command in a field" in err
+        # ops check explains the same refusal and exits non-zero
+        assert cli.main(["ops", "check"]) == 1
+        out, _ = capsys.readouterr()
+        assert "refused" in out and "-c" in out
+
+    def test_ops_list_names_every_operation_the_broker_would_serve(self, tmp_path, monkeypatch, capsys):
+        home = self._home(tmp_path, monkeypatch, capsys)
+        self._declare(home)
+        assert cli.main(["ops", "list"]) == 0
+        out, _ = capsys.readouterr()
+        for name in ("ssh.exec", "pg.query", "pg.migrate", "pg.describe", "http.request",
+                     "kubectl.get", "layer 2"):
+            assert name in out
+
+    def test_coverage_names_the_operation_or_the_gap(self, tmp_path, monkeypatch, capsys):
+        home = self._home(tmp_path, monkeypatch, capsys)
+        self._declare(home)
+        commands = tmp_path / "commands.txt"
+        commands.write_text("kubectl get pods -n dev\n"
+                            "kubectl delete pod web-1 -n dev\n"
+                            "ssh build-1 git status\n"
+                            "terraform apply\n")
+        assert cli.main(["coverage", str(commands)]) == 1      # gaps exist
+        out, err = capsys.readouterr()
+        lines = out.splitlines()
+        assert lines[0].startswith("kubectl.get") or "kubectl.get" in lines[0]
+        assert "kubectl delete" in lines[1] and "kubectl.get" not in lines[1]
+        assert "ssh.exec" in lines[2]
+        assert "terraform" in lines[3] and lines[3].lstrip().startswith(("-", "\x1b"))
+        assert "2 of 4" in err

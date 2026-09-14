@@ -1,0 +1,29 @@
+{
+  "operation": "orders.recent",
+  "summary": "The most recent orders for one customer: id, status, total. A fixed statement; the customer id is bound.",
+  "kind": "sql",
+  "fields": {
+    "database": {
+      "type": "string",
+      "pattern": "[a-z_][a-z0-9_]{0,62}"
+    },
+    "customer": {
+      "type": "integer",
+      "min": 1
+    }
+  },
+  "database": "{database}",
+  "statement": "SELECT id, status, total FROM production.orders WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 50",
+  "params": [
+    "customer"
+  ],
+  "tables": [
+    "production.orders"
+  ],
+  "writes": false,
+  "max_rows": 50,
+  "layer2": {
+    "enforced_by": "PostgreSQL: the agent role has SELECT on production.orders and no other privilege, FORCE ROW LEVEL SECURITY is on, and the role is NOSUPERUSER NOBYPASSRLS (scripts/setup-postgres.sql).",
+    "check": "validate/check_postgres.py, connecting as the agent role with no broker in the path"
+  }
+}

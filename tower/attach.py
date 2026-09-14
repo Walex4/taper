@@ -40,7 +40,19 @@ def attach(root_pub, adapters, audit_path, secrets, *, require_proof: bool = Fal
     directory = Path(where).expanduser()
     if not (directory / "ca.key").is_file():
         raise SystemExit(f"TAPER_TOWER={directory}: no ca.key there. Run `tower init`.")
-    tower = Tower(ca=CA.load(directory), root_pub=root_pub, audit=AuditLog(Path(audit_path)))
+    # The tower reads the declared operations itself, from the same directory
+    # the broker reads, so its idea of what each operation IS is its own
+    # evidence and not the broker's word. Adapters were built from the same
+    # files a moment ago; if the two disagree, the tower's refusal says so.
+    definitions = {name: getattr(a, "definition_hash")
+                   for name, a in adapters.items()
+                   if getattr(a, "definition_hash", None) is not None}
+    ops_dir = env.get("TAPER_OPS", "").strip()
+    if ops_dir:
+        from taper.declared import load_dir
+        definitions = load_dir(Path(ops_dir).expanduser()).hashes()
+    tower = Tower(ca=CA.load(directory), root_pub=root_pub,
+                  audit=AuditLog(Path(audit_path)), definitions=definitions)
     broker = ClearedBroker(root_pub=root_pub, adapters=adapters, audit_path=audit_path,
                            secrets=secrets.get, require_proof=require_proof,
                            tower=tower, role=env.get("TAPER_TOWER_ROLE", role))

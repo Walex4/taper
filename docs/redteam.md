@@ -1,4 +1,4 @@
-# The red team: eighty-one attacks, and the four that worked
+# The red team: one hundred and fifteen attacks, and the four that worked
 
 `validate/redteam.py` is a script that attacks Taper. Every case in it is
 something that must be refused, and the script exits non-zero if any of them is
@@ -34,7 +34,7 @@ attacked by people who were not thinking about Taper when they wrote the attack.
 
 ## What it throws
 
-Eighty-one cases in eleven sections (fifty-nine at v0.1.1). The count is the count on this commit; it
+One hundred and fifteen cases in twelve sections (eighty-one at v0.2.1, fifty-nine at v0.1.1). The count is the count on this commit; it
 goes up when adapters are added, and the number is not the claim.
 
 | section | cases | what is being tested |
@@ -49,6 +49,7 @@ goes up when adapters are added, and the number is not the claim.
 | 7. Token attacks | 17 | widen a host or add a program during attenuation; a forged widening block, with strict verification on and off; splice a block from another chain; edit an existing block; extend TTL past the parent; replay an expired token; use a child of a revoked parent; mint a sibling from a received token; a token from a different root; six malformed strings |
 | 7b. The subject | 5 | a child block claiming another subject; the root subject rewritten; the root subject stripped; a child repeating the root's subject; Alice's child spliced under Bob's root — every one refused, and none reaches the log with a subject |
 | 9. The tower | 8 | a decision claiming allow for a chain from another root; a good chain with no proof; a proof for a different request; a broker lying about which chain the decision is about; a decision naming a different subject; an expired chain; a clearance's material taken twice; the tape intact through all of it — nothing but a verified decision mints a credential |
+| 10. Declared operations | 34 | at load: a free field after `-c` or `--command`; `bash` or `sudo` as the program; the program from a field; a field inside a literal; two fields in one element; an optional field right after a flag; a literal with `&&` in it; shadowing a built-in; a SQL statement with a field written into it; two statements; a path segment with a slash; an HTTP method from a field; no `layer2` key. At decision: ten values for a name field — `;id`, a space, `$(id)`, backticks, a pipe, a newline, a quote, `{namespace}`, `../`, `--all-namespaces` — each inexpressible; a resource outside the enum; a namespace outside the grant; an unknown field; a wrong type. The definition: the file edited after the grant; a grant that never committed; a child block carrying its own definitions. Plus the honest request, allowed with argv exactly the template, and the tape intact |
 | 8. Audit integrity | 3 | the hash chain is intact after the run; every denial above was recorded; deleting a record is detected |
 
 Sections 1 through 4 share one property that matters more than any individual

@@ -5,6 +5,44 @@ is written to be read on its own.
 
 ## Unreleased
 
+**Declared operations.** An operation can be a JSON file instead of a Python
+adapter: named fields with types and validators, a plan template, and a
+`layer2` block naming what refuses it on the target. `taper/declared.py`
+compiles it into the same `Operation` and `Adapter` the built-in five are;
+the agent and the policy see no difference. The decision and its four
+conditions were written into DESIGN.md §7 before the code, and the loader
+enforces them rather than advising: a placeholder is exactly one argv
+element or one bound parameter (never inside a literal, never two in one);
+the program is a literal and never an interpreter or wrapper (`sh`, `sudo`,
+`python`, `ssh`, …); no field may follow a `-c`-style flag, and an optional
+field may not sit directly after a flag; every declared string value must fit
+`ssh.exec`'s argument alphabet before its own pattern, so a space or a
+metacharacter is inexpressible; and `layer2` is required — an object, or
+`null`, which makes `taper grant` and `taper inspect` say "layer 1 only" for
+every grant that includes it.
+
+- The grant commits to the definition: the root block carries `defs`, each
+  declared operation's canonical hash, signed beside the subject; a child
+  may not carry one. The broker refuses a declared operation whose loaded
+  definition does not match the grant, or that the grant never committed to.
+  The tower keeps its own copy and refuses the same. Prose (`summary`,
+  `layer2`, `describe`) is outside the hash.
+- Kinds: `process` (a local argv; secrets reach the child as an environment
+  variable or a 0600 file, from an environment built from nothing but `PATH`
+  and `HOME`), `ssh` (through the existing shim path), `sql` (a fixed
+  statement with every field bound; a write probes `taper.invariants()`),
+  `http` (literal method, host, segments).
+- `taper ops list | check | example`, `taper coverage <commands>` (which of an
+  agent's command lines an operation covers, and which are gaps), and
+  declared operations offered as MCP tools with schemas compiled from the same
+  fields the broker validates. `TAPER_OPS` or `~/.taper/ops`.
+- `ops/`: the starter catalog — kubectl.get, kubectl.logs, git.log, git.diff,
+  aws.s3ls, orders.recent (sql), billing.invoice (http), and docker.inspect
+  and docker.logs marked layer 1 only with the reason. Two of the first
+  drafts were refused by the loader (`--filter` as a flag before a field; an
+  optional field after `--prefix`), which is the loader working.
+- Red team: section 10, thirty-four cases; 115 in all.
+
 - `docs/diagrams.md`: the architecture in standard notation — C4 system
   context and container diagrams, UML 2.5 sequence diagrams for the decision
   and the clearance, a level-1 data flow diagram with trust boundaries, and

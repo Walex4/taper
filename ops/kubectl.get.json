@@ -1,0 +1,50 @@
+{
+  "operation": "kubectl.get",
+  "summary": "List one kind of resource in one namespace, as JSON. Read-only.",
+  "kind": "process",
+  "fields": {
+    "namespace": {
+      "type": "string",
+      "pattern": "[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?",
+      "describe": "the namespace; policy names which"
+    },
+    "resource": {
+      "type": "string",
+      "enum": [
+        "pods",
+        "deployments",
+        "services",
+        "configmaps",
+        "jobs",
+        "events"
+      ]
+    },
+    "name": {
+      "type": "string",
+      "required": false,
+      "pattern": "[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?",
+      "describe": "one object, or every object of the kind when absent"
+    }
+  },
+  "argv": [
+    "kubectl",
+    "get",
+    "{resource}",
+    "{name}",
+    "--namespace",
+    "{namespace}",
+    "--output",
+    "json"
+  ],
+  "secrets": {
+    "env": {
+      "KUBECONFIG": {
+        "file": "kube.config"
+      }
+    }
+  },
+  "layer2": {
+    "enforced_by": "Kubernetes RBAC: the kubeconfig in the vault belongs to a ServiceAccount bound to a Role with verbs get and list only, on the kinds listed, in the namespaces policy names. The API server refuses the rest with the broker removed from the path.",
+    "check": "kubectl --kubeconfig <vault file> auth can-i delete pods --namespace <ns>  ->  no; kubectl auth can-i get secrets  ->  no"
+  }
+}

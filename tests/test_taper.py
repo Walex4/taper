@@ -1764,3 +1764,315 @@ class TestSubject:
         d = broker.decide(forged, "ssh.exec", {"host": "build-1.internal", "program": "git"})
         assert not d.allowed and d.subject == ""
         assert list(broker.audit.read())[-1]["body"]["subject"] == ""
+
+
+# ------------------------------------------------------------ declared operations
+
+def _spec(**overrides):
+    """A valid process declaration; overrides make it invalid on purpose."""
+    spec = {
+        "operation": "kubectl.get",
+        "summary": "List one kind of resource in one namespace. Read-only.",
+        "kind": "process",
+        "fields": {
+            "namespace": {"type": "string",
+                          "pattern": "[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?"},
+            "resource": {"type": "string", "enum": ["pods", "deployments"]},
+            "name": {"type": "string", "required": False,
+                     "pattern": "[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?"},
+        },
+        "argv": ["kubectl", "get", "{resource}", "{name}", "--namespace", "{namespace}",
+                 "--output", "json"],
+        "secrets": {"env": {"KUBECONFIG": {"file": "kube.config"}}},
+        "layer2": {"enforced_by": "RBAC: get and list only", "check": "auth can-i delete -> no"},
+    }
+    spec.update(overrides)
+    return spec
+
+
+def _declared_broker(root, tmp_path, decl, monkeypatch, require_proof=True, **kw):
+    """A broker serving one declared operation, registered for this test
+    only - the way Catalog.register() does it for a real broker."""
+    from taper.declared import DeclaredAdapter
+    monkeypatch.setitem(ops.REGISTRY, decl.name, decl.operation())
+    monkeypatch.setitem(ops.POLICY_ATTRIBUTES, decl.name, decl.policy_attributes())
+    return Broker(root_pub=root.public_key(),
+                  adapters={decl.name: DeclaredAdapter(decl)},
+                  audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW,
+                  require_proof=require_proof, **kw)
+
+
+class TestDeclared:
+    """DESIGN.md §7 "Declared operations": the four conditions, each attacked.
+
+    A declaration is a file the broker compiles into a typed operation. These
+    tests are what keeps that from being a richer grammar in disguise: a
+    placeholder is one thing, a field may not be a command, layer 2 is named
+    or loud, and the grant commits to the definition.
+    """
+
+    # -- condition 1: a placeholder is one thing -------------------------------
+
+    def test_a_placeholder_inside_a_literal_is_refused_at_load(self):
+        from taper.declared import SpecError, compile_spec
+        for argv in (["kubectl", "get", "--namespace={namespace}", "{resource}"],
+                     ["kubectl", "get", "{resource}{name}", "-n", "{namespace}"],
+                     ["kubectl", "get", "{ resource }", "-n", "{namespace}"]):
+            with pytest.raises(SpecError, match="whole element"):
+                compile_spec(_spec(argv=argv))
+
+    def test_a_value_outside_the_safe_alphabet_is_inexpressible(self, root, tmp_path):
+        """The alphabet is ssh.exec's, before any pattern of the spec's own.
+        A metacharacter, a space, a quote or a newline is not a refusal by
+        policy; it is a request that cannot be made."""
+        from taper.declared import compile_spec
+        decl = compile_spec(_spec())
+        op = decl.operation()
+        for bad in ("web;id", "web id", "web'1", "web\n", "$(id)", "web|cat", "{namespace}"):
+            with pytest.raises(ops.OperationError, match="failed validation"):
+                op.validate({"namespace": "dev", "resource": "pods", "name": bad})
+        assert op.validate({"namespace": "dev", "resource": "pods", "name": "web-1"})
+
+    def test_each_field_lands_in_exactly_one_argv_element(self):
+        from taper.declared import DeclaredAdapter, compile_spec
+        plan = DeclaredAdapter(compile_spec(_spec())).plan(
+            {"namespace": "dev", "resource": "pods", "name": "web-1"}, {})
+        assert plan.argv == ["kubectl", "get", "pods", "web-1", "--namespace", "dev",
+                             "--output", "json"]
+        # an absent optional field contributes nothing, and the flag that
+        # follows keeps its own value
+        plan = DeclaredAdapter(compile_spec(_spec())).plan(
+            {"namespace": "dev", "resource": "pods"}, {})
+        assert plan.argv == ["kubectl", "get", "pods", "--namespace", "dev",
+                             "--output", "json"]
+        assert plan.kind == "process" and plan.secret_refs == {"KUBECONFIG": "kube.config"}
+
+    def test_a_sql_declaration_binds_every_field_and_never_writes_it_into_the_statement(self):
+        from taper.declared import DeclaredAdapter, SpecError, compile_spec
+        spec = {
+            "operation": "orders.recent", "summary": "Recent orders for one customer.",
+            "kind": "sql",
+            "fields": {"database": {"type": "string", "pattern": "[a-z_]+"},
+                       "customer": {"type": "integer", "min": 1}},
+            "database": "{database}",
+            "statement": "SELECT id, status FROM production.orders WHERE customer_id = $1 LIMIT 100",
+            "params": ["customer"], "tables": ["production.orders"], "writes": False,
+            "layer2": {"enforced_by": "role: SELECT on production.orders only", "check": "psql"},
+        }
+        plan = DeclaredAdapter(compile_spec(spec)).plan({"database": "shop", "customer": 42}, {})
+        assert plan.kind == "sql"
+        assert plan.detail["statement_text"] == spec["statement"]
+        assert plan.detail["statement_params"] == [42]
+        assert plan.detail["session_settings"]["default_transaction_read_only"] == "on"
+        assert "invariants" not in plan.detail                # a read asks nothing
+        with pytest.raises(SpecError, match="fixed text"):
+            compile_spec({**spec, "statement": "SELECT * FROM {table}"})
+        with pytest.raises(SpecError, match="one statement"):
+            compile_spec({**spec, "statement": "SELECT 1; DROP TABLE x"})
+        # a write probes the target's invariants on every table it names
+        writer = {**spec, "operation": "orders.close", "writes": True,
+                  "statement": "UPDATE production.orders SET status = 'closed' WHERE id = $1",
+                  "params": ["customer"]}
+        plan = DeclaredAdapter(compile_spec(writer)).plan({"database": "shop", "customer": 7}, {})
+        assert plan.detail["invariants"]["subjects"] == [["production", "orders"]]
+        assert plan.detail["session_settings"]["default_transaction_read_only"] == "off"
+
+    def test_an_http_declaration_is_method_host_and_segments(self):
+        from taper.declared import DeclaredAdapter, SpecError, compile_spec
+        from taper.adapters import HTTPAdapter
+        spec = {
+            "operation": "billing.invoice", "summary": "Read one invoice.", "kind": "http",
+            "fields": {"id": {"type": "string", "pattern": "inv_[a-z0-9]{6,}"}},
+            "method": "GET", "host": "billing.internal", "path": ["v1", "invoices", "{id}"],
+            "authorization": "billing.token", "layer2": None,
+        }
+        plan = DeclaredAdapter(compile_spec(spec), http_adapter=HTTPAdapter()).plan(
+            {"id": "inv_abc123"}, {})
+        assert plan.kind == "http"
+        assert plan.detail["url"] == "https://billing.internal/v1/invoices/inv_abc123"
+        assert plan.secret_refs == {"authorization": "billing.token"}
+        with pytest.raises(SpecError, match="method"):
+            compile_spec({**spec, "method": "{verb}"})
+        with pytest.raises(SpecError, match="no slash"):
+            compile_spec({**spec, "path": ["v1/invoices", "{id}"]})
+        with pytest.raises(SpecError):
+            compile_spec({**spec, "path": ["v1", "..", "{id}"]})
+
+    # -- condition 2: a field may not be a command ----------------------------
+
+    def test_a_free_field_after_a_shell_flag_is_refused_at_load(self):
+        from taper.declared import SpecError, compile_spec
+        for flag in ("-c", "--command", "--exec", "-e", "--eval", "--jsonpath"):
+            with pytest.raises(SpecError, match="command in a field"):
+                compile_spec(_spec(argv=["kubectl", "exec", "web", "--", "app", flag, "{name}"]))
+
+    def test_an_interpreter_as_the_program_is_refused_at_load(self):
+        from taper.declared import SpecError, compile_spec
+        for program in ("sh", "bash", "/bin/sh", "python3", "env", "sudo", "xargs", "ssh"):
+            with pytest.raises(SpecError, match="interpreter or a wrapper"):
+                compile_spec(_spec(argv=[program, "-n", "{namespace}"]))
+        with pytest.raises(SpecError, match="program is a literal"):
+            compile_spec(_spec(argv=["{resource}", "-n", "{namespace}"]))
+
+    def test_an_optional_field_directly_after_a_flag_is_refused_at_load(self):
+        """Absent, the flag would take the next element as its value: `-n`
+        followed by `--output` is a different command than the one declared."""
+        from taper.declared import SpecError, compile_spec
+        with pytest.raises(SpecError, match="dangle"):
+            compile_spec(_spec(argv=["kubectl", "get", "{resource}", "-n", "{name}",
+                                     "--output", "json"]))
+
+    def test_a_declaration_may_not_shadow_a_built_in(self):
+        from taper.declared import SpecError, compile_spec
+        with pytest.raises(SpecError, match="shadows"):
+            compile_spec(_spec(operation="ssh.exec"))
+
+    # -- condition 3: layer 2 named or loud -----------------------------------
+
+    def test_a_spec_without_layer2_is_marked_layer_1_only(self):
+        from taper.declared import SpecError, compile_spec
+        decl = compile_spec(_spec(layer2=None))
+        assert decl.layer1_only()
+        assert any("layer 1 only" in w for w in decl.warnings)
+        spec = _spec(); del spec["layer2"]
+        with pytest.raises(SpecError, match="layer2.*required"):
+            compile_spec(spec)
+        assert not compile_spec(_spec()).layer1_only()
+
+    # -- condition 4: the grant commits to the definition ---------------------
+
+    def test_an_edited_definition_no_longer_matches_the_grant(self, root, tmp_path, monkeypatch):
+        from taper.declared import DeclaredAdapter, compile_spec, definition_hash
+        decl = compile_spec(_spec())
+        caps = {"kubectl.get": {"namespace": OneOf(["dev"]), "resource": OneOf(["pods"]),
+                                "name": Any_()}}
+        token = Token.issue(root, caps, ttl_seconds=3600, now=NOW,
+                            definitions={"kubectl.get": decl.definition_hash()})
+        broker = _declared_broker(root, tmp_path, decl, monkeypatch)
+        d = decide(broker, token, "kubectl.get", {"namespace": "dev", "resource": "pods"})
+        assert d.allowed and d.plan.argv[1] == "get"
+        # the file on the broker host is edited: same name, different verb
+        edited = compile_spec(_spec(argv=["kubectl", "delete", "{resource}", "{name}",
+                                          "--namespace", "{namespace}"]))
+        assert edited.definition_hash() != decl.definition_hash()
+        broker.adapters = {"kubectl.get": DeclaredAdapter(edited)}
+        d = decide(broker, token, "kubectl.get", {"namespace": "dev", "resource": "pods"})
+        assert not d.allowed and "does not match" in d.reason
+        # prose is not the definition: a reworded layer-2 note changes nothing
+        reworded = compile_spec(_spec(summary="Different words.",
+                                      layer2={"enforced_by": "RBAC, reworded", "check": "same"}))
+        assert reworded.definition_hash() == decl.definition_hash()
+        assert definition_hash(_spec()) == decl.definition_hash()
+
+    def test_a_grant_that_does_not_commit_to_a_definition_is_refused(self, root, tmp_path, monkeypatch):
+        from taper.declared import compile_spec
+        decl = compile_spec(_spec())
+        caps = {"kubectl.get": {"namespace": OneOf(["dev"]), "resource": OneOf(["pods"]),
+                                "name": Any_()}}
+        token = Token.issue(root, caps, ttl_seconds=3600, now=NOW)    # no definitions
+        d = decide(_declared_broker(root, tmp_path, decl, monkeypatch), token, "kubectl.get",
+                   {"namespace": "dev", "resource": "pods"})
+        assert not d.allowed and "does not commit" in d.reason
+
+    def test_a_child_block_may_not_carry_definitions(self, root, broad_caps):
+        token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW,
+                            definitions={"kubectl.get": "ab" * 32})
+        child = token.attenuate(broad_caps, now=NOW)
+        assert child.definitions() == {"kubectl.get": "ab" * 32}
+        data = json.loads(_unb64(child.serialize()))
+        data["b"][1]["defs"] = {"kubectl.get": "cd" * 32}
+        with pytest.raises(ChainError, match="carries definitions"):
+            verify(Token.deserialize(_b64(json.dumps(data).encode())), root.public_key(), now=NOW)
+        # and the root's own map is under the signature
+        data = json.loads(_unb64(token.serialize()))
+        data["b"][0]["defs"] = {"kubectl.get": "cd" * 32}
+        with pytest.raises(ChainError, match="bad signature"):
+            verify(Token.deserialize(_b64(json.dumps(data).encode())), root.public_key(), now=NOW)
+
+    # -- the executor ---------------------------------------------------------
+
+    def test_a_local_process_sees_only_the_secrets_its_declaration_names(self, tmp_path, monkeypatch):
+        """The child's environment is PATH, HOME and the injected variables.
+        Not the broker's environment, which is where a passphrase lives."""
+        from taper.declared import DeclaredAdapter, compile_spec
+        from taper.execute import Executor
+        script = tmp_path / "kubectl"
+        script.write_text("#!/bin/sh\nenv | sort\necho FILE=$(cat \"$KUBECONFIG\")\n"
+                          "echo MODE=$(stat -c %a \"$KUBECONFIG\")\n")
+        script.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+        monkeypatch.setenv("BROKER_PASSPHRASE", "must-not-leak")
+
+        class Secrets:
+            def require(self, ref):
+                assert ref == "kube.config"
+                return "kind: Config"
+            def get(self, ref):
+                return self.require(ref)
+
+        plan = DeclaredAdapter(compile_spec(_spec())).plan(
+            {"namespace": "dev", "resource": "pods"}, {})
+        result = Executor(Secrets()).run(plan)
+        assert result.ok, result.stderr
+        assert "BROKER_PASSPHRASE" not in result.stdout
+        assert "FILE=kind: Config" in result.stdout
+        assert "MODE=600" in result.stdout
+        env_lines = [l for l in result.stdout.splitlines() if "=" in l and not l.startswith(("FILE", "MODE"))]
+        assert {l.split("=", 1)[0] for l in env_lines} <= {"PATH", "HOME", "KUBECONFIG", "PWD", "_", "SHLVL", "OLDPWD"}
+        # the temp file did not outlive the process
+        path = next(l.split("=", 1)[1] for l in env_lines if l.startswith("KUBECONFIG="))
+        assert not Path(path).exists()
+
+    # -- registration ---------------------------------------------------------
+
+    def test_a_catalog_registers_as_first_class_operations(self, tmp_path, monkeypatch):
+        from taper.declared import load_dir
+        (tmp_path / "kubectl.get.json").write_text(json.dumps(_spec()))
+        (tmp_path / "broken.json").write_text(json.dumps(_spec(operation="kubectl.exec",
+            argv=["kubectl", "exec", "--", "sh", "-c", "{name}"])))
+        catalog = load_dir(tmp_path)
+        assert list(catalog.declarations) == ["kubectl.get"]
+        assert len(catalog.errors) == 1 and "command in a field" in catalog.errors[0]
+        monkeypatch.setitem(ops.REGISTRY, "kubectl.get", None)
+        monkeypatch.setitem(ops.POLICY_ATTRIBUTES, "kubectl.get", ())
+        monkeypatch.setitem(ops.DECLARED_SCHEMAS, "kubectl.get", {})
+        catalog.register()
+        assert ops.get("kubectl.get").summary.startswith("List")
+        assert ops.POLICY_ATTRIBUTES["kubectl.get"] == ("namespace", "resource", "name")
+        assert ops.DECLARED_SCHEMAS["kubectl.get"]["required"] == ["namespace", "resource"]
+        # and policy pressure names every field, like any other operation
+        lines = policy_pressure({"kubectl.get": {"namespace": Any_()}})
+        assert any("kubectl.get.namespace is `any`" in l for l in lines)
+        assert any("kubectl.get.resource is not constrained" in l for l in lines)
+
+
+class TestShippedCatalog:
+    """The starter declarations under ops/ compile with the same loader the
+    broker runs, and each one either names its layer 2 or is honestly marked.
+    A catalog that grows faster than layer 2 is DESIGN.md §10's fourth failure
+    arriving quietly; this test is the count that would show it."""
+
+    ROOT = Path(__file__).resolve().parent.parent / "ops"
+
+    def test_every_shipped_declaration_compiles(self):
+        from taper.declared import load_dir
+        catalog = load_dir(self.ROOT)
+        assert not catalog.errors, catalog.errors
+        assert len(catalog.declarations) >= 8
+        kinds = {d.kind for d in catalog.declarations.values()}
+        assert kinds >= {"process", "sql", "http"}
+
+    def test_layer_1_only_declarations_are_the_docker_ones_and_say_so(self):
+        from taper.declared import load_dir
+        catalog = load_dir(self.ROOT)
+        layer1 = sorted(n for n, d in catalog.declarations.items() if d.layer1_only())
+        # The docker socket is root-equivalent on the host; nothing on that
+        # side refuses a read-only client on its own, and the declarations say
+        # so rather than inventing a layer 2. Anything added here must be
+        # argued for in ops/README.md.
+        assert layer1 == ["docker.inspect", "docker.logs"]
+        for name in layer1:
+            assert any(name in w and "layer 1 only" in w for w in catalog.warnings)
+        for name, decl in catalog.declarations.items():
+            if not decl.layer1_only():
+                assert decl.layer2.check and decl.layer2.enforced_by

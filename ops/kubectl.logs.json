@@ -1,0 +1,40 @@
+{
+  "operation": "kubectl.logs",
+  "summary": "The last N lines of one pod's log in one namespace.",
+  "kind": "process",
+  "fields": {
+    "namespace": {
+      "type": "string",
+      "pattern": "[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?"
+    },
+    "pod": {
+      "type": "string",
+      "pattern": "[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?"
+    },
+    "lines": {
+      "type": "integer",
+      "min": 1,
+      "max": 5000
+    }
+  },
+  "argv": [
+    "kubectl",
+    "logs",
+    "{pod}",
+    "--namespace",
+    "{namespace}",
+    "--tail",
+    "{lines}"
+  ],
+  "secrets": {
+    "env": {
+      "KUBECONFIG": {
+        "file": "kube.config"
+      }
+    }
+  },
+  "layer2": {
+    "enforced_by": "Kubernetes RBAC: the ServiceAccount's Role grants get on pods/log and nothing that writes.",
+    "check": "kubectl auth can-i create pods --namespace <ns>  ->  no"
+  }
+}

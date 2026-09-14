@@ -40,6 +40,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -93,6 +94,16 @@ class Block:
     # verified-by: tests/test_taper.py::TestSubject::test_a_child_block_may_not_carry_a_subject
     # verified-by: tests/test_taper.py::TestSubject::test_altering_the_root_subject_breaks_the_signature
     subject: str = ""
+    # The definition each declared operation had when this authority was
+    # minted: operation name -> sha256 of its canonical spec. Root block only,
+    # under the root signature, like the subject. The broker refuses a
+    # declared operation whose loaded definition does not match, so an edited
+    # or swapped file on the broker host cannot run something else under a
+    # name the grant permits. Built-in operations are code, not files, and
+    # are not listed.
+    # verified-by: tests/test_taper.py::TestDeclared::test_an_edited_definition_no_longer_matches_the_grant
+    # verified-by: tests/test_taper.py::TestDeclared::test_a_child_block_may_not_carry_definitions
+    definitions: dict = field(default_factory=dict)
 
     def payload(self) -> bytes:
         """Exact bytes covered by the signature.
@@ -114,6 +125,8 @@ class Block:
             # Only present when set, so tokens minted before the field existed
             # still reproduce the bytes their signatures cover.
             body["sub"] = self.subject
+        if self.definitions:
+            body["defs"] = dict(sorted(self.definitions.items()))
         return b"\x00taper-block\x00" + json.dumps(
             body, sort_keys=True, separators=(",", ":")
         ).encode()
@@ -133,6 +146,8 @@ class Block:
         }
         if self.subject:
             d["sub"] = self.subject
+        if self.definitions:
+            d["defs"] = dict(sorted(self.definitions.items()))
         return d
 
     @staticmethod
@@ -146,7 +161,30 @@ class Block:
             signature=_unb64(d["sig"]),
             note=d.get("note", ""),
             subject=str(d.get("sub", "")),
+            definitions=_definitions_from_json(d.get("defs")),
         )
+
+
+_DEF_NAME = re.compile(r"^[a-z][a-z0-9]{0,31}\.[a-z][a-z0-9_]{0,31}\Z")
+_DEF_HASH = re.compile(r"^[0-9a-f]{64}\Z")
+
+
+def _definitions_from_json(raw) -> dict:
+    """Strict: a definitions map is names to sha256 hex, nothing else. A
+    malformed map is a malformed block, and a malformed block does not
+    verify."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or len(raw) > 256:
+        raise ChainError("defs must be an object of at most 256 entries")
+    out = {}
+    for name, digest in raw.items():
+        if not isinstance(name, str) or not _DEF_NAME.match(name):
+            raise ChainError(f"defs: {name!r} is not a declared operation name")
+        if not isinstance(digest, str) or not _DEF_HASH.match(digest):
+            raise ChainError(f"defs: {name!r} does not carry a sha256 hex digest")
+        out[name] = digest
+    return out
 
 
 @dataclass
@@ -166,13 +204,17 @@ class Token:
               ttl_seconds: float,
               note: str = "",
               now: Optional[float] = None,
-              subject: str = "") -> "Token":
+              subject: str = "",
+              definitions: Optional[dict] = None) -> "Token":
         """Mint a root token. `subject` is the human this authority is issued
         for - whatever the operator's identity provider calls them. It is
-        signed by the root and cannot be changed by anything downstream."""
+        signed by the root and cannot be changed by anything downstream.
+        `definitions` maps each declared operation the grant names to the
+        hash of its definition, and is signed the same way."""
         now = time.time() if now is None else now
         if "\n" in subject or len(subject) > 256:
             raise ChainError("subject must be one line of at most 256 characters")
+        defs = _definitions_from_json(definitions)
         eph = Ed25519PrivateKey.generate()
         block = Block(
             index=0,
@@ -182,6 +224,7 @@ class Token:
             prev_hash=b"\x00" * 32,
             note=note,
             subject=subject,
+            definitions=defs,
         )
         block.signature = root_priv.sign(block.payload())
         return Token(blocks=[block], _next_priv=eph)
@@ -264,6 +307,11 @@ class Token:
         no say in it. Empty if the issuer did not name anyone."""
         return self.blocks[0].subject if self.blocks else ""
 
+    def definitions(self) -> dict:
+        """The definition hash of each declared operation the grant was
+        minted against. Root block only; empty if none were declared."""
+        return dict(self.blocks[0].definitions) if self.blocks else {}
+
     def revocation_ids(self) -> list[str]:
         """One id per block. Revoking a parent id must revoke every derived token,
         which is why each block contributes an id and the checker matches ANY.
@@ -334,6 +382,11 @@ def verify(token: Token,
             # carries one is trying to say who it acts for, which is exactly
             # the thing a child must not get to say.
             raise ChainError(f"block {position} carries a subject; only the root may")
+        if position > 0 and block.definitions:
+            # Same rule, same reason: what an operation IS was fixed by the
+            # issuer, and a child that carries its own definitions is trying
+            # to redefine the operation it was permitted.
+            raise ChainError(f"block {position} carries definitions; only the root may")
         try:
             expected_signer.verify(block.signature, block.payload())
         except InvalidSignature:

@@ -1,0 +1,24 @@
+{
+  "operation": "docker.logs",
+  "summary": "The last N lines of one container's log.",
+  "kind": "process",
+  "fields": {
+    "container": {
+      "type": "string",
+      "pattern": "[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}"
+    },
+    "lines": {
+      "type": "integer",
+      "min": 1,
+      "max": 5000
+    }
+  },
+  "argv": [
+    "docker",
+    "logs",
+    "--tail",
+    "{lines}",
+    "{container}"
+  ],
+  "layer2": null
+}

@@ -1,0 +1,19 @@
+{
+  "operation": "docker.inspect",
+  "summary": "The configuration and state of one container, as JSON.",
+  "kind": "process",
+  "fields": {
+    "container": {
+      "type": "string",
+      "pattern": "[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}"
+    }
+  },
+  "argv": [
+    "docker",
+    "inspect",
+    "--type",
+    "container",
+    "{container}"
+  ],
+  "layer2": null
+}

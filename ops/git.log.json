@@ -1,0 +1,37 @@
+{
+  "operation": "git.log",
+  "summary": "The last N commits of one branch in one repository, one line each.",
+  "kind": "process",
+  "fields": {
+    "repo": {
+      "type": "string",
+      "pattern": "/srv/repos/[a-z0-9][a-z0-9_.-]{0,63}",
+      "describe": "an absolute path under the repositories root; policy names which"
+    },
+    "branch": {
+      "type": "string",
+      "pattern": "[A-Za-z0-9][A-Za-z0-9_./-]{0,127}"
+    },
+    "count": {
+      "type": "integer",
+      "min": 1,
+      "max": 500
+    }
+  },
+  "argv": [
+    "git",
+    "-C",
+    "{repo}",
+    "log",
+    "--oneline",
+    "--no-decorate",
+    "--max-count",
+    "{count}",
+    "{branch}",
+    "--"
+  ],
+  "layer2": {
+    "enforced_by": "The filesystem: the broker's uid has read-only access to /srv/repos (mode 0750, group read; no write bit anywhere). git cannot alter what it cannot write.",
+    "check": "sudo -u taper-broker touch /srv/repos/<repo>/x  ->  Permission denied"
+  }
+}

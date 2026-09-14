@@ -195,6 +195,13 @@ REGISTRY: dict[str, Operation] = {
     op.name: op for op in (SSH_EXEC, PG_QUERY, PG_MIGRATE, PG_DESCRIBE, HTTP_REQUEST)
 }
 
+# The hand-written five. Declared operations (taper/declared.py) join REGISTRY
+# and POLICY_ATTRIBUTES at load time and may not shadow one of these.
+BUILTIN = frozenset(REGISTRY)
+# MCP tool schemas for declared operations, filled in by Catalog.register();
+# the built-ins keep theirs in mcp.TOOL_SCHEMAS.
+DECLARED_SCHEMAS: dict[str, dict] = {}
+
 
 def get(name: str) -> Operation:
     if name not in REGISTRY:

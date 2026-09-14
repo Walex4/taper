@@ -491,6 +491,8 @@ failure mode wearing a different hat. Unknown kinds fail closed at parse time.
 taper/caps.py         constraint algebra: subsumes + intersect
 taper/chain.py        signed attenuation chain
 taper/ops.py          typed operation schemas (rule 1)
+taper/declared.py     an operation as a JSON file, compiled to the same thing
+ops/                  the starter catalog: kubectl, git, aws, a fixed query, an internal API
 taper/adapters/       ssh, postgres, http — build argv, never strings
 taper/broker.py       verify → validate → derive → check → plan → audit
 taper/audit.py        hash-chained tamper-evident log
@@ -501,6 +503,52 @@ taper/mcp.py          MCP on stdio; talks to a local or socket backend
 `Broker.execute()` is deliberately unimplemented. Everything above it is pure and
 tested; wiring subprocesses and connections is the easy, environment-specific
 part, and leaving it out keeps the suite side-effect free.
+
+### Declared operations
+
+Rule 1 has a cost: every kind of thing an agent might do needs an adapter, and
+five exist. The first operator whose agent runs `kubectl` or `git` meets that
+wall in ten minutes, and the pressure at the wall is toward a wider operation
+that does exist. So an operation can now be a file:
+
+```json
+{
+  "operation": "kubectl.get",
+  "summary": "List one kind of resource in one namespace. Read-only.",
+  "kind": "process",
+  "fields": {
+    "namespace": {"type": "string", "pattern": "[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?"},
+    "resource":  {"type": "string", "enum": ["pods", "deployments", "services"]}
+  },
+  "argv": ["kubectl", "get", "{resource}", "--namespace", "{namespace}", "--output", "json"],
+  "secrets": {"env": {"KUBECONFIG": {"file": "kube.config"}}},
+  "layer2": {"enforced_by": "RBAC: a ServiceAccount with get and list only",
+             "check": "kubectl auth can-i delete pods --namespace <ns>  ->  no"}
+}
+```
+
+Drop it in `~/.taper/ops` and the broker, the MCP server, `taper grant` and
+`taper inspect` treat it exactly like the built-in five: typed fields, policy
+by intersection, a warning for every wildcard. What keeps this from being a
+richer grammar in disguise is enforced by the loader, not by advice: a
+placeholder is one whole argv element or one bound SQL parameter, never part
+of a literal; the program is a literal and never `sh`, `sudo`, `python` or
+`ssh`; nothing may follow a `-c`-style flag; every string value must fit the
+same alphabet `ssh.exec`'s arguments fit, so a space or a `;` cannot be sent
+at all; and `layer2` is required — name what refuses this on the target with
+the broker removed, or write `null` and hear "layer 1 only" at every mint.
+`taper ops check` says exactly why a file is refused.
+
+The grant signs the hash of each declared operation's definition into the
+root block, beside the subject. Edit the file after minting — `get` becomes
+`delete` — and the broker refuses the operation until the grant is re-minted;
+`taper inspect` shows *changed since mint*. No prior design signs the
+operation's definition into the delegation, and it is the part that makes
+this a strengthening of the token rather than only a relief of adoption
+pressure. [`ops/`](ops/) is the starter catalog with the layer-2 setup for
+each, and `taper coverage <commands>` reports which of an agent's actual
+command lines have an operation and which do not — before anything is
+installed. Design and the four conditions: [DESIGN.md §7](DESIGN.md#declared-operations).
 
 ## Using it
 
@@ -583,7 +631,7 @@ refuses anyone else before a token is even parsed. Set the socket's group to the
 ## Tests and validation
 
 ```bash
-make validate    # preflight + the test suite + 81 attacks. The release gate.
+make validate    # preflight + the test suite + 115 attacks. The release gate.
 ```
 
 Four layers, and they check different things:
@@ -591,7 +639,7 @@ Four layers, and they check different things:
 | Command | Checks | Needs |
 |---|---|---|
 | `pytest` | the code does what you meant — 273 tests | nothing |
-| `python validate/redteam.py` | the system refuses what someone *else* meant — 81 attacks | nothing |
+| `python validate/redteam.py` | the system refuses what someone *else* meant — 115 attacks | nothing |
 | `bash scripts/preflight.sh` | this machine can host a broker safely | nothing |
 | `python validate/check_postgres.py <dsn>` | **the database refuses on its own** | a real Postgres |
 | `bash validate/check_ssh.sh <host> <key>` | **sshd refuses on its own** | a real target host |

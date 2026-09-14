@@ -66,6 +66,9 @@ class Tower:
     clock: Callable[[], float] = time.time
     revoked: set = field(default_factory=set)
     nonces: NonceCache = field(default_factory=NonceCache)
+    # Declared operation name -> definition hash, loaded by the tower from
+    # the same files the broker loads, but read by the tower itself.
+    definitions: dict = field(default_factory=dict)
     # Material is handed out once and never kept. A clearance whose material
     # was already taken cannot be taken again - one certificate, one
     # connection, and nothing for a later caller to find.
@@ -104,6 +107,23 @@ class Tower:
             self._refuse("decision is about a different chain", operation, decision, now)
         if decision.subject != token.subject():
             self._refuse("decision names a different subject", operation, decision, now)
+        # The tower has its own copy of what each declared operation is. A
+        # grant that commits to a definition the tower does not know, or
+        # knows differently, is not cleared - the broker's opinion of the
+        # file is not the tower's evidence.
+        # verified-by: tests/test_tower.py::TestTower::test_a_definition_the_tower_knows_differently_is_not_cleared
+        committed = token.definitions().get(operation)
+        known = self.definitions.get(operation)
+        if committed is not None or known is not None:
+            if committed is None:
+                self._refuse(f"grant does not commit to a definition of {operation}",
+                             operation, decision, now)
+            if known is None:
+                self._refuse(f"tower knows no definition of {operation}",
+                             operation, decision, now)
+            if committed != known:
+                self._refuse(f"definition of {operation} does not match the grant",
+                             operation, decision, now)
 
         clearance_id = hashlib.sha256(
             f"{ids[-1]}|{operation}|{json.dumps(request, sort_keys=True)}|{now:.3f}"

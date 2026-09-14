@@ -1,0 +1,23 @@
+{
+  "operation": "billing.invoice",
+  "summary": "Read one invoice from the internal billing API.",
+  "kind": "http",
+  "fields": {
+    "id": {
+      "type": "string",
+      "pattern": "inv_[a-z0-9]{8,32}"
+    }
+  },
+  "method": "GET",
+  "host": "billing.internal",
+  "path": [
+    "v1",
+    "invoices",
+    "{id}"
+  ],
+  "authorization": "billing.token",
+  "layer2": {
+    "enforced_by": "The billing service: the token in the vault is issued to a read-only principal; the service refuses PUT, PATCH, POST and DELETE for it regardless of what arrives.",
+    "check": "curl -X DELETE -H 'Authorization: <token>' https://billing.internal/v1/invoices/inv_test  ->  403"
+  }
+}

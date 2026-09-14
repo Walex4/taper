@@ -121,6 +121,24 @@ class Executor:
             stdin_payload = plan.detail.get("stdin_json")
             stdin_text = json.dumps(stdin_payload) if stdin_payload is not None else None
 
+            # The child's environment is built from nothing: PATH and HOME,
+            # plus what the plan injects. Never the broker's own environment,
+            # which is where a vault passphrase or a DSN could be sitting.
+            # verified-by: tests/test_taper.py::TestDeclared::test_a_local_process_sees_only_the_secrets_its_declaration_names
+            env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                   "HOME": os.environ.get("HOME", "/tmp")}
+            for var, how in (plan.detail.get("inject") or {}).items():
+                value = self.secrets.require(how["ref"])
+                if how["as"] == "file":
+                    fd, name = tempfile.mkstemp(prefix="taper-secret-")
+                    with os.fdopen(fd, "w") as handle:
+                        os.fchmod(fd, 0o600)
+                        handle.write(value if value.endswith("\n") else value + "\n")
+                    cleanup.append(Path(name))
+                    env[var] = name
+                else:
+                    env[var] = value
+
             completed = subprocess.run(
                 argv,
                 input=stdin_text,
@@ -128,8 +146,7 @@ class Executor:
                 text=True,
                 timeout=self.timeout,
                 shell=False,                    # never, under any circumstances
-                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                     "HOME": os.environ.get("HOME", "/tmp")},
+                env=env,
             )
             out, cut_a = _truncate(completed.stdout)
             err, cut_b = _truncate(completed.stderr)
