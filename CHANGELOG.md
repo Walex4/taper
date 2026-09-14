@@ -3,7 +3,15 @@
 The first section is what `release.yml` attaches to the GitHub release, so it
 is written to be read on its own.
 
-## Unreleased
+## v0.3.0 — 2026-09-14
+
+Rule 1 — never filter a command string, expose typed operations — had a
+cost: every kind of thing an agent might do needed a Python adapter, and five
+existed. This release makes an operation a file, under four conditions the
+loader enforces, and signs the definition of each into the grant. The
+architecture is also drawn in standard notation, and the prior-art section
+was corrected after a search for anyone who had built Tower first. Still
+unaudited.
 
 **Declared operations.** An operation can be a JSON file instead of a Python
 adapter: named fields with types and validators, a plan template, and a
