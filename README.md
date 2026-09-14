@@ -648,6 +648,15 @@ four bypasses with their fixes, and what the harness does not prove.
   Requests give you spec-blessed mid-call human approval — "this DELETE affects
   40k rows, confirm?" — without holding a stream open.
 
+**Where this is going.** Taper today is a vault with a good lock, and honest
+about being one. [`docs/no-vault.md`](docs/no-vault.md) is the design note for
+the track that removes the vault: credentials derived per operation rather
+than stored, the minting key split so it never exists in one place, targets
+that verify the token themselves, and a *clearance* model — a separate
+co-signer that makes a credential exist for one operation only when shown a
+verified decision, and a hold released by a second party when the target or
+the policy asks for one. A separate track, reusing every part of this one.
+
 ## Prior art — read this before you get excited
 
 "Credential broker for agents" is a named category with an IETF draft

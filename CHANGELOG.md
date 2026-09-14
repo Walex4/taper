@@ -15,6 +15,11 @@ is written to be read on its own.
   against an identity provider — it is the root signer's claim, and the
   field is where an IdP assertion lands when the mint is bound to one.
   `taper inspect` says "acts for nobody in particular" when none was named.
+- `docs/no-vault.md`: the design note for the track that removes the vault —
+  derive-don't-store, split seed, target-verified tokens — and the clearance
+  model, in which a separate co-signer makes a credential exist for one
+  operation only against a verified decision, with holds released by a
+  second party. A note, not a change; the shipped design is unaffected.
 - DESIGN.md's prior-art table gains CB4A (draft-hartman, March 2026) with
   the disagreement stated: Taper does not separate deciding from delivering,
   because performing the operation is how the credential stays off the wire.
