@@ -193,14 +193,43 @@ any other way. The clearance is the credential.
   separate things, and the design is built so that no one of them yields a
   credential.
 
-## First step
+## Where it stands
 
-Stage 1, Postgres, in the demo: certificate authentication for `taper_agent`,
-a per-operation client certificate minted by the broker with the subject in
-its common name, the password removed from the seed entirely, and
-`check_postgres.py` proving that password authentication is refused. Small,
-real, and the first time a Taper decision has been the reason a credential
-existed.
+**Stage 1, Postgres — built, 14 September 2026.** The `tower` package in
+this repository (a separate package; it depends on `taper` and changes one
+seam in it, `Executor._connect`). `tower init` creates the CA — the one thing
+the vault still keeps. With `TAPER_TOWER` set, `taper broker` and `taper serve
+--in-process` run a `ClearedBroker` and a `ClearedExecutor`: every allowed
+Postgres decision asks the tower for a clearance, the tower re-verifies the
+chain and the proof with its own state and refuses a decision about any other
+chain or subject, and on a yes it mints a sixty-second client certificate —
+`CN` the role, `OU` the subject, serial derived from the clearance id, the
+clearance id in a SAN — whose key was generated for that one operation and is
+handed out exactly once. The executor writes both to 0600 files for the length
+of one connection and removes them; a DSN that still carries a password is
+refused outright. Every clearance and every refusal is a record on the tape,
+adjacent to the decision it rests on.
 
-Working name for the track: **Tower**. Separate package when it is more than
-a note; Taper's libraries as dependencies, not copies.
+Verified against a real Postgres 16: the agent role has no password; a
+connection without TLS, without a certificate, or with a guessed password is
+refused at `pg_hba`; a cleared connection is accepted and the database's own
+log reads `identity="CN=taper_agent,OU=alice@example.com,O=taper"
+method=cert`. `validate/check_postgres.py` proves the first three from
+outside, with no broker in the path, when handed a DSN that connects with a
+certificate. The red team gained eight cases against the tower itself:
+another root's chain, no proof, a proof for a different request, a decision
+about a different chain, a different subject, an expired chain, material
+taken twice, and the tape's integrity through all of it.
+
+The demo has a third run, `scripts/tower-demo.sh` and
+`docker-compose.tower.yml`: same database, same incident, and the password
+gone from the role.
+
+What stage 1 does not yet do: SSH per-operation certificates and AWS/STS
+(the same shape, not yet written); the tower is a class in the broker's
+process, so its independence is a property of the code path and not yet of
+a uid boundary — that is stage 2, and the interface was written so that
+stage 2 is a transport change.
+
+Working name for the track: **Tower**. Its own package now; its own
+repository when it is more than one stage.

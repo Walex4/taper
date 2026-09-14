@@ -1,0 +1,3 @@
+# Written by scripts/tower-demo.sh. Certificates and a server key: never commit.
+*
+!.gitignore

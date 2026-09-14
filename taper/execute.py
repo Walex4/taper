@@ -142,13 +142,12 @@ class Executor:
         except ImportError:
             return Result(False, -1, "", "psycopg not installed: pip install 'psycopg[binary]'")
 
-        dsn = self.secrets.require(plan.secret_refs["dsn"])
         settings = plan.detail.get("session_settings", {})
         statement = plan.detail["statement_text"]
         max_rows = plan.detail.get("max_rows") or 1000
 
         try:
-            with psycopg.connect(dsn, connect_timeout=10) as conn:
+            with self._connect(psycopg, plan) as conn:
                 with conn.cursor() as cur:
                     # Session settings are applied by the BROKER, never requested
                     # by the agent, and locally so they cannot leak across pooled
@@ -215,6 +214,14 @@ class Executor:
             # The database refused. That is the boundary doing its job — surface
             # it verbatim so the agent can adapt, and so the audit log records it.
             return Result(False, 1, "", f"{type(exc).__name__}: {exc}")
+
+    def _connect(self, psycopg, plan):
+        """The connection, as a context manager. The one seam Tower uses:
+        a cleared executor connects with a per-operation certificate instead
+        of whatever the DSN carries. Everything after the connection is the
+        same code, because nothing after it should know how it authenticated."""
+        return psycopg.connect(self.secrets.require(plan.secret_refs["dsn"]),
+                               connect_timeout=10)
 
     # --------------------------------------------------------------------- http
 

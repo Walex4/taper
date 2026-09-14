@@ -243,6 +243,23 @@ plus `staging.app_config`, which the task requires reading to compare the two.
 A `DROP SCHEMA` classifies as `ddl` and is refused with the constraint quoted
 back verbatim.
 
+## Run three — behind Tower
+
+    ./scripts/tower-demo.sh
+
+Same database, same incident, one difference: the password leaves. The script
+creates the tower's CA in the broker's vault, hands the database a server
+certificate and a `pg_hba.conf` that admits `taper_agent` by certificate and
+nothing else, brings the database up with them, removes the role's password,
+and points the broker's `pg.dsn` at a DSN with no password in it — because
+there is none. Start the broker with `TAPER_TOWER` set (the script prints the
+line) and run `./scripts/run-taper.sh` as before. Every Postgres operation the
+token permits now causes a sixty-second client certificate to exist, with the
+subject's name in it; the database's own log records
+`identity="CN=taper_agent,OU=<subject>,O=taper" method=cert`; and nothing else
+gets in. `docs/no-vault.md` is the design; `validate/check_postgres.py`, given
+a DSN that connects with a certificate, proves the door is otherwise shut.
+
 ### Unsetting the credential is not enough, and the script will tell you so
 
 Removing `DATABASE_URL` removes one route. It does not remove the others. On a

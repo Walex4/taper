@@ -1,0 +1,30 @@
+# Run three — behind Tower. Layer this over docker-compose.yml:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.tower.yml up -d
+#
+# Same database, same volume, same incident. One difference: the agent role
+# is admitted by certificate and nothing else. `scripts/tower-demo.sh` writes
+# tls/ (a server certificate and the tower's CA) and this file hands them to
+# Postgres. The key is copied to a path Postgres owns at start, because a
+# bind-mounted key keeps the host's owner and Postgres refuses one it does
+# not own.
+
+services:
+  db:
+    volumes:
+      - ./tls:/tls-in:ro
+    entrypoint:
+      - bash
+      - -c
+      - |
+        install -m 600 -o postgres -g postgres /tls-in/server.key /var/lib/postgresql/server.key
+        install -m 644 -o postgres -g postgres /tls-in/server.crt /var/lib/postgresql/server.crt
+        install -m 644 -o postgres -g postgres /tls-in/ca.crt     /var/lib/postgresql/ca.crt
+        install -m 644 -o postgres -g postgres /tls-in/pg_hba.conf /var/lib/postgresql/pg_hba.conf
+        exec docker-entrypoint.sh postgres \
+          -c ssl=on \
+          -c ssl_cert_file=/var/lib/postgresql/server.crt \
+          -c ssl_key_file=/var/lib/postgresql/server.key \
+          -c ssl_ca_file=/var/lib/postgresql/ca.crt \
+          -c hba_file=/var/lib/postgresql/pg_hba.conf \
+          -c log_connections=on

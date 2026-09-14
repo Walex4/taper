@@ -46,10 +46,11 @@ postgres = ["psycopg[binary]>=3.1"]
 
 [project.scripts]
 taper = "taper.cli:main"
+tower = "tower.cli:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.setuptools]
-packages = ["taper", "taper.adapters"]
+packages = ["taper", "taper.adapters", "tower"]

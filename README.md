@@ -573,15 +573,15 @@ refuses anyone else before a token is even parsed. Set the socket's group to the
 ## Tests and validation
 
 ```bash
-make validate    # preflight + the test suite + 73 attacks. The release gate.
+make validate    # preflight + the test suite + 81 attacks. The release gate.
 ```
 
 Four layers, and they check different things:
 
 | Command | Checks | Needs |
 |---|---|---|
-| `pytest` | the code does what you meant — 251 tests | nothing |
-| `python validate/redteam.py` | the system refuses what someone *else* meant — 73 attacks | nothing |
+| `pytest` | the code does what you meant — 273 tests | nothing |
+| `python validate/redteam.py` | the system refuses what someone *else* meant — 81 attacks | nothing |
 | `bash scripts/preflight.sh` | this machine can host a broker safely | nothing |
 | `python validate/check_postgres.py <dsn>` | **the database refuses on its own** | a real Postgres |
 | `bash validate/check_ssh.sh <host> <key>` | **sshd refuses on its own** | a real target host |
@@ -623,7 +623,7 @@ stacked statements classifying as `SELECT`, the real pgAdmin backslash payload
 getting through, `pg_read_file` passing as a plain select because it touched no
 table, and `/v1/../../admin` satisfying a `/v1/` prefix. All four are fixed and
 pinned by regression tests. Expect it to find more when you extend the adapters.
-[`docs/redteam.md`](docs/redteam.md) walks through the cases (fifty-nine at v0.1.1, seventy-three now), the
+[`docs/redteam.md`](docs/redteam.md) walks through the cases (fifty-nine at v0.1.1, eighty-one now), the
 four bypasses with their fixes, and what the harness does not prove.
 
 ## Production notes
@@ -656,6 +656,10 @@ that verify the token themselves, and a *clearance* model — a separate
 co-signer that makes a credential exist for one operation only when shown a
 verified decision, and a hold released by a second party when the target or
 the policy asks for one. A separate track, reusing every part of this one.
+Stage 1 for Postgres is built: the `tower` package, `tower init`, and
+`TAPER_TOWER` on the broker — the agent role has no password, and every
+allowed operation mints a sixty-second certificate with the subject's name in
+it. The demo's third run, `scripts/tower-demo.sh`, shows it.
 
 ## Prior art — read this before you get excited
 

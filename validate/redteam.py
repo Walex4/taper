@@ -28,6 +28,7 @@ from taper.adapters import (HTTPAdapter, PostgresAdapter, PostgresDescribeAdapte
 from taper.broker import Broker                                                  # noqa: E402
 from taper.caps import Never, OneOf, Prefix, Range, Subset                       # noqa: E402
 from taper.chain import ChainError, Token, verify                                # noqa: E402
+from taper.pop import prove                                                      # noqa: E402
 
 NOW = 1_756_000_000.0
 GREEN, RED, YELLOW, DIM, BOLD, OFF = (
@@ -195,7 +196,6 @@ def run(report: Report, tmp: Path) -> None:
         report.check(f"describe: {label}", ok, reason if not ok else "")
     # The permitted describe must not be able to carry rows: the plan is a
     # fixed catalogue statement with the name bound, in a read-only transaction.
-    from taper.pop import prove
     permitted = {"database": "analytics", "table": "public.events"}
     d = broker.decide(wire, "pg.describe", permitted,
                       proof=prove(token.proving_key(), wire, "pg.describe", permitted, now=NOW))
@@ -384,6 +384,67 @@ def run(report: Report, tmp: Path) -> None:
                       {"host": "build-1.internal", "program": "git"})
     report.check("subject: alice's child spliced under bob's root",
                  not d.allowed and d.subject == "", d.reason)
+
+    # ---------------------------------------------------------------------
+    section("9. The tower — nothing but a verified decision mints a credential")
+    from taper.audit import AuditLog as _Audit
+    from tower.ca import CA as _CA
+    from tower.clearance import ClearanceRefused as _Refused, Tower as _Tower
+    from taper.broker import Decision as _Decision
+    tower_ = _Tower(ca=_CA.create(), root_pub=root.public_key(),
+                    audit=_Audit(tmp / "tower-audit.jsonl"), clock=lambda: NOW)
+    good = Token.issue(root, FULL, ttl_seconds=3600, now=NOW, subject="alice@example.com")
+    gw = good.serialize()
+    sel = {"database": "analytics", "statement": "SELECT * FROM public.events", "max_rows": 1}
+
+    def refused_by_tower(label, wire_, proof_, decision_):
+        try:
+            tower_.clear(wire_, "pg.query", sel, proof_, decision_, "taper_agent")
+            report.check(f"tower: {label}", False, "A CERTIFICATE WAS ISSUED")
+        except _Refused as exc:
+            report.check(f"tower: {label}", True, str(exc))
+
+    other_root = Ed25519PrivateKey.generate()
+    forged_tok = Token.issue(other_root, FULL, ttl_seconds=3600, now=NOW, subject="alice@example.com")
+    fwire = forged_tok.serialize()
+    refused_by_tower("a decision that claims allow for a chain from another root",
+                     fwire, prove(forged_tok.proving_key(), fwire, "pg.query", sel, now=NOW),
+                     _Decision(True, "ok", "pg.query", {}, token_ids=forged_tok.revocation_ids(),
+                               subject="alice@example.com"))
+    refused_by_tower("a good chain with no proof", gw, None,
+                     _Decision(True, "ok", "pg.query", {}, token_ids=good.revocation_ids(),
+                               subject="alice@example.com"))
+    refused_by_tower("a good chain, a proof for a different request", gw,
+                     prove(good.proving_key(), gw, "pg.query", {**sel, "max_rows": 2}, now=NOW),
+                     _Decision(True, "ok", "pg.query", {}, token_ids=good.revocation_ids(),
+                               subject="alice@example.com"))
+    refused_by_tower("a denial dressed as an allow by a broker that lies about the chain", gw,
+                     prove(good.proving_key(), gw, "pg.query", sel, now=NOW),
+                     _Decision(True, "ok", "pg.query", {}, token_ids=["not-this-chain"],
+                               subject="alice@example.com"))
+    refused_by_tower("a decision that names a different subject", gw,
+                     prove(good.proving_key(), gw, "pg.query", sel, now=NOW),
+                     _Decision(True, "ok", "pg.query", {}, token_ids=good.revocation_ids(),
+                               subject="ceo@example.com"))
+    expired = Token.issue(root, FULL, ttl_seconds=1, now=NOW - 100, subject="alice@example.com")
+    ew = expired.serialize()
+    refused_by_tower("an expired chain", ew,
+                     prove(expired.proving_key(), ew, "pg.query", sel, now=NOW),
+                     _Decision(True, "ok", "pg.query", {}, token_ids=expired.revocation_ids(),
+                               subject="alice@example.com"))
+    # and the honest request works exactly once, then its material is gone
+    ok_proof = prove(good.proving_key(), gw, "pg.query", sel, now=NOW)
+    c = tower_.clear(gw, "pg.query", sel, ok_proof,
+                     _Decision(True, "ok", "pg.query", {}, token_ids=good.revocation_ids(),
+                               subject="alice@example.com"), "taper_agent")
+    tower_.take(c.id)
+    try:
+        tower_.take(c.id)
+        report.check("tower: a clearance's material taken twice", False, "HANDED OUT AGAIN")
+    except _Refused as exc:
+        report.check("tower: a clearance's material taken twice", True, str(exc))
+    intact, _ = tower_.audit.verify()
+    report.check("tower: every refusal and the one clearance are on an intact tape", intact)
 
     # ---------------------------------------------------------------------
     section("8. Audit integrity")

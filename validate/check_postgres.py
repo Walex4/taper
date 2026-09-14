@@ -199,6 +199,59 @@ def main() -> int:
     except Exception as exc:                           # noqa: BLE001
         print(f"  {YELLOW}! could not read role attributes: {exc}{OFF}")
 
+    # Clearance, not custody. If the DSN connects with a client certificate,
+    # this target should admit the agent role by certificate and nothing
+    # else: no password (there is none), no TLS-without-certificate, no
+    # plaintext. Each is tried with the certificate removed from the DSN.
+    from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
+    parts = urlsplit(dsn)
+    query = parse_qs(parts.query)
+    if "sslcert" in query:
+        print(f"\n{BOLD}Clearance, not custody{OFF}\n" + "─" * 60)
+        stripped = {k: v for k, v in query.items() if k not in ("sslcert", "sslkey")}
+
+        def variant(label, **changes):
+            q = {k: v[0] for k, v in stripped.items()}
+            with_password = changes.pop("_password", False)
+            q.update(changes)
+            netloc = parts.netloc
+            if with_password:
+                user = parts.username or "taper_agent"
+                host = parts.hostname + (f":{parts.port}" if parts.port else "")
+                netloc = f"{user}:guess@{host}"
+            return label, urlunsplit((parts.scheme, netloc, parts.path, urlencode(q), ""))
+
+        for label, probe_dsn in [
+            variant("no certificate, TLS", sslmode="require"),
+            variant("no certificate, no TLS", sslmode="disable"),
+            variant("a guessed password, no certificate", sslmode="require", _password=True),
+        ]:
+            try:
+                psycopg.connect(probe_dsn, connect_timeout=10).close()
+                failures.append(f"admitted without a clearance: {label}")
+                print(f"  {RED}✗ ADMITTED{OFF} {label}   {RED}<-- THE ROLE HAS ANOTHER WAY IN{OFF}")
+            except Exception as exc:                   # noqa: BLE001
+                passed += 1
+                print(f"  {GREEN}✓ refused{OFF}  {label}")
+                print(f"            {DIM}{str(exc).splitlines()[-1][:90]}{OFF}")
+        try:
+            with psycopg.connect(dsn, connect_timeout=10) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT rolpassword IS NULL FROM pg_authid "
+                                "WHERE rolname = current_user")
+                    row = cur.fetchone()
+            if row is None:
+                print(f"  {DIM}- cannot read pg_authid as this role; password state unknown{OFF}")
+            elif row[0]:
+                passed += 1
+                print(f"  {GREEN}✓{OFF} the role has no password at all")
+            else:
+                failures.append("the role still has a password")
+                print(f"  {RED}✗ the role still has a password: the vault did not empty{OFF}")
+        except Exception as exc:                       # noqa: BLE001
+            print(f"  {DIM}- pg_authid is not readable by this role (as it should not be); "
+                  f"check rolpassword IS NULL as a superuser{OFF}")
+
     # Resource-owned invariants: does this target carry its own context, and
     # can the agent role ask for it without being able to change it? Neither
     # is required - a target without the function simply declares nothing,

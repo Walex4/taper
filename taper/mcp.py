@@ -294,14 +294,13 @@ def serve(root_pub: Optional[Ed25519PublicKey] = None,
         except PopError as exc:
             print(f"cannot read the proving key: {exc}", file=sys.stderr)
             return 2
-        broker = Broker(
-            root_pub=root_pub,
-            adapters=default_adapters(),
-            audit_path=audit_path,
-            secrets=secrets.get,
-            require_proof=proving_key is not None,
-        )
-        backend = LocalBackend(broker, Executor(secrets), proving_key=proving_key)
+        from .cli import _broker_and_executor
+        broker, executor, tower = _broker_and_executor(
+            root_pub, default_adapters(), audit_path, secrets,
+            require_proof=proving_key is not None)
+        backend = LocalBackend(broker, executor, proving_key=proving_key)
+        if tower is not None:
+            print("tower attached: Postgres decisions carry a clearance", file=sys.stderr)
         server = Server(backend, token, operations=backend.operations())
         pop = "with proof of possession" if proving_key else \
             "NO proof of possession (set TAPER_KEY_FILE)"

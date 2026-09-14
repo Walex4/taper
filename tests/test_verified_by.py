@@ -50,9 +50,17 @@ ANNOTATED = [
 ]
 
 
+TOWER = ROOT / "tower"
+
+
 def iter_claims(root: Path = SOURCE):
-    """Yield (relative path, line number, node id) for every verified-by ref."""
-    for path in sorted(root.rglob("*.py")):
+    """Yield (relative path, line number, node id) for every verified-by ref.
+
+    Tower's claims are linted with Taper's: a separate track, the same rule."""
+    paths = sorted(root.rglob("*.py"))
+    if root == SOURCE and TOWER.is_dir():
+        paths += sorted(TOWER.rglob("*.py"))
+    for path in paths:
         for lineno, line in enumerate(path.read_text().splitlines(), 1):
             match = CLAIM.search(line)
             if not match:

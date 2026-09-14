@@ -5,6 +5,21 @@ is written to be read on its own.
 
 ## Unreleased
 
+- **Tower, stage 1 (Postgres): clearance, not custody.** A separate package,
+  `tower`, that depends on `taper` and changes one seam in it. With
+  `TAPER_TOWER` set, the broker asks a tower for a clearance on every allowed
+  Postgres decision; the tower re-verifies the chain and the proof itself,
+  refuses a decision about any other chain or subject, and mints a
+  sixty-second client certificate — CN the role, OU the subject, serial from
+  the clearance id — whose key exists for one operation and is handed out
+  once. The executor connects with it and removes it; a DSN carrying a
+  password is refused. The agent role has no password. Verified against a
+  real Postgres: the database's own log names the human. Every clearance is
+  a record on the tape. `tower init`, `tower issue-client`, `tower
+  server-cert`, `tower demo-hba`; the demo's third run
+  (`scripts/tower-demo.sh`); eight red-team cases against the tower
+  (eighty-one in all); `check_postgres.py` proves the door is otherwise shut.
+  `docs/no-vault.md` is the design.
 - The token carries a **subject**: who the authority acts for, as distinct
   from which process is calling. `taper grant --subject` (or `"subject"` in
   the policy file) puts it in the root block under the root signature; every

@@ -789,6 +789,23 @@ def _username(uid: int) -> str:
         return "?"
 
 
+def _broker_and_executor(root_pub, adapters, audit_path, secrets, require_proof=False):
+    """A plain Broker and Executor - or, when TAPER_TOWER is set and the
+    tower package is installed, cleared ones. Tower is a separate track and
+    an optional import; Taper without it is unchanged."""
+    from .broker import Broker
+    from .execute import Executor
+    if os.environ.get("TAPER_TOWER", "").strip():
+        try:
+            from tower.attach import attach
+        except ImportError:
+            sys.exit("TAPER_TOWER is set but the tower package is not installed")
+        return attach(root_pub, adapters, audit_path, secrets, require_proof=require_proof)
+    broker = Broker(root_pub=root_pub, adapters=adapters, audit_path=audit_path,
+                    secrets=secrets.get, require_proof=require_proof)
+    return broker, Executor(secrets), None
+
+
 def cmd_broker(args) -> int:
     """The trusted half. Run this as the broker user, not as the agent."""
     from .adapters import default_adapters
@@ -815,14 +832,10 @@ def cmd_broker(args) -> int:
     allowed = allowed or None
 
     secrets = default_provider()
-    broker = Broker(
-        root_pub=load_root_public(),
-        adapters=default_adapters(),
-        audit_path=AUDIT,
-        secrets=secrets.get,
-    )
+    broker, executor, tower = _broker_and_executor(
+        load_root_public(), default_adapters(), AUDIT, secrets)
     server = BrokerServer(
-        broker, Executor(secrets), socket_path,
+        broker, executor, socket_path,
         allowed_uids=allowed,
         socket_mode=int(args.socket_mode, 8),
         log=lambda message: print(message, file=sys.stderr, flush=True),
@@ -835,6 +848,9 @@ def cmd_broker(args) -> int:
     else:
         who = ", ".join(f"{_username(uid)}({uid})" for uid in sorted(allowed))
         print(f"{DIM}accepting: {who}{OFF}", file=sys.stderr)
+    if tower is not None:
+        print(f"{GREEN}tower attached{OFF} — Postgres decisions carry a clearance; "
+              f"the DSN must carry no password", file=sys.stderr)
     print(f"{GREEN}broker ready{OFF} — ^C to stop", file=sys.stderr)
     try:
         server.serve_forever()

@@ -1,0 +1,148 @@
+"""The tower: it issues clearances, and it is not persuadable.
+
+A clearance is a credential for one operation. It exists because the tower
+was shown, and checked for itself:
+
+  * a chain that verifies against the root key it holds,
+  * a proof of possession for this exact request,
+  * a decision the broker already made in favour, whose token ids match,
+  * and - the invariants and holds of later stages aside - nothing else.
+
+The broker's word is not enough. The tower re-runs verification with its own
+copy of the root public key and its own nonce cache, so a broker that has
+been talked into an allow cannot talk the tower into a certificate: the chain
+has to say yes to the tower directly. In stage 1 the tower is a class in the
+broker's process, which makes this independence nominal; in stage 2 it is a
+process under its own uid with half of a split key, and this interface does
+not change. That is the point of writing it this way now.
+
+Every clearance is a record in the audit chain, adjacent to the decision it
+rests on. The certificate's serial is derived from the clearance id, so a
+certificate found in a log anywhere leads back to one line of the tape.
+
+verified-by: tests/test_tower.py::TestTower::test_the_tower_reverifies_the_chain_and_the_proof_itself
+verified-by: tests/test_tower.py::TestTower::test_a_denied_decision_gets_no_clearance
+verified-by: tests/test_tower.py::TestTower::test_every_clearance_is_on_the_tape
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Optional
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+from taper.audit import AuditLog
+from taper.broker import Decision
+from taper.chain import ChainError, Token, verify
+from taper.pop import NonceCache, PopError, verify_proof
+
+from .ca import CA, Material
+
+
+class ClearanceRefused(Exception):
+    """The tower said no. The reason never repeats a forged claim."""
+
+
+@dataclass(frozen=True)
+class Clearance:
+    id: str
+    operation: str
+    role: str
+    subject: str
+    token: str               # the last block id, as the audit records it
+    serial: int
+    not_after: float
+
+
+@dataclass
+class Tower:
+    ca: CA
+    root_pub: Ed25519PublicKey
+    audit: AuditLog
+    clock: Callable[[], float] = time.time
+    revoked: set = field(default_factory=set)
+    nonces: NonceCache = field(default_factory=NonceCache)
+    # Material is handed out once and never kept. A clearance whose material
+    # was already taken cannot be taken again - one certificate, one
+    # connection, and nothing for a later caller to find.
+    _issued: dict = field(default_factory=dict, repr=False)
+
+    def clear(self, token_text: str, operation: str, request: dict,
+              proof: Optional[dict], decision: Decision, role: str) -> Clearance:
+        """Issue a clearance for one decision, or refuse.
+
+        `decision` is what the broker concluded. The tower does not take it on
+        trust: it verifies the chain and the proof again with its own state,
+        and checks that the decision it was handed is about the chain it just
+        verified. A mismatch on any of those is a refusal, and the refusal is
+        recorded before it is raised.
+        """
+        now = self.clock()
+        if not decision.allowed:
+            self._refuse("decision was not an allow", operation, decision, now)
+
+        try:
+            token = Token.deserialize(token_text)
+            verify(token, self.root_pub, revoked=self.revoked, now=now)
+        except (ChainError, ValueError, KeyError) as exc:
+            self._refuse(f"chain does not verify for the tower: {exc}", operation,
+                         decision, now)
+
+        try:
+            verify_proof(token.holder_public_key(), token_text, operation, request,
+                         proof, self.nonces, now=now)
+        except PopError as exc:
+            self._refuse(f"proof does not verify for the tower: {exc}", operation,
+                         decision, now)
+
+        ids = token.revocation_ids()
+        if decision.token_ids != ids:
+            self._refuse("decision is about a different chain", operation, decision, now)
+        if decision.subject != token.subject():
+            self._refuse("decision names a different subject", operation, decision, now)
+
+        clearance_id = hashlib.sha256(
+            f"{ids[-1]}|{operation}|{json.dumps(request, sort_keys=True)}|{now:.3f}"
+            .encode()).hexdigest()[:24]
+        material = self.ca.issue_client(role, token.subject(), clearance_id, now=now)
+        clearance = Clearance(clearance_id, operation, role, token.subject(),
+                              ids[-1], material.serial, material.not_after)
+        self._issued[clearance_id] = material
+        self.audit.append({
+            "t": round(now, 3),
+            "record": "clearance",
+            "clearance": clearance_id,
+            "operation": operation,
+            "role": role,
+            "subject": token.subject(),
+            "token": ids[-1],
+            "chain": ids,
+            "serial": str(material.serial),
+            "not_after": round(material.not_after, 3),
+            "issued_by": "tower:in-process",
+        })
+        return clearance
+
+    def take(self, clearance_id: str) -> Material:
+        """Hand over the material exactly once."""
+        try:
+            return self._issued.pop(clearance_id)
+        except KeyError:
+            raise ClearanceRefused(f"no material for clearance {clearance_id}: "
+                                   f"never issued, or already taken") from None
+
+    def _refuse(self, reason: str, operation: str, decision: Decision, now: float) -> None:
+        self.audit.append({
+            "t": round(now, 3),
+            "record": "clearance",
+            "clearance": None,
+            "operation": operation,
+            "refused": reason,
+            "token": decision.token_ids[-1] if decision.token_ids else None,
+            "issued_by": "tower:in-process",
+        })
+        raise ClearanceRefused(reason)
