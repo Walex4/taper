@@ -3,7 +3,13 @@
 The first section is what `release.yml` attaches to the GitHub release, so it
 is written to be read on its own.
 
-## Unreleased
+## v0.2.1 — 2026-09-14
+
+What came of asking "what if the tower is wrong?" A wrong clearance was
+already small — one operation, sixty seconds — and never overrode the target.
+This release closes the two places where the runway could not speak: a
+target with no invariants function now fails closed when required, and the
+runway reports occupied. Still unaudited.
 
 - **Silence fails closed.** `TAPER_REQUIRE_INVARIANTS=1` on `taper broker`
   or `taper serve` refuses a write to any target that has no
