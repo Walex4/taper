@@ -3,7 +3,10 @@
 The first section is what `release.yml` attaches to the GitHub release, so it
 is written to be read on its own.
 
-## Unreleased
+## v0.1.3 — 2026-09-14
+
+One change, and the design document's answer to the best argument anyone
+has made about this class of tool. Still unaudited.
 
 - The target gets a say before a write. Before `pg.migrate`, or a write
   through `pg.query`, the executor calls `taper.invariants(schema, table)` on
