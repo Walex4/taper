@@ -3,6 +3,25 @@
 The first section is what `release.yml` attaches to the GitHub release, so it
 is written to be read on its own.
 
+## Unreleased
+
+- The target gets a say before a write. Before `pg.migrate`, or a write
+  through `pg.query`, the executor calls `taper.invariants(schema, table)` on
+  the database, a function the database owns, and proceeds only if the
+  grant's new `invariants` constraint names every invariant the target
+  raises. An unnamed one stops the write before it happens, with the
+  target's own words quoted back. Absent means none may be overridden; a
+  wildcard never overrides anything. A target without the function declares
+  nothing, and the audit's result record says `declared: false` rather than
+  letting silence pass for consent. `taper audit --refusals` counts these
+  under their own heading, separate from policy, and `check_postgres.py`
+  verifies the agent role can call the function and does not own it. The
+  demo seed installs one that raises `production` for every production table
+  and `no_recent_backup` when `production.backup_log` is stale; the demo
+  policy names the first and not the second. After Christian Posta's "APIs
+  for Probabilistic Callers"; DESIGN.md §"The target speaks" says which half
+  of his model this is and why the other half was left out.
+
 ## v0.1.2 — 2026-09-13
 
 The release after the first outside review. The elhaz maintainer's fourth

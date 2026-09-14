@@ -323,6 +323,12 @@ def policy_pressure(caps: dict[str, dict[str, Constraint]],
         fields = caps[op]
         for field in sorted(fields):
             if isinstance(fields[field], Any_):
+                if field == "invariants":
+                    lines.append(f"{op}.invariants is `any`: a wildcard never "
+                                 f"overrides a target's invariant, so this "
+                                 f"grant will be refused by any target that "
+                                 f"raises one. Name the invariants instead.")
+                    continue
                 lines.append(f"{op}.{field} is `any`: every value is permitted. "
                              f"Narrow it (one_of, prefix, range, subset) "
                              f"unless this really is the root grant.")

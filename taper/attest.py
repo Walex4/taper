@@ -45,6 +45,7 @@ from typing import Any, Optional
 BROKER_ARGV = "broker:argv"
 TARGET_SHIM_ALLOWLIST = "target:shim-allowlist"
 KERNEL_LANDLOCK = "kernel:landlock"
+TARGET_INVARIANTS = "target:invariants"
 
 
 def shim_report(result: Any) -> Optional[dict]:
@@ -87,6 +88,13 @@ def confirmed_layers(plan: Any, result: Any) -> list[str]:
     if getattr(plan, "kind", None) == "process" and isinstance(argv, list) and argv \
             and all(isinstance(a, str) for a in argv):
         layers.append(BROKER_ARGV)
+
+    # A target that answered the invariants probe reported on itself - that is
+    # the resource's own context in the decision, and only a target that has
+    # the function counts. "Asked, and it had nothing to say" is not a layer.
+    inv = getattr(result, "invariants", None)
+    if isinstance(inv, dict) and inv.get("declared"):
+        layers.append(TARGET_INVARIANTS)
 
     report = shim_report(result)
     if report is not None:

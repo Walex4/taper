@@ -1244,7 +1244,7 @@ class TestRefusals:
         s = summarize_refusals(broker.audit.read())
         assert (s["decisions"], s["allowed"], s["refused"]) == (12, 1, 11)
         assert s["buckets"] == {"identity": 3, "schema": 2, "attack-shaped": 2,
-                                "policy": 4, "other": 0}
+                                "policy": 4, "invariant": 0, "other": 0}
         host = s["policy"][("ssh.exec", "host")]
         assert host["count"] == 2 and host["wanted"] == {"'prod-db.internal'": 2}
         assert s["policy"][("pg.query", "(operation)")]["count"] == 1
@@ -1398,3 +1398,195 @@ class TestDescribeGrant:
         sql, params = [e for e in executed if "pg_class" in e[0]][0]
         assert params == ("staging", "orders")
         assert "staging" not in sql
+
+
+class TestInvariants:
+    """Resources bring invariant context. The broker asks before it writes.
+
+    Every test here runs the real adapter plan through the real executor
+    against a fake psycopg that plays the target: it answers the exists-probe,
+    answers the invariants function, and records whether the write statement
+    was ever executed. The claim under test is that a raised invariant the
+    grant does not name stops the write before it happens, and that nothing
+    the agent can say changes that.
+    """
+
+    def _target(self, declared, raised):
+        """A fake target. `raised` is what taper.invariants() returns."""
+        import types
+        executed = []
+
+        class Cursor:
+            description = None
+            rowcount = 1
+            _last = None
+
+            def execute(self, sql, params=None):
+                executed.append((sql, params))
+                self._last = sql
+
+            def fetchone(self):
+                if "to_regprocedure" in self._last:
+                    return ("taper.invariants(text,text)",) if declared else (None,)
+                if "taper.invariants(" in self._last:
+                    return (json.dumps(raised),)
+                return None
+
+            def fetchmany(self, n): return []
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        class Conn:
+            def cursor(self): return Cursor()
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        fake = types.ModuleType("psycopg")
+        fake.connect = lambda dsn, connect_timeout=None: Conn()
+        return fake, executed
+
+    def _run(self, grant, declared=True, raised=(), op="pg.migrate"):
+        import sys
+        from taper.adapters import PostgresAdapter, PostgresMigrateAdapter
+        from taper.execute import Executor
+        from taper.secrets import ChainProvider
+        if op == "pg.migrate":
+            plan = PostgresMigrateAdapter().plan(
+                {"database": "pocketos", "table": "production.orders",
+                 "column": "currency", "type": "text"}, grant)
+        else:
+            plan = PostgresAdapter().plan(
+                {"database": "pocketos", "statement":
+                 "UPDATE production.orders SET currency = 'USD'"}, grant)
+        fake, executed = self._target(declared, list(raised))
+        real = sys.modules.get("psycopg")
+        sys.modules["psycopg"] = fake
+        try:
+            class Fixed:
+                def get(self, ref): return "postgresql://u@h/db"
+            result = Executor(ChainProvider(Fixed())).run(plan)
+        finally:
+            if real is not None:
+                sys.modules["psycopg"] = real
+            else:
+                del sys.modules["psycopg"]
+        wrote = any("taper_add_column" in sql or sql.startswith("UPDATE")
+                    for sql, _ in executed)
+        return result, wrote, executed
+
+    NO_BACKUP = {"name": "no_recent_backup", "detail": "last backup 2026-09-09"}
+    PROD = {"name": "production", "detail": "production schema"}
+
+    def test_a_raised_invariant_the_grant_does_not_name_refuses_before_the_write(self):
+        result, wrote, _ = self._run({}, raised=[self.NO_BACKUP])
+        assert not result.ok and result.exit_code == 3
+        assert not wrote, "the write ran despite the target's objection"
+        assert "no_recent_backup" in result.stderr and "last backup 2026-09-09" in result.stderr
+        assert result.invariants["refused"][0]["name"] == "no_recent_backup"
+        assert result.invariants["refused"][0]["subject"] == "production.orders"
+
+    def test_a_named_invariant_is_overridden_and_the_write_proceeds(self):
+        result, wrote, _ = self._run({"invariants": OneOf(["production"])},
+                                     raised=[self.PROD])
+        assert result.ok and wrote
+        assert result.invariants["overridden"][0]["name"] == "production"
+        assert result.invariants["refused"] == []
+
+    def test_naming_one_does_not_override_another(self):
+        result, wrote, _ = self._run({"invariants": OneOf(["production"])},
+                                     raised=[self.PROD, self.NO_BACKUP])
+        assert not result.ok and not wrote
+        assert [i["name"] for i in result.invariants["overridden"]] == ["production"]
+        assert [i["name"] for i in result.invariants["refused"]] == ["no_recent_backup"]
+
+    def test_a_wildcard_never_overrides(self):
+        """`any` on invariants is refused, not honoured. The point of the field
+        is that the operator wrote the name down; a wildcard is the absence
+        of that, dressed as its opposite."""
+        result, wrote, _ = self._run({"invariants": Any_()}, raised=[self.PROD])
+        assert not result.ok and not wrote
+        assert "wildcard" in result.stderr
+
+    def test_a_subset_names_work_too(self):
+        result, wrote, _ = self._run({"invariants": Subset(["production"])},
+                                     raised=[self.PROD])
+        assert result.ok and wrote
+
+    def test_a_target_with_no_function_declares_none(self):
+        """No function: the target was asked and had nothing to say. The write
+        proceeds, and the record says `declared: False` so nobody mistakes
+        silence for consent."""
+        result, wrote, executed = self._run({}, declared=False, raised=[self.NO_BACKUP])
+        assert result.ok and wrote
+        assert result.invariants == {"declared": False, "raised": [],
+                                     "overridden": [], "refused": []}
+        assert not any("taper.invariants(" in sql for sql, _ in executed)
+
+    def test_the_probe_binds_the_table_and_never_the_agents_text(self):
+        _, _, executed = self._run({}, raised=[])
+        probes = [(sql, params) for sql, params in executed if "taper.invariants(" in sql]
+        assert probes == [("SELECT taper.invariants(%s, %s)", ("production", "orders"))]
+
+    def test_a_read_asks_nothing(self):
+        from taper.adapters import PostgresAdapter
+        plan = PostgresAdapter().plan(
+            {"database": "pocketos", "statement": "SELECT * FROM production.orders"}, {})
+        assert "invariants" not in plan.detail
+
+    def test_a_write_through_pg_query_asks_for_every_table(self):
+        from taper.adapters import PostgresAdapter
+        plan = PostgresAdapter().plan(
+            {"database": "pocketos",
+             "statement": "UPDATE production.orders SET x = 1 FROM staging.orders"}, {})
+        assert plan.detail["invariants"]["subjects"] == [["production", "orders"],
+                                                          ["staging", "orders"]]
+        result, wrote, _ = self._run({}, raised=[self.NO_BACKUP], op="pg.query")
+        assert not result.ok and not wrote
+
+    def test_a_malformed_invariant_is_not_a_permission(self):
+        """The function returning junk must not be read as "nothing raised"
+        on one hand or crash the broker on the other. Junk is skipped; a
+        well-formed entry beside it still counts."""
+        result, wrote, _ = self._run({}, raised=["x", {"detail": "no name"}, self.PROD])
+        assert not result.ok and not wrote
+        assert [i["name"] for i in result.invariants["refused"]] == ["production"]
+
+    def test_the_result_record_and_attestation_carry_it(self, broker, root, tmp_path):
+        from taper.attest import TARGET_INVARIANTS, confirmed_layers
+        from taper.execute import Result
+        result = Result(False, 3, "", "refused", invariants={
+            "declared": True, "raised": [self.NO_BACKUP], "overridden": [],
+            "refused": [dict(self.NO_BACKUP, subject="production.orders")]})
+        assert TARGET_INVARIANTS in confirmed_layers(None, result)
+        assert TARGET_INVARIANTS not in confirmed_layers(
+            None, Result(True, 0, "", "", invariants={"declared": False, "raised": [],
+                                                       "overridden": [], "refused": []}))
+        from taper.broker import Decision
+        broker.record_result(Decision(True, "ok", "pg.migrate", {}), result)
+        record = list(broker.audit.read())[-1]["body"]
+        assert record["record"] == "result"
+        assert record["invariants"]["refused"][0]["name"] == "no_recent_backup"
+        assert TARGET_INVARIANTS in record["enforced_by"]
+
+    def test_the_refusals_report_has_its_own_bucket(self, broker, root, broad_caps):
+        from taper.audit import INVARIANT, summarize_refusals
+        from taper.broker import Decision
+        from taper.execute import Result
+        token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
+        decide(broker, token, "ssh.exec", {"host": "prod-db.internal", "program": "git"})
+        for _ in range(2):
+            broker.record_result(
+                Decision(True, "ok", "pg.migrate", {}),
+                Result(False, 3, "", "refused", invariants={
+                    "declared": True, "raised": [], "overridden": [],
+                    "refused": [dict(self.NO_BACKUP, subject="production.orders")]}))
+        s = summarize_refusals(broker.audit.read())
+        assert s["buckets"]["policy"] == 1 and s["buckets"][INVARIANT] == 2
+        assert s["refused"] == 3
+        assert s["invariants"][("pg.migrate", "no_recent_backup")] == {
+            "count": 2, "subjects": {"production.orders": 2}}
+
+    def test_a_wildcard_on_invariants_is_called_out_at_grant_time(self):
+        lines = policy_pressure(caps_from_json(
+            {"pg.migrate": {"invariants": {"kind": "any"}}}), {"pg.migrate": []})
+        assert len(lines) == 1 and "never overrides" in lines[0]

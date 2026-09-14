@@ -163,6 +163,52 @@ def tables(statement: str) -> set[str]:
     return {m.group(1).lower() for m in _TABLES.finditer(statement)}
 
 
+# ------------------------------------------------------------- invariants
+#
+# "Agents bring goal context. Resources bring invariant context. You need both
+# for enforcement." - Christian Posta, "APIs for Probabilistic Callers", Aug
+# 2026. A token can be perfectly scoped and the action still wrong, because
+# the token knows what CLASS of action is allowed and only the resource knows
+# whether THIS one is safe now: no backup since Tuesday, three views depend on
+# it, somebody marked it protected an hour ago.
+#
+# So before either write path runs, the executor asks the target. The target
+# answers through one function it owns - taper.invariants(schema, table),
+# returning a JSON list of {"name", "detail"} - and the broker proceeds only if
+# the grant names every invariant the target raised, by name, in an
+# `invariants` constraint. Absent means none may be overridden. A wildcard is
+# refused outright: `any` never overrides an invariant, because the entire
+# point is that the operator wrote the name down.
+#
+# A target with no such function declares no invariants, and the audit log
+# says so. This is the layer-2 rule again: the broker asks, the resource
+# decides, and the broker cannot be talked out of the answer by the agent.
+#
+# verified-by: tests/test_taper.py::TestInvariants::test_a_raised_invariant_the_grant_does_not_name_refuses_before_the_write
+# verified-by: tests/test_taper.py::TestInvariants::test_a_wildcard_never_overrides
+# verified-by: tests/test_taper.py::TestInvariants::test_a_target_with_no_function_declares_none
+
+INVARIANTS_FUNCTION = "taper.invariants"
+
+
+def invariants_probe(subjects: list[tuple[str, str]], grant: dict) -> dict:
+    """The probe the executor runs before a write, and what may override it.
+
+    `subjects` is every (schema, table) the operation touches. The override
+    is the grant's `invariants` constraint, serialized so the plan stays a
+    plain, loggable object; None means the grant names nothing.
+    """
+    override = grant.get("invariants")
+    return {
+        "function": INVARIANTS_FUNCTION,
+        "exists_text": "SELECT to_regprocedure(%s)",
+        "exists_params": [f"{INVARIANTS_FUNCTION}(text, text)"],
+        "probe_text": f"SELECT {INVARIANTS_FUNCTION}(%s, %s)",
+        "subjects": [list(pair) for pair in subjects],
+        "override": override.to_json() if override is not None else None,
+    }
+
+
 class PostgresAdapter(Adapter):
     operation = "pg.query"
 
@@ -187,10 +233,7 @@ class PostgresAdapter(Adapter):
         kind = classify(statement)
         touched = tables(statement)
 
-        return ExecPlan(
-            kind="sql",
-            secret_refs={"dsn": self.dsn_ref},
-            detail={
+        detail = {
                 "database": request["database"],
                 "statement_kind": kind,
                 "tables": sorted(touched),
@@ -206,8 +249,13 @@ class PostgresAdapter(Adapter):
                 },
                 "boundary": "postgres:role+grant+force-rls",
                 "this_parse_is_not_the_boundary": True,
-            },
-        )
+        }
+        if kind != "select":
+            # A read changes nothing, so no invariant can be violated by it.
+            # Anything else asks the target first.
+            detail["invariants"] = invariants_probe(
+                [tuple(t.partition(".")[::2]) for t in sorted(touched)], grant)
+        return ExecPlan(kind="sql", secret_refs={"dsn": self.dsn_ref}, detail=detail)
 
 
 class PostgresMigrateAdapter(Adapter):
@@ -277,6 +325,7 @@ class PostgresMigrateAdapter(Adapter):
                 },
                 "boundary": "postgres:security-definer-function",
                 "this_parse_is_not_the_boundary": True,
+                "invariants": invariants_probe([(schema, table)], grant),
             },
         )
 

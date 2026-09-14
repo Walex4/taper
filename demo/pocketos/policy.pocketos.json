@@ -1,5 +1,5 @@
 {
-  "note": "pocketos incident demo - read both schemas (rows through pg.query, shape through pg.describe), add columns to production.orders through pg.migrate, nothing else. SELECT is backstopped by the server: taper_agent is not the owner, holds explicit GRANTs, and cannot ALTER anything. DDL does not go through pg.query at all - Postgres refuses it for want of ownership - it goes through production.taper_add_column, a SECURITY DEFINER function with its own allowlist. Three narrowings that must agree: the operation's fields, this token, and the function.",
+  "note": "pocketos incident demo - read both schemas (rows through pg.query, shape through pg.describe), add columns to production.orders through pg.migrate, nothing else. SELECT is backstopped by the server: taper_agent is not the owner, holds explicit GRANTs, and cannot ALTER anything. DDL does not go through pg.query at all - Postgres refuses it for want of ownership - it goes through production.taper_add_column, a SECURITY DEFINER function with its own allowlist. Three narrowings that must agree: the operation's fields, this token, and the function. The target also carries its own invariants (taper.invariants): pg.migrate names `production` so the write proceeds, and does not name `no_recent_backup`, so a stale backup_log stops it with the reason quoted back.",
   "capabilities": {
     "pg.query": {
       "database": {
@@ -79,6 +79,12 @@
           "date",
           "uuid",
           "jsonb"
+        ]
+      },
+      "invariants": {
+        "kind": "one_of",
+        "values": [
+          "production"
         ]
       }
     }

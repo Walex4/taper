@@ -199,6 +199,48 @@ def main() -> int:
     except Exception as exc:                           # noqa: BLE001
         print(f"  {YELLOW}! could not read role attributes: {exc}{OFF}")
 
+    # Resource-owned invariants: does this target carry its own context, and
+    # can the agent role ask for it without being able to change it? Neither
+    # is required - a target without the function simply declares nothing,
+    # and the broker records that - so this section informs rather than fails,
+    # except for the one thing that must hold if the function exists: the
+    # agent must not be its owner, or it could rewrite its own objections.
+    print(f"\n{BOLD}Resource-owned invariants{OFF}\n" + "─" * 60)
+    try:
+        with psycopg.connect(dsn, connect_timeout=10) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT to_regprocedure('taper.invariants(text,text)')")
+                declared = cur.fetchone()[0] is not None
+                if not declared:
+                    print(f"  {DIM}- taper.invariants(text,text) not present: this "
+                          f"target declares no invariants{OFF}")
+                else:
+                    cur.execute("""
+                        SELECT has_function_privilege(current_user,
+                                   'taper.invariants(text,text)', 'execute'),
+                               pg_get_userbyid(p.proowner) = current_user
+                        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                        WHERE n.nspname = 'taper' AND p.proname = 'invariants'
+                    """)
+                    can_exec, owns = cur.fetchone()
+                    if can_exec:
+                        passed += 1
+                        print(f"  {GREEN}✓{OFF} taper.invariants present and the agent may ask")
+                    else:
+                        failures.append("taper.invariants not executable by the agent")
+                        print(f"  {RED}✗ taper.invariants present but the agent cannot "
+                              f"call it - every write will be refused for the wrong "
+                              f"reason{OFF}")
+                    if owns:
+                        failures.append("agent owns taper.invariants")
+                        print(f"  {RED}✗ the agent role OWNS taper.invariants and could "
+                              f"rewrite its own objections{OFF}")
+                    else:
+                        passed += 1
+                        print(f"  {GREEN}✓{OFF} the agent does not own it")
+    except Exception as exc:                           # noqa: BLE001
+        print(f"  {YELLOW}! could not probe invariants: {exc}{OFF}")
+
     print("\n" + "═" * 60)
     if failures:
         print(f"{RED}{BOLD}FAIL{OFF}  {len(failures)} problems:")

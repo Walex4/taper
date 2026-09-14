@@ -511,6 +511,22 @@ cover, and the report cannot tell you which. In the twenty-run demo it shows
 three `ssh.exec.program` refusals wanting `psql` — the agents looking for a
 table's shape, which `SELECT` does not give and `pg.describe` now does.
 
+**The target gets a say.** A token can be exactly right and the write still
+wrong, because only the database knows whether *this* table has a backup
+from this morning or three views hanging off it. So before `pg.migrate` or a
+write through `pg.query` runs, the broker calls a function the database owns,
+`taper.invariants(schema, table)`, and proceeds only if the grant names every
+invariant it raises — by name, in an `invariants` constraint; a wildcard never
+counts. An unnamed one stops the write with the target's words quoted back,
+and `taper audit --refusals` reports it under its own heading, because "read
+what the target said" is a different answer from "widen the grant". A target
+without the function declares nothing and the log says so. The demo's
+function raises `production` (which the policy names) and `no_recent_backup`
+when `production.backup_log` is stale (which it does not) — delete the seed's
+backup row and watch the migration stop. The idea is Christian Posta's,
+["APIs for Probabilistic Callers"](https://blog.christianposta.com/apis-for-probabilistic-callers/);
+DESIGN.md says what was taken and what was left.
+
 Those are the single-uid shapes. Once the broker runs as its own user the root
 key is in its vault and `taper grant` above stops working from your uid — the
 mint becomes two steps, and `taper doctor` prints them for the machine it is
@@ -555,7 +571,7 @@ Four layers, and they check different things:
 
 | Command | Checks | Needs |
 |---|---|---|
-| `pytest` | the code does what you meant — 250 tests | nothing |
+| `pytest` | the code does what you meant — 240 tests | nothing |
 | `python validate/redteam.py` | the system refuses what someone *else* meant — 68 attacks | nothing |
 | `bash scripts/preflight.sh` | this machine can host a broker safely | nothing |
 | `python validate/check_postgres.py <dsn>` | **the database refuses on its own** | a real Postgres |

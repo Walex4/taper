@@ -40,6 +40,13 @@ class Result:
     stdout: str
     stderr: str
     truncated: bool = False
+    # What the target said about itself before a write, if it was asked:
+    # {"declared": bool, "raised": [...], "overridden": [...], "refused": [...]}.
+    # None when the plan carried no probe. Goes into the audit's result record.
+    invariants: Optional[dict] = None
+
+
+REFUSED_BY_INVARIANT = 3      # exit code: the target's own context said no
 
 
 MAX_OUTPUT = 256 * 1024   # Agents do not need a 40MB log, and context is expensive.
@@ -161,6 +168,29 @@ class Executor:
                     for key, value in settings.items():
                         cur.execute("SELECT set_config(%s, %s, true)",
                                     (key, str(value)))
+                    # Ask the target about itself before writing to it. The
+                    # probe is a fixed statement naming a function the target
+                    # owns; the agent chose nothing here except which table,
+                    # and that as a bound parameter.
+                    # verified-by: tests/test_taper.py::TestInvariants::test_a_raised_invariant_the_grant_does_not_name_refuses_before_the_write
+                    probe = plan.detail.get("invariants")
+                    report = None
+                    if probe is not None:
+                        report = _ask_invariants(cur, probe)
+                        if report["refused"]:
+                            names = ", ".join(
+                                f"{i['name']} on {i['subject']} ({i['detail']})"
+                                if i.get("detail") else f"{i['name']} on {i['subject']}"
+                                for i in report["refused"])
+                            return Result(
+                                False, REFUSED_BY_INVARIANT, "",
+                                f"refused by the target's own invariants: {names}. "
+                                f"This grant does not permit proceeding under "
+                                f"{'them' if len(report['refused']) > 1 else 'it'}; "
+                                f"the `invariants` constraint must name "
+                                f"{'each' if len(report['refused']) > 1 else 'it'} "
+                                f"by name (a wildcard never does).",
+                                invariants=report)
                     # Bound, not interpolated. pg.migrate sends a fixed
                     # statement and a parameter list, so the table, column and
                     # type an agent named never become SQL text on the way here.
@@ -171,7 +201,8 @@ class Executor:
                     else:
                         cur.execute(statement, tuple(params))
                     if cur.description is None:
-                        return Result(True, 0, f"{cur.rowcount} rows affected", "")
+                        return Result(True, 0, f"{cur.rowcount} rows affected", "",
+                                      invariants=report)
                     rows = cur.fetchmany(max_rows)
                     columns = [d.name for d in cur.description]
                     body = json.dumps(
@@ -179,7 +210,7 @@ class Executor:
                          "truncated": cur.rowcount > max_rows},
                         default=str)
                     out, cut = _truncate(body)
-                    return Result(True, 0, out, "", cut)
+                    return Result(True, 0, out, "", cut, invariants=report)
         except Exception as exc:                       # noqa: BLE001
             # The database refused. That is the boundary doing its job — surface
             # it verbatim so the agent can adapt, and so the audit log records it.
@@ -212,6 +243,53 @@ class Executor:
             return Result(False, exc.code, text, str(exc))
         except Exception as exc:                       # noqa: BLE001
             return Result(False, -1, "", f"{type(exc).__name__}: {exc}")
+
+
+def _ask_invariants(cur, probe: dict) -> dict:
+    """Run the invariants probe and decide what the grant permits.
+
+    Returns {"declared", "raised", "overridden", "refused"}. A target without
+    the function declares nothing and raises nothing - that is recorded, not
+    hidden, so an operator can see the difference between "the resource had
+    no objection" and "the resource was never asked anything".
+
+    The override constraint is rebuilt from its JSON form and consulted by
+    name. Any_ is refused on purpose: a wildcard is what policy pressure pushes
+    toward, and an invariant that a wildcard can silence was never one.
+    verified-by: tests/test_taper.py::TestInvariants::test_a_wildcard_never_overrides
+    """
+    from .caps import Any_, from_json
+
+    cur.execute(probe["exists_text"], tuple(probe["exists_params"]))
+    row = cur.fetchone()
+    declared = bool(row and row[0] is not None)
+    report = {"declared": declared, "raised": [], "overridden": [], "refused": []}
+    if not declared:
+        return report
+
+    override = from_json(probe["override"]) if probe.get("override") else None
+    wildcard = isinstance(override, Any_)
+    for schema, table in probe["subjects"]:
+        cur.execute(probe["probe_text"], (schema, table))
+        row = cur.fetchone()
+        raised = row[0] if row else None
+        if isinstance(raised, str):
+            raised = json.loads(raised)
+        for item in raised or []:
+            if not isinstance(item, dict) or not item.get("name"):
+                continue                     # a malformed invariant is not a permission
+            entry = {"name": str(item["name"]), "detail": str(item.get("detail", "")),
+                     "subject": f"{schema}.{table}"}
+            report["raised"].append(entry)
+            # one_of checks a scalar; subset checks a set. Either shape is a
+            # reasonable way to write "these names", so accept both.
+            named = override is not None and not wildcard and (
+                override.allows(entry["name"]) or override.allows({entry["name"]}))
+            if named:
+                report["overridden"].append(entry)
+            else:
+                report["refused"].append(entry)
+    return report
 
 
 def _jsonable(value):

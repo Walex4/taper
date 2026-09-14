@@ -225,6 +225,7 @@ class Broker:
             "ok": bool(getattr(result, "ok", False)),
             "exit_code": getattr(result, "exit_code", None),
             "enforced_by": confirmed_layers(decision.plan, result),
+            "invariants": getattr(result, "invariants", None),
         })
 
     def revoke(self, revocation_id: str) -> None:

@@ -94,6 +94,7 @@ A reviewer's first question is "how is this not X?" for several values of X. Mos
 | **Tenuo** and — `draft-niyikiza-oauth-attenuating-agent-tokens-01`                       | Shipped in 2026: Ed25519 warrants with monotonic attenuation, proof-of-possession, depth and TTL monotonicity, and typed constraints. The IETF draft argues explicitly for replacing Biscuit's Datalog with deterministic typed constraint checking — which is Taper's exact design choice, published two months earlier by someone else.                        |
 | **Capability literature** — Miller/Yee/Shapiro; Capsicum; seL4                              | Monotonic rights reduction is old and well understood. The literature's actual lesson is that narrowing is the *easy* half; the hard properties are no-ambient-authority and designation-carries-authority.                                                                                                                                                      |
 | **Credential brokers** — Secretless Broker; Gravitee; agentgateway                          | "The principal never holds the secret; something on the path attaches it" is an established pattern with shipping implementations, including agent-specific ones released in 2026.                                                                                                                                                                               |
+| **"APIs for Probabilistic Callers"** — Christian Posta, Aug 2026                            | Argues that a correctly scoped token is not enough: the token knows what class of action is permitted, and only the resource knows whether this one is safe now (backup state, dependents, ownership). Resources should carry their own invariants and refuse or challenge on them. Taper's layer 2 was already this argument for refusal; §"The target speaks" is the challenge half, built after reading it.                                    |
 | **OAuth token exchange** — RFC 8693; AWS session policies; GCP credential access boundaries | Intersection semantics at enormous scale. AWS: "the permissions for a session are the intersection of the identity-based policies and the session policies." The distinction is that every narrowing step is an online round-trip, and GCP explicitly does not allow chaining.                                                                                   |
 
 ### The honest summary
@@ -236,6 +237,18 @@ Two boundary tests were originally written as "this statement must error" and bo
 
 The general rule: an error is a proxy for the boundary holding. Effect is the boundary itself.
 
+### The target speaks
+
+A token can be exactly right and the action still wrong. `pg.migrate` on `production.orders` is a class of action; whether *this* migration is safe depends on things only the database knows at that moment — when it was last backed up, what depends on the table, whether someone marked it protected an hour ago. Posta's phrase for it is that agents bring goal context and resources bring invariant context, and enforcement needs both.
+
+So before either Postgres write path runs, the executor asks. The target answers through one function it owns, `taper.invariants(schema, table)`, returning a list of `{"name", "detail"}`. The broker proceeds only if the grant's `invariants` constraint names every raised invariant *by name*; an unnamed one stops the write before it happens, with the target's own words quoted back. Absent means none may be overridden. A wildcard is refused outright — `any` never silences an invariant, because the whole value of the field is that a person wrote the name down.
+
+Three properties follow. The agent has no voice in it: the probe is a fixed statement, the table name is a bound parameter, and nothing in the request can add, remove, or acknowledge an invariant — acknowledging is the grantor's act, done in advance, in the token. The target cannot be bypassed by the broker being wrong: the function is `SECURITY DEFINER`, owned by the schema owner, and the agent role may only call it. And silence is recorded, not assumed: a target without the function declares nothing, and the audit's result record says `declared: false`, so "the resource had no objection" and "the resource was never asked" are distinguishable afterwards. `taper audit --refusals` counts these separately from policy refusals, because the answer to one is "read what the target said" and the answer to the other is "reconsider the grant", and conflating them would push toward widening.
+
+What this is not: Posta's model also lets the resource *challenge* — return "confirm" and have a decision-maker answer live. Taper deliberately has no live confirmation, because the only party present at execution time is the agent, and an agent confirming its own override is a rubber stamp. The confirmation is the `invariants` constraint, written by a human, before the run. That is narrower than his model and it is the part of his model this design can honour without an escape hatch.
+
+verified-by: tests/test_taper.py::TestInvariants::test_a_raised_invariant_the_grant_does_not_name_refuses_before_the_write
+
 ## Trust boundaries
 
 Three layers. The design's central commitment is that the broker is never the only one.
@@ -243,7 +256,7 @@ Three layers. The design's central commitment is that the broker is never the on
 | Layer                     | Enforced by                                                                                        | Still holds if…                                          |
 |---------------------------|----------------------------------------------------------------------------------------------------|----------------------------------------------------------|
 | **1. Token and policy**   | The broker's constraint arithmetic                                                                 | …the agent is fully compromised                          |
-| **2. The target refuses** | sshd's `force-command` plus a root-owned shim allowlist, and a Landlock ruleset the shim applies to itself before exec; PostgreSQL role privileges and forced RLS | …the broker is compromised and issues arbitrary requests |
+| **2. The target refuses** | sshd's `force-command` plus a root-owned shim allowlist, and a Landlock ruleset the shim applies to itself before exec; PostgreSQL role privileges and forced RLS; and, for writes, the target's own `taper.invariants` function, which the broker consults and cannot argue with | …the broker is compromised and issues arbitrary requests |
 | **3. The kernel**         | Separate uid, 0700 vault, 0660 socket, `SO_PEERCRED`                                               | …the agent has a shell as its own user                   |
 
 Layer 2's kernel ruleset is built from the `landlock` block in the target's own allowlist — `execute`, `read` and `read_write` lists of absolute paths — and covers the shim and, by inheritance, the program it execs. The path count in the response (`applied(abi=7, paths=4)`) is the number of distinct paths that block names, so a target that has been given a wider ruleset than intended says so in every reply rather than only in a file on that host. `scripts/install-shim.sh` is the deploy step and fails the install if the allowlist has no such block; without one the shim runs the program unconfined and reports `not_configured`.
@@ -260,7 +273,7 @@ Operations name classes, not object handles
 
 \[architectural\]
 
-`ssh.exec` with a host constraint is a permission class. The capability literature's actual fix for the confused deputy is that the capability *is* the designation of a specific object. Closing this would mean issuing handles to concrete targets rather than constraints over target names — a real change, and the one that would make §3's architectural claim true rather than aspirational.
+`ssh.exec` with a host constraint is a permission class. The capability literature's actual fix for the confused deputy is that the capability *is* the designation of a specific object. Closing this would mean issuing handles to concrete targets rather than constraints over target names — a real change, and the one that would make §3's architectural claim true rather than aspirational. The invariants probe (§"The target speaks") narrows the gap from the other side — the object gets a say about itself at execution time — without closing it: the token still names a class, and only the Postgres adapters ask.
 
 The policy file is agent-writable
 

@@ -80,3 +80,62 @@ REVOKE ALL ON FUNCTION production.taper_add_column(text, text, text, text, text,
     FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION production.taper_add_column(text, text, text, text, text, boolean)
     TO taper_agent;
+
+-- ---------------------------------------------------------------- invariants
+--
+-- "Agents bring goal context. Resources bring invariant context." The token
+-- knows which class of action is permitted; only the database knows whether
+-- this one is safe right now. So the database gets to say. Before either
+-- write path runs, the broker calls taper.invariants(schema, table) and
+-- proceeds only if the grant names, by name, every invariant it raises.
+--
+-- Two invariants here, chosen to show the two outcomes. `production` is raised
+-- for every production table; the demo policy names it in pg.migrate's
+-- `invariants`, so the migration proceeds and the audit log records that the
+-- operator overrode it on purpose. `no_recent_backup` is raised when the newest
+-- row in production.backup_log is older than a day; the policy does not name
+-- it, so a stale backup stops the migration with the reason quoted back -
+-- which is the PocketOS shape exactly, caught by the resource rather than the
+-- agent. The seed writes a fresh backup_log row so the demo runs; delete it
+-- to watch the refusal.
+--
+-- SECURITY DEFINER for the same reason as taper_add_column: the function
+-- reads what the agent role cannot, and the agent role may only ask.
+
+CREATE SCHEMA IF NOT EXISTS taper;
+GRANT USAGE ON SCHEMA taper TO taper_agent;
+
+CREATE TABLE IF NOT EXISTS production.backup_log (
+    taken_at   timestamptz NOT NULL DEFAULT now(),
+    note       text
+);
+INSERT INTO production.backup_log (note) VALUES ('seed: fresh backup for the demo');
+
+CREATE OR REPLACE FUNCTION taper.invariants(p_schema text, p_table text)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+STABLE
+SET search_path = pg_catalog, pg_temp
+AS $taper$
+DECLARE
+    v_out    jsonb := '[]'::jsonb;
+    v_latest timestamptz;
+BEGIN
+    IF lower(p_schema) = 'production' THEN
+        v_out := v_out || jsonb_build_object(
+            'name', 'production',
+            'detail', 'production schema; a grant must name this to write here');
+        SELECT max(taken_at) INTO v_latest FROM production.backup_log;
+        IF v_latest IS NULL OR v_latest < now() - interval '1 day' THEN
+            v_out := v_out || jsonb_build_object(
+                'name', 'no_recent_backup',
+                'detail', 'last backup ' || coalesce(v_latest::text, 'never'));
+        END IF;
+    END IF;
+    RETURN v_out;
+END;
+$taper$;
+
+REVOKE ALL ON FUNCTION taper.invariants(text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION taper.invariants(text, text) TO taper_agent;

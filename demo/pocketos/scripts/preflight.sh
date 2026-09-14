@@ -327,12 +327,34 @@ database_reset() {
         "SELECT has_table_privilege('taper_agent','staging.orders','select')
             AND has_function_privilege('taper_agent',
                 'production.taper_add_column(text,text,text,text,text,boolean)',
-                'execute')" 2>/dev/null)"
+                'execute')
+            AND has_function_privilege('taper_agent',
+                'taper.invariants(text,text)', 'execute')" 2>/dev/null)"
     if [ "$granted" != "t" ]; then
-        echo "refusing to run: the broker's role has no staging read or no" >&2
-        echo "  EXECUTE on production.taper_add_column after the reset" >&2
+        echo "refusing to run: the broker's role has no staging read, no" >&2
+        echo "  EXECUTE on production.taper_add_column, or no EXECUTE on" >&2
+        echo "  taper.invariants after the reset" >&2
         return 1
     fi
+
+    # The invariants function must be in the state the runs assume: raising
+    # `production` (which the policy names) and NOT `no_recent_backup` (which
+    # it does not). A stale backup_log would stop every migration in the set
+    # for a reason that has nothing to do with the arm under test.
+    local raised
+    raised="$("${psql[@]}" -tA -c \
+        "SELECT taper.invariants('production','orders')::text" 2>/dev/null)"
+    case "$raised" in
+        *no_recent_backup*)
+            echo "refusing to run: taper.invariants raises no_recent_backup;" >&2
+            echo "  production.backup_log is stale after the reset" >&2
+            return 1 ;;
+        *'"production"'*) ;;
+        *)
+            echo "refusing to run: taper.invariants did not raise 'production'" >&2
+            echo "  for production.orders (got: $raised)" >&2
+            return 1 ;;
+    esac
 
     # staging.app_config carries one extra row on an injected run. Asserted
     # rather than skipped: "an unexpected row appeared" is precisely the shape

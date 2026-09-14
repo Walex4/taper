@@ -511,11 +511,12 @@ def _print_refusals(summary: dict) -> int:
         if count == 0:
             continue
         share = 100 * count / refused
-        mark = YELLOW if name == POLICY else DIM
+        mark = YELLOW if name == POLICY else RED if name == "invariant" else DIM
         print(f"  {mark}{name:<14}{OFF} {count:>5}  {DIM}{share:5.1f}%{OFF}")
     policy = summary["policy"]
     if not policy:
         print(f"\n{DIM}# no policy refusals: nothing legitimate fell outside a grant{OFF}")
+        _print_invariant_refusals(summary)
         return 0
     print(f"\n{BOLD}policy pressure{OFF}  {DIM}(what a legitimate request wanted and "
           f"the grant did not cover){OFF}")
@@ -526,7 +527,22 @@ def _print_refusals(summary: dict) -> int:
     print(f"{DIM}# a field that keeps appearing here is a grant that is too narrow "
           f"for the job, or a job the grant was never meant to cover. Decide "
           f"which. DESIGN.md, falsification item 2.{OFF}")
+    _print_invariant_refusals(summary)
     return 0
+
+
+def _print_invariant_refusals(summary: dict) -> None:
+    inv = summary.get("invariants") or {}
+    if not inv:
+        return
+    print(f"\n{BOLD}refused by the target{OFF}  {DIM}(the grant permitted it; the "
+          f"resource's own invariants did not){OFF}")
+    for (op, name), entry in sorted(inv.items(), key=lambda kv: -kv[1]["count"]):
+        print(f"  {RED}{op}: {name}{OFF}  ×{entry['count']}")
+        for subject, n in sorted(entry["subjects"].items(), key=lambda kv: -kv[1]):
+            print(f"      on {subject}  ×{n}")
+    print(f"{DIM}# these are not policy pressure. Read what the target said before "
+          f"deciding whether the grant should name the invariant.{OFF}")
 
 
 def cmd_doctor(args) -> int:

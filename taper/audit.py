@@ -80,9 +80,10 @@ IDENTITY = "identity"        # chain, proof, expiry, revocation: not the holder
 SCHEMA = "schema"            # malformed request: unknown field, wrong type
 ATTACK = "attack-shaped"     # well-formed, but the statement itself is hostile
 POLICY = "policy"            # well-formed, legitimate shape, outside the grant
+INVARIANT = "invariant"      # permitted by the grant; the target itself said no
 OTHER = "other"
 
-BUCKETS = (IDENTITY, SCHEMA, ATTACK, POLICY, OTHER)
+BUCKETS = (IDENTITY, SCHEMA, ATTACK, POLICY, INVARIANT, OTHER)
 
 # classify() returns these for statements no policy should ever permit; a
 # denial on them is the classifier working, not the grant being narrow.
@@ -129,12 +130,28 @@ def summarize_refusals(records: "Iterator[dict] | list[dict]") -> dict:
     all wanting staging.orders are one gap in one grant, not three incidents.
 
     verified-by: tests/test_taper.py::TestRefusals::test_summary_counts_and_groups_policy_denials
+    verified-by: tests/test_taper.py::TestInvariants::test_the_refusals_report_has_its_own_bucket
     """
     counts = {name: 0 for name in BUCKETS}
     policy: dict[tuple[str, str], dict] = {}
+    invariants: dict[tuple[str, str], dict] = {}
     total = allowed = 0
     for record in records:
         body = record.get("body", record)
+        if body.get("record") == "result":
+            # A write the grant permitted and the target then refused, on its
+            # own context. Counted separately from policy on purpose: the
+            # answer to this one is not "widen the grant", it is "read what
+            # the resource said".
+            inv = body.get("invariants") or {}
+            for item in inv.get("refused") or []:
+                counts[INVARIANT] += 1
+                key = (body.get("operation", "?"), item.get("name", "?"))
+                entry = invariants.setdefault(key, {"count": 0, "subjects": {}})
+                entry["count"] += 1
+                subject = item.get("subject", "?")
+                entry["subjects"][subject] = entry["subjects"].get(subject, 0) + 1
+            continue
         if body.get("record", "decision") != "decision":
             continue
         total += 1
@@ -159,5 +176,6 @@ def summarize_refusals(records: "Iterator[dict] | list[dict]") -> dict:
         entry = policy.setdefault(key, {"count": 0, "wanted": {}})
         entry["count"] += 1
         entry["wanted"][wanted] = entry["wanted"].get(wanted, 0) + 1
-    return {"decisions": total, "allowed": allowed, "refused": total - allowed,
-            "buckets": counts, "policy": policy}
+    return {"decisions": total, "allowed": allowed,
+            "refused": total - allowed + counts[INVARIANT],
+            "buckets": counts, "policy": policy, "invariants": invariants}
