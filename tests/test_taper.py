@@ -22,7 +22,7 @@ from taper.caps import (
     intersect, subsumes,
 )
 from taper.caps import policy_pressure
-from taper.chain import MAX_DEPTH, ChainError, Token, verify
+from taper.chain import MAX_DEPTH, ChainError, Token, _b64, _unb64, verify
 from taper.pop import NonceCache, PopError, canonical, prove, verify_proof
 
 NOW = 1_756_000_000.0
@@ -1590,3 +1590,109 @@ class TestInvariants:
         lines = policy_pressure(caps_from_json(
             {"pg.migrate": {"invariants": {"kind": "any"}}}), {"pg.migrate": []})
         assert len(lines) == 1 and "never overrides" in lines[0]
+
+
+class TestSubject:
+    """Who the authority acts for, carried by the token and unalterable.
+
+    Workload identity - the uid the kernel reports - says which process is
+    calling. The subject says who it is calling FOR. It lives in the root
+    block under the root signature; children inherit it by position; no
+    attenuation step can change, add, or drop it; and every audit record
+    names it. These tests are the attacks on that claim.
+    """
+
+    def test_the_subject_survives_every_attenuation_unchanged(self, root, broad_caps):
+        token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW,
+                            subject="alice@example.com")
+        assert token.subject() == "alice@example.com"
+        narrow = {"ssh.exec": {"host": OneOf(["build-1.internal"]),
+                               "program": OneOf(["git"]), "args": Subset(["status"])}}
+        child = token.attenuate(narrow, note="subagent", now=NOW)
+        grandchild = child.attenuate(narrow, note="sub-subagent", now=NOW)
+        for t in (token, child, grandchild):
+            assert t.subject() == "alice@example.com"
+            assert Token.deserialize(t.serialize()).subject() == "alice@example.com"
+            verify(t, root.public_key(), now=NOW)
+        # and the child blocks carry nothing of their own
+        assert all(b.subject == "" for b in grandchild.blocks[1:])
+
+    def test_a_child_block_may_not_carry_a_subject(self, root, broad_caps):
+        """A block that names its own subject is trying to say who it acts
+        for. Even when it agrees with the root, it is refused: the root is the
+        only place that claim may live, so there is never a second copy to
+        disagree with."""
+        token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW,
+                            subject="alice@example.com")
+        child = token.attenuate(broad_caps, now=NOW)
+        for claimed in ("mallory@example.com", "alice@example.com"):
+            data = json.loads(_unb64(child.serialize()))
+            data["b"][1]["sub"] = claimed
+            forged = Token.deserialize(_b64(json.dumps(data).encode()))
+            with pytest.raises(ChainError, match="carries a subject"):
+                verify(forged, root.public_key(), now=NOW)
+
+    def test_altering_the_root_subject_breaks_the_signature(self, root, broad_caps):
+        token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW,
+                            subject="alice@example.com")
+        child = token.attenuate(broad_caps, now=NOW)
+        for edit in ("mallory@example.com", ""):
+            data = json.loads(_unb64(child.serialize()))
+            if edit:
+                data["b"][0]["sub"] = edit
+            else:
+                del data["b"][0]["sub"]
+            forged = Token.deserialize(_b64(json.dumps(data).encode()))
+            with pytest.raises(ChainError, match="bad signature on block 0"):
+                verify(forged, root.public_key(), now=NOW)
+
+    def test_a_child_cannot_be_moved_under_a_root_with_another_subject(self, root, broad_caps):
+        alice = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW,
+                            subject="alice@example.com")
+        bob = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW,
+                          subject="bob@example.com")
+        alice_child = alice.attenuate(broad_caps, now=NOW)
+        spliced = Token(blocks=[bob.blocks[0], alice_child.blocks[1]])
+        with pytest.raises(ChainError, match="broken hash linkage"):
+            verify(spliced, root.public_key(), now=NOW)
+
+    def test_a_token_without_a_subject_still_verifies_and_says_so(self, root, broad_caps):
+        """Tokens minted before the field existed carry no `sub` key and
+        their signatures must still cover exactly the bytes they did."""
+        token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
+        assert token.subject() == ""
+        assert "sub" not in json.loads(_unb64(token.serialize()))["b"][0]
+        verify(token, root.public_key(), now=NOW)
+
+    def test_the_subject_is_one_line_and_bounded(self, root, broad_caps):
+        for bad in ("alice\nadmin", "x" * 257):
+            with pytest.raises(ChainError, match="one line"):
+                Token.issue(root, broad_caps, ttl_seconds=60, now=NOW, subject=bad)
+
+    def test_every_audit_record_names_the_subject(self, broker, root, broad_caps):
+        token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW,
+                            subject="alice@example.com")
+        child = token.attenuate({"ssh.exec": broad_caps["ssh.exec"]}, note="sub", now=NOW)
+        ok = decide(broker, child, "ssh.exec",
+                    {"host": "build-1.internal", "program": "git", "args": ["status"]})
+        assert ok.allowed and ok.subject == "alice@example.com"
+        denied = decide(broker, child, "ssh.exec",
+                        {"host": "prod-db.internal", "program": "git"})
+        assert not denied.allowed and denied.subject == "alice@example.com"
+        from taper.execute import Result
+        broker.record_result(ok, Result(True, 0, "", ""))
+        records = [r["body"] for r in broker.audit.read()]
+        assert [r["subject"] for r in records] == ["alice@example.com"] * 3
+        assert {r["record"] for r in records} == {"decision", "result"}
+
+    def test_a_rejected_chain_claims_no_subject(self, broker, root, broad_caps):
+        """If the chain does not verify, nothing it says about who it acts for
+        is repeated - a forged subject must not reach the log as fact."""
+        token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW,
+                            subject="alice@example.com")
+        data = json.loads(_unb64(token.serialize()))
+        data["b"][0]["sub"] = "ceo@example.com"
+        forged = _b64(json.dumps(data).encode())
+        d = broker.decide(forged, "ssh.exec", {"host": "build-1.internal", "program": "git"})
+        assert not d.allowed and d.subject == ""
+        assert list(broker.audit.read())[-1]["body"]["subject"] == ""

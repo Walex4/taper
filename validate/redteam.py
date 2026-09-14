@@ -354,6 +354,38 @@ def run(report: Report, tmp: Path) -> None:
         report.check(f"malformed token {junk[:12]!r}", not d.allowed)
 
     # ---------------------------------------------------------------------
+    section("7b. The subject — who the token acts for cannot be changed downstream")
+    import json as _json
+    from taper.chain import _b64 as _enc, _unb64 as _dec
+    alice = Token.issue(root, FULL, ttl_seconds=3600, now=NOW, subject="alice@example.com")
+    a_child = alice.attenuate(FULL, note="subagent", now=NOW)
+
+    def forged(tok, mutate):
+        data = _json.loads(_dec(tok.serialize()))
+        mutate(data)
+        return _enc(_json.dumps(data).encode())
+
+    def _set_child(d): d["b"][1]["sub"] = "mallory@example.com"
+    def _set_root(d): d["b"][0]["sub"] = "ceo@example.com"
+    def _drop_root(d): d["b"][0].pop("sub")
+    def _echo_child(d): d["b"][1]["sub"] = "alice@example.com"
+    for label, wire_ in [
+        ("child block claims another subject", forged(a_child, _set_child)),
+        ("root subject rewritten", forged(a_child, _set_root)),
+        ("root subject stripped", forged(a_child, _drop_root)),
+        ("child repeats the root subject", forged(a_child, _echo_child)),
+    ]:
+        d = broker.decide(wire_, "ssh.exec", {"host": "build-1.internal", "program": "git"})
+        report.check(f"subject: {label}", not d.allowed and d.subject == "",
+                     d.reason if not d.allowed else "ALLOWED")
+    bob = Token.issue(root, FULL, ttl_seconds=3600, now=NOW, subject="bob@example.com")
+    spliced = Token(blocks=[bob.blocks[0], a_child.blocks[1]])
+    d = broker.decide(spliced.serialize(), "ssh.exec",
+                      {"host": "build-1.internal", "program": "git"})
+    report.check("subject: alice's child spliced under bob's root",
+                 not d.allowed and d.subject == "", d.reason)
+
+    # ---------------------------------------------------------------------
     section("8. Audit integrity")
     intact, _ = broker.audit.verify()
     report.check("audit chain intact after the whole run", intact)

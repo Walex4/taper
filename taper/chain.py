@@ -84,6 +84,15 @@ class Block:
     prev_hash: bytes
     signature: bytes = b""
     note: str = ""           # free-text, e.g. "subagent: schema-migration"
+    # The human this authority was issued for. Root block only, under the root
+    # signature; every child inherits it by position and none may carry its
+    # own. Workload identity (the uid the kernel reports) says which process
+    # is calling; this says who it is calling FOR, and no attenuation step can
+    # change the answer. Empty means the issuer did not say.
+    # verified-by: tests/test_taper.py::TestSubject::test_the_subject_survives_every_attenuation_unchanged
+    # verified-by: tests/test_taper.py::TestSubject::test_a_child_block_may_not_carry_a_subject
+    # verified-by: tests/test_taper.py::TestSubject::test_altering_the_root_subject_breaks_the_signature
+    subject: str = ""
 
     def payload(self) -> bytes:
         """Exact bytes covered by the signature.
@@ -101,6 +110,10 @@ class Block:
             "prev": _b64(self.prev_hash),
             "note": self.note,
         }
+        if self.subject:
+            # Only present when set, so tokens minted before the field existed
+            # still reproduce the bytes their signatures cover.
+            body["sub"] = self.subject
         return b"\x00taper-block\x00" + json.dumps(
             body, sort_keys=True, separators=(",", ":")
         ).encode()
@@ -109,7 +122,7 @@ class Block:
         return hashlib.sha256(self.payload() + self.signature).digest()
 
     def to_json(self) -> dict:
-        return {
+        d = {
             "i": self.index,
             "caps": caps_to_json(self.caps),
             "next": _b64(self.next_pub),
@@ -118,6 +131,9 @@ class Block:
             "note": self.note,
             "sig": _b64(self.signature),
         }
+        if self.subject:
+            d["sub"] = self.subject
+        return d
 
     @staticmethod
     def from_json(d: dict) -> "Block":
@@ -129,6 +145,7 @@ class Block:
             prev_hash=_unb64(d["prev"]),
             signature=_unb64(d["sig"]),
             note=d.get("note", ""),
+            subject=str(d.get("sub", "")),
         )
 
 
@@ -148,8 +165,14 @@ class Token:
               caps: dict[str, dict[str, Constraint]],
               ttl_seconds: float,
               note: str = "",
-              now: Optional[float] = None) -> "Token":
+              now: Optional[float] = None,
+              subject: str = "") -> "Token":
+        """Mint a root token. `subject` is the human this authority is issued
+        for - whatever the operator's identity provider calls them. It is
+        signed by the root and cannot be changed by anything downstream."""
         now = time.time() if now is None else now
+        if "\n" in subject or len(subject) > 256:
+            raise ChainError("subject must be one line of at most 256 characters")
         eph = Ed25519PrivateKey.generate()
         block = Block(
             index=0,
@@ -158,6 +181,7 @@ class Token:
             not_after=now + ttl_seconds,
             prev_hash=b"\x00" * 32,
             note=note,
+            subject=subject,
         )
         block.signature = root_priv.sign(block.payload())
         return Token(blocks=[block], _next_priv=eph)
@@ -235,6 +259,11 @@ class Token:
     def expires_at(self) -> float:
         return min(b.not_after for b in self.blocks)
 
+    def subject(self) -> str:
+        """Who this authority acts for. Root block, by position; a child has
+        no say in it. Empty if the issuer did not name anyone."""
+        return self.blocks[0].subject if self.blocks else ""
+
     def revocation_ids(self) -> list[str]:
         """One id per block. Revoking a parent id must revoke every derived token,
         which is why each block contributes an id and the checker matches ANY.
@@ -300,6 +329,11 @@ def verify(token: Token,
             raise ChainError(f"block index {block.index} out of order at position {position}")
         if block.prev_hash != expected_prev:
             raise ChainError(f"broken hash linkage at block {position}")
+        if position > 0 and block.subject:
+            # The subject lives in the root and nowhere else. A child that
+            # carries one is trying to say who it acts for, which is exactly
+            # the thing a child must not get to say.
+            raise ChainError(f"block {position} carries a subject; only the root may")
         try:
             expected_signer.verify(block.signature, block.payload())
         except InvalidSignature:

@@ -464,6 +464,15 @@ holds even with that check disabled.
 Also enforced: TTL narrows monotonically (a child can't outlive its parent),
 depth is bounded, and revoking any block id kills every token derived from it.
 
+The root block also carries a **subject** — who the authority acts *for*, as
+distinct from which process is calling. `taper grant --subject
+alice@example.com` puts it under the root signature; every narrowing inherits
+it; no child block may carry one; and it appears in every audit record beside
+the kernel-reported uid. So a subagent three hops down is still acting as
+Alice in the log, and cannot have become anyone else. Taper doesn't verify the
+name against an identity provider — that's the root signer's claim — but the
+field is where an IdP assertion lands when you bind the mint to one.
+
 ## Constraint algebra
 
 Six kinds, deliberately. `any`, `never`, `one_of`, `prefix`, `range`, `subset`.
@@ -564,15 +573,15 @@ refuses anyone else before a token is even parsed. Set the socket's group to the
 ## Tests and validation
 
 ```bash
-make validate    # preflight + the test suite + 68 attacks. The release gate.
+make validate    # preflight + the test suite + 73 attacks. The release gate.
 ```
 
 Four layers, and they check different things:
 
 | Command | Checks | Needs |
 |---|---|---|
-| `pytest` | the code does what you meant — 240 tests | nothing |
-| `python validate/redteam.py` | the system refuses what someone *else* meant — 68 attacks | nothing |
+| `pytest` | the code does what you meant — 251 tests | nothing |
+| `python validate/redteam.py` | the system refuses what someone *else* meant — 73 attacks | nothing |
 | `bash scripts/preflight.sh` | this machine can host a broker safely | nothing |
 | `python validate/check_postgres.py <dsn>` | **the database refuses on its own** | a real Postgres |
 | `bash validate/check_ssh.sh <host> <key>` | **sshd refuses on its own** | a real target host |
@@ -614,7 +623,7 @@ stacked statements classifying as `SELECT`, the real pgAdmin backslash payload
 getting through, `pg_read_file` passing as a plain select because it touched no
 table, and `/v1/../../admin` satisfying a `/v1/` prefix. All four are fixed and
 pinned by regression tests. Expect it to find more when you extend the adapters.
-[`docs/redteam.md`](docs/redteam.md) walks through the cases (fifty-nine at v0.1.1, sixty-eight now), the
+[`docs/redteam.md`](docs/redteam.md) walks through the cases (fifty-nine at v0.1.1, seventy-three now), the
 four bypasses with their fixes, and what the harness does not prove.
 
 ## Production notes

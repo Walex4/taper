@@ -1,4 +1,4 @@
-# The red team: sixty-eight attacks, and the four that worked
+# The red team: seventy-three attacks, and the four that worked
 
 `validate/redteam.py` is a script that attacks Taper. Every case in it is
 something that must be refused, and the script exits non-zero if any of them is
@@ -34,7 +34,7 @@ attacked by people who were not thinking about Taper when they wrote the attack.
 
 ## What it throws
 
-Sixty-eight cases in nine sections (fifty-nine at v0.1.1). The count is the count on this commit; it
+Seventy-three cases in ten sections (fifty-nine at v0.1.1). The count is the count on this commit; it
 goes up when adapters are added, and the number is not the claim.
 
 | section | cases | what is being tested |
@@ -47,6 +47,7 @@ goes up when adapters are added, and the number is not the claim.
 | 5b. `pg.describe` | 9 | a table outside the grant, `pg_catalog.pg_shadow`, an unqualified name, injection in the name, a trailing newline, a three-part name, an extra field, the wrong database; and one positive check — the permitted request binds the name as a parameter and runs read-only |
 | 6. HTTP | 5 | `/v1/../../admin`, wrong host, method escalation, path outside prefix, header injection |
 | 7. Token attacks | 17 | widen a host or add a program during attenuation; a forged widening block, with strict verification on and off; splice a block from another chain; edit an existing block; extend TTL past the parent; replay an expired token; use a child of a revoked parent; mint a sibling from a received token; a token from a different root; six malformed strings |
+| 7b. The subject | 5 | a child block claiming another subject; the root subject rewritten; the root subject stripped; a child repeating the root's subject; Alice's child spliced under Bob's root — every one refused, and none reaches the log with a subject |
 | 8. Audit integrity | 3 | the hash chain is intact after the run; every denial above was recorded; deleting a record is detected |
 
 Sections 1 through 4 share one property that matters more than any individual

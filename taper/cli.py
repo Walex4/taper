@@ -194,8 +194,17 @@ def cmd_grant(args) -> int:
     policy = json.loads(Path(args.policy).read_text())
     caps = caps_from_json(policy["capabilities"])
     ttl = parse_duration(args.ttl)
-    token = Token.issue(load_root_private(), caps, ttl_seconds=ttl,
-                        note=policy.get("note", ""))
+    # The subject is who this authority acts FOR - a human, in whatever form
+    # the identity provider names them. The flag wins over the policy file so
+    # one policy can be minted for many people. Neither is required; a token
+    # with no subject is recorded as acting for nobody in particular, and
+    # inspect says so, because that is the honest description of it.
+    subject = args.subject if args.subject is not None else policy.get("subject", "")
+    try:
+        token = Token.issue(load_root_private(), caps, ttl_seconds=ttl,
+                            note=policy.get("note", ""), subject=subject)
+    except ChainError as exc:
+        sys.exit(str(exc))
 
     key = token.proving_key()
     if key is None:                        # cannot happen for a freshly issued token
@@ -210,6 +219,13 @@ def cmd_grant(args) -> int:
     print(token.serialize())
     print(f"{DIM}# expires in {args.ttl}, revocation id "
           f"{token.revocation_ids()[0]}{OFF}", file=sys.stderr)
+    if subject:
+        print(f"{DIM}# acts for {subject}; every narrowing inherits that and "
+              f"none can change it{OFF}", file=sys.stderr)
+    else:
+        print(f"{YELLOW}!{OFF} no subject: this token acts for nobody in "
+              f"particular. --subject names the human it is issued for.",
+              file=sys.stderr)
     print(f"{GREEN}proving key{OFF} written to {path} (0600)", file=sys.stderr)
     print(f"{DIM}# point the caller at it with TAPER_KEY_FILE={path}{OFF}",
           file=sys.stderr)
@@ -251,6 +267,12 @@ def cmd_inspect(args) -> int:
     remaining = int(token.expires_at() - time.time())
     colour = GREEN if remaining > 0 else RED
     print(f"\n{BOLD}expires{OFF} in {colour}{remaining}s{OFF}")
+    if token.subject():
+        print(f"{BOLD}acts for{OFF} {token.subject()}  {DIM}(root-signed; "
+              f"inherited by every block){OFF}")
+    else:
+        print(f"{BOLD}acts for{OFF} {YELLOW}nobody in particular{OFF}  "
+              f"{DIM}(no subject was named at mint){OFF}")
     print(f"\n{BOLD}effective capabilities{OFF}  {DIM}(intersection of all blocks){OFF}")
     print(json.dumps(caps_to_json(caps), indent=2))
     _warn_policy_pressure(caps)
@@ -483,7 +505,8 @@ def cmd_audit(args) -> int:
     for record in log.read():
         body = record["body"]
         mark = f"{GREEN}allow{OFF}" if body["allowed"] else f"{RED}deny {OFF}"
-        print(f"{mark} {body['operation']:<14} {body.get('reason','')[:70]}")
+        who = body.get("subject") or "-"
+        print(f"{mark} {who:<20} {body['operation']:<14} {body.get('reason','')[:60]}")
     return 0
 
 
@@ -900,6 +923,9 @@ def build_parser() -> argparse.ArgumentParser:
     # making the caller name it is what keeps the key off the token's channel.
     p.add_argument("--key-file", required=True,
                    help="where to write the proving key (0600, never stdout)")
+    p.add_argument("--subject", default=None,
+                   help="the human this token acts for, e.g. alice@example.com; "
+                        "signed by the root, inherited by every narrowing")
     p.set_defaults(func=cmd_grant)
 
     p = sub.add_parser("narrow", help="attenuate a token")

@@ -3,6 +3,22 @@
 The first section is what `release.yml` attaches to the GitHub release, so it
 is written to be read on its own.
 
+## Unreleased
+
+- The token carries a **subject**: who the authority acts for, as distinct
+  from which process is calling. `taper grant --subject` (or `"subject"` in
+  the policy file) puts it in the root block under the root signature; every
+  narrowing inherits it by position; no child block may carry one, even one
+  that agrees; rewriting or stripping it breaks the root signature; and every
+  decision and result record names it beside the caller's uid. Five new
+  red-team cases, seventy-three in all. Taper does not verify the name
+  against an identity provider — it is the root signer's claim, and the
+  field is where an IdP assertion lands when the mint is bound to one.
+  `taper inspect` says "acts for nobody in particular" when none was named.
+- DESIGN.md's prior-art table gains CB4A (draft-hartman, March 2026) with
+  the disagreement stated: Taper does not separate deciding from delivering,
+  because performing the operation is how the credential stays off the wire.
+
 ## v0.1.3 — 2026-09-14
 
 One change, and the design document's answer to the best argument anyone

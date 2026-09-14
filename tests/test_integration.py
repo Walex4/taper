@@ -1924,3 +1924,46 @@ class TestRefusalsReport:
         monkeypatch.setattr(cli, "AUDIT", log)
         assert cli.main(["audit", "--refusals"]) == 0
         assert "no refusals" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------- subject
+
+class TestSubjectOnTheCommandLine:
+    def _home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        for name, value in [("HOME", home), ("ROOT_KEY", home / "root.key"),
+                            ("ROOT_PUB", home / "root.pub"),
+                            ("SECRETS", home / "secrets"),
+                            ("AUDIT", home / "audit.jsonl")]:
+            monkeypatch.setattr(cli, name, value)
+        assert cli.main(["init"]) == 0
+
+    def test_grant_takes_a_subject_and_inspect_shows_it(self, tmp_path, monkeypatch, capsys):
+        self._home(tmp_path, monkeypatch)
+        capsys.readouterr()
+        policy = tmp_path / "policy.json"
+        policy.write_text(json.dumps(POLICY))
+        assert cli.main(["grant", str(policy), "--key-file", str(tmp_path / "k"),
+                         "--subject", "alice@example.com"]) == 0
+        out, err = capsys.readouterr()
+        token = [l for l in out.splitlines() if l.strip()][0]
+        assert Token.deserialize(token).subject() == "alice@example.com"
+        assert "acts for alice@example.com" in err
+        assert cli.main(["inspect", token]) == 0
+        assert "acts for" in capsys.readouterr().out.replace("\x1b[1m", "")
+
+    def test_the_policy_file_may_name_it_and_the_flag_wins(self, tmp_path, monkeypatch, capsys):
+        self._home(tmp_path, monkeypatch)
+        policy = tmp_path / "policy.json"
+        policy.write_text(json.dumps({**POLICY, "subject": "bob@example.com"}))
+        assert cli.main(["grant", str(policy), "--key-file", str(tmp_path / "k1")]) == 0
+        t1 = [l for l in capsys.readouterr().out.splitlines() if l.strip()][-1]
+        assert Token.deserialize(t1).subject() == "bob@example.com"
+        assert cli.main(["grant", str(policy), "--key-file", str(tmp_path / "k2"),
+                         "--subject", "carol@example.com"]) == 0
+        t2 = [l for l in capsys.readouterr().out.splitlines() if l.strip()][-1]
+        assert Token.deserialize(t2).subject() == "carol@example.com"
+
+    def test_no_subject_is_said_out_loud(self, tmp_path, monkeypatch, capsys):
+        code, out, err = _grant(tmp_path, monkeypatch, capsys, tmp_path / "k")
+        assert code == 0 and "no subject" in err

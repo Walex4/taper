@@ -55,6 +55,10 @@ class Decision:
     attributes: dict
     plan: Optional[ExecPlan] = None
     token_ids: list[str] = field(default_factory=list)
+    # Who the token says it acts for. "" when the issuer did not say, and ""
+    # when the chain failed before it could be read - in which case the reason
+    # says so and nothing about a subject is claimed.
+    subject: str = ""
 
 
 class Broker:
@@ -101,6 +105,8 @@ class Broker:
             self._record(decision, peer)
             return decision
 
+        subject = token.subject()
+
         # 0. Possession, before any policy arithmetic. The chain had to be
         # parsed first to learn which key to check against — but nothing about
         # what the token PERMITS has been consulted yet, and nothing will be if
@@ -113,7 +119,7 @@ class Broker:
                              request, proof, self.nonces, now=now)
             except PopError as exc:
                 decision = Decision(False, str(exc), operation, {},
-                                    token_ids=token.revocation_ids())
+                                    token_ids=token.revocation_ids(), subject=subject)
                 self._record(decision, peer)
                 return decision
 
@@ -124,14 +130,15 @@ class Broker:
             op = ops.get(operation)
             clean = op.validate(request)
         except ops.OperationError as exc:
-            decision = Decision(False, str(exc), operation, {}, token_ids=token_ids)
+            decision = Decision(False, str(exc), operation, {}, token_ids=token_ids,
+                                subject=subject)
             self._record(decision, peer)
             return decision
 
         adapter = self.adapters.get(operation)
         if adapter is None:
             decision = Decision(False, f"no adapter for {operation}", operation, {},
-                                token_ids=token_ids)
+                                token_ids=token_ids, subject=subject)
             self._record(decision, peer)
             return decision
 
@@ -140,7 +147,8 @@ class Broker:
         granted = caps.get(operation)
         if granted is None:
             decision = Decision(False, f"token does not grant {operation}",
-                                operation, attributes, token_ids=token_ids)
+                                operation, attributes, token_ids=token_ids,
+                                subject=subject)
             self._record(decision, peer)
             return decision
 
@@ -153,7 +161,7 @@ class Broker:
                     False,
                     f"{operation}.{name} is unconstrained in this token; "
                     f"grants must name every attribute",
-                    operation, attributes, token_ids=token_ids)
+                    operation, attributes, token_ids=token_ids, subject=subject)
                 self._record(decision, peer)
                 return decision
             if not constraint.allows(value):
@@ -161,14 +169,14 @@ class Broker:
                     False,
                     f"{operation}.{name}={value!r} not permitted by "
                     f"{constraint.to_json()}",
-                    operation, attributes, token_ids=token_ids)
+                    operation, attributes, token_ids=token_ids, subject=subject)
                 self._record(decision, peer)
                 return decision
 
         # 5. Plan.
         plan = adapter.plan(clean, granted)
         decision = Decision(True, "ok", operation, attributes, plan=plan,
-                            token_ids=token_ids)
+                            token_ids=token_ids, subject=subject)
         self._record(decision, peer)
         return decision
 
@@ -197,6 +205,7 @@ class Broker:
             "t": round(self.clock(), 3),
             "record": "decision",
             "peer": peer,
+            "subject": decision.subject,
             "allowed": decision.allowed,
             "reason": decision.reason,
             "operation": decision.operation,
@@ -220,6 +229,7 @@ class Broker:
             "t": round(self.clock(), 3),
             "record": "result",
             "peer": peer,
+            "subject": decision.subject,
             "operation": decision.operation,
             "token": decision.token_ids[-1] if decision.token_ids else None,
             "ok": bool(getattr(result, "ok", False)),
