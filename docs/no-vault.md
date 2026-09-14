@@ -272,4 +272,6 @@ and a refusal by the target is on the tape beside it; stage 2 reorders this
 so the tower does not sign until the runway has answered.
 
 Working name for the track: **Tower**. Its own package now; its own
-repository when it is more than one stage.
+repository when it is more than one stage. The clearance as a UML sequence
+diagram, the tower inside the container diagram, and the clearance's state
+machine are in [diagrams.md](diagrams.md), diagrams 4, 2 and 7.

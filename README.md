@@ -33,7 +33,11 @@ so a subagent cannot exceed its parent.
 ## Try it
 
 **In the browser, nothing to install:** [walex4.github.io/taper](https://walex4.github.io/taper/)
-runs the real library in your tab. Six steps, one property each:
+runs the real library in your tab. The architecture in standard notation — C4,
+UML, DFD with trust boundaries — is at
+[walex4.github.io/taper/diagrams.html](https://walex4.github.io/taper/diagrams.html)
+(source: [docs/diagrams.md](docs/diagrams.md)). The playground has nine steps,
+one property each; the first six:
 
 1. **Mint the root token.** Read the policy — three operations, each with typed
    constraints — and mint. That is the agent's entire authority, written down.
@@ -51,8 +55,10 @@ runs the real library in your tab. Six steps, one property each:
    clock can be advanced past the TTL; and deleting a record from the audit
    panel makes the hash chain report exactly where.
 
-Or click "Run the whole tour for me" and watch it do all six in about ninety
-seconds. Nothing is mocked and nothing leaves the tab.
+Steps 7 to 9 are the target speaking through `taper.invariants()`, the
+refusals report, and a Tower clearance. Or click "Run the whole tour for me"
+and watch it do all nine in about ninety seconds. Nothing is mocked and nothing
+leaves the tab.
 
 Your agent never holds a credential. It holds a token that says what it may do,
 and it can narrow that token for a subagent without asking anyone — but it can

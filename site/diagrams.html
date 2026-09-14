@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Taper Architecture</title>
+<meta name="description" content="Architecture diagrams for Taper and Tower in C4, UML and DFD notation, generated from docs/diagrams.md.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f3f4f6; --panel: #ffffff; --ink: #141a24; --ink-2: #3b4453; --muted: #6b7484;
+    --line: #d6dae2; --line-2: #b8bfca; --amber: #b45309;
+    --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --cond: "IBM Plex Sans Condensed", "IBM Plex Sans", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #0f131a; --ink: #e6e9ee; --ink-2: #c2c9d4; --muted: #8791a1;
+      --line: #29323f; --line-2: #3a4554; --amber: #f5b53d;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0f131a; --ink: #e6e9ee; --ink-2: #c2c9d4; --muted: #8791a1;
+    --line: #29323f; --line-2: #3a4554; --amber: #f5b53d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 var(--sans); padding-inline: 20px; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding-block: 36px 72px; }
+  header { margin-bottom: 28px; }
+  .eyebrow { font: 500 12px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--amber); }
+  h1 { font: 600 34px/1.1 var(--cond); letter-spacing: -0.01em; margin: 10px 0 10px; text-wrap: balance; }
+  header p, .lede, .note { max-width: 72ch; color: var(--ink-2); margin: 0 0 12px; }
+  nav { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 16px; font: 500 13px var(--sans); }
+  nav a { color: var(--ink-2); text-decoration: none; border-bottom: 1px solid var(--line-2); }
+  nav a:hover { color: var(--amber); border-color: var(--amber); }
+  section { margin-top: 44px; }
+  h2 { font: 600 22px/1.2 var(--cond); margin: 0 0 6px; }
+  h2 small { font: 500 12px/1 var(--mono); color: var(--muted); letter-spacing: .06em; margin-left: 10px; vertical-align: middle; }
+  h3 { font: 600 16px/1.2 var(--cond); margin: 22px 0 6px; }
+  /* Diagrams keep a light ground in both themes: Mermaid's palette is drawn for one. */
+  figure { margin: 0; background: #ffffff; color: #141a24; border: 1px solid var(--line); border-radius: 6px; padding: 14px; overflow-x: auto; }
+  figure pre.mermaid { margin: 0; display: flex; justify-content: center; }
+  figure pre.mermaid svg { max-width: 100%; height: auto; }
+  figcaption { margin-top: 12px; font-size: 13.5px; color: var(--ink-2); max-width: 78ch; }
+  code { font-family: var(--mono); font-size: .92em; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font: 12.5px var(--sans); color: var(--muted); margin-top: 10px; }
+  .legend i { display: inline-block; width: 12px; height: 12px; vertical-align: -2px; margin-right: 6px; border-radius: 2px; }
+  footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12.5px; max-width: 80ch; }
+  footer a, .note a, .lede a { color: var(--ink-2); }
+  @media (max-width: 600px) { h1 { font-size: 28px; } figure { padding: 8px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="eyebrow">Architecture · v0.2.1 · Tower stage 1</div>
+  <h1>Taper Architecture</h1>
+  <p>Seven diagrams in standard notation: C4 for the system context and its containers, UML 2.5 sequence diagrams for the two flows, a level-1 data flow diagram with trust boundaries in the form threat models use, and UML state machines for the two things that have a lifecycle. Every element names a real component in the repository; where a box is design and not code, its label says so.</p>
+  <p class="note">Source: <a href="https://github.com/Walex4/taper/blob/main/docs/diagrams.md">docs/diagrams.md</a> — Mermaid, rendered by GitHub in the repository and by this page. Notation: C4 as defined at c4model.com; sequence and state machine diagrams per UML 2.5.1; data flow diagram with Gane–Sarson shapes and trust boundaries as used in Microsoft SDL threat modelling.</p>
+  <nav>
+    <a href="#c4-context">1 · System context</a>
+    <a href="#c4-container">2 · Containers</a>
+    <a href="#seq-decision">3 · The decision</a>
+    <a href="#seq-clearance">4 · The clearance</a>
+    <a href="#dfd">5 · Data flow with trust boundaries</a>
+    <a href="#state-token">6 · A token&#x27;s lifecycle</a>
+    <a href="#state-clearance">7 · A clearance&#x27;s lifecycle</a>
+  </nav>
+</header>
+
+<section id="c4-context">
+  <h2>1 · System context <small>C4 · LEVEL 1</small></h2>
+  <p class="lede">Who talks to Taper and what Taper talks to. The agent is outside the box on purpose: it is any process, and the design assumes it is compromised.</p>
+  <figure>
+    <pre class="mermaid">
+flowchart TB
+  operator[&quot;&lt;b&gt;Operator&lt;/b&gt;&lt;br/&gt;[Person]&lt;br/&gt;&lt;i&gt;Writes policy, mints root grants, revokes, reads the audit log. Keeps the root signing key offline.&lt;/i&gt;&quot;]
+  subject[&quot;&lt;b&gt;Subject&lt;/b&gt;&lt;br/&gt;[Person]&lt;br/&gt;&lt;i&gt;The human the agent acts for. Named in the root block, carried by every child, written to the target&#x27;s log.&lt;/i&gt;&quot;]
+  agent[&quot;&lt;b&gt;AI agent&lt;/b&gt;&lt;br/&gt;[Software System, external]&lt;br/&gt;&lt;i&gt;Any process. Holds a narrowing-only token and an Ed25519 proving key. Never holds a resource credential.&lt;/i&gt;&quot;]
+
+  subgraph taper_sys[&quot;Taper  [Software System]&quot;]
+    direction LR
+    broker[&quot;&lt;b&gt;Broker&lt;/b&gt;&lt;br/&gt;[Software System]&lt;br/&gt;&lt;i&gt;Verifies the chain and the proof of possession, decides by intersection, performs one typed operation, records every decision on a hash-chained log.&lt;/i&gt;&quot;]
+    tower[&quot;&lt;b&gt;Tower&lt;/b&gt; · stage 1&lt;br/&gt;[Software System]&lt;br/&gt;&lt;i&gt;Co-signer. Re-verifies the decision with its own state and mints a credential that exists for one operation and sixty seconds.&lt;/i&gt;&quot;]
+  end
+
+  pg[&quot;&lt;b&gt;PostgreSQL&lt;/b&gt;&lt;br/&gt;[Software System, external]&lt;br/&gt;&lt;i&gt;Authenticates the broker by client certificate; the role has no password. Reports its own objections through taper.invariants().&lt;/i&gt;&quot;]
+  ssh[&quot;&lt;b&gt;SSH hosts&lt;/b&gt;&lt;br/&gt;[Software System, external]&lt;br/&gt;&lt;i&gt;CA-signed certificates. The broker runs argv, never a shell.&lt;/i&gt;&quot;]
+  http[&quot;&lt;b&gt;HTTP services&lt;/b&gt;&lt;br/&gt;[Software System, external]&lt;br/&gt;&lt;i&gt;Bearer credential still held by the broker. Tower stage 1 not yet applied.&lt;/i&gt;&quot;]
+
+  subject -- &quot;delegates a task&quot; --&gt; agent
+  operator -- &quot;grant · revoke · audit&lt;br/&gt;[taper CLI, local]&quot; --&gt; broker
+  agent -- &quot;one typed operation + proof&lt;br/&gt;[AF_UNIX socket or MCP]&quot; --&gt; broker
+  broker -- &quot;clear(decision, chain, proof)&quot; --&gt; tower
+  tower -- &quot;clearance: certificate, 60 s, once&quot; --&gt; broker
+  broker -- &quot;clearance · invariants · statement&lt;br/&gt;[TLS, client certificate]&quot; --&gt; pg
+  broker -- &quot;argv&lt;br/&gt;[ssh, certificate]&quot; --&gt; ssh
+  broker -- &quot;one request&lt;br/&gt;[HTTPS]&quot; --&gt; http
+  tower ~~~ pg
+  tower ~~~ ssh
+  tower ~~~ http
+
+  classDef person fill:#08427b,stroke:#052e56,color:#fff
+  classDef system fill:#1168bd,stroke:#0b4884,color:#fff
+  classDef ext fill:#8a8a8a,stroke:#5f5f5f,color:#fff
+  class operator,subject person
+  class broker,tower system
+  class agent,pg,ssh,http ext
+  style taper_sys fill:none,stroke:#666,stroke-dasharray:6 4
+    </pre>
+    <div class="legend"><span><i style="background:#08427b"></i>Person</span><span><i style="background:#1168bd"></i>Software system</span><span><i style="background:#438dd5"></i>Container</span><span><i style="background:#8a8a8a"></i>External</span><span><i style="border:1px dashed #666;background:none"></i>Boundary</span></div>
+    <figcaption>Two people, one agent, three kinds of target. The only edge from the agent is a request; nothing the agent holds reaches a target. Under Tower the broker's edge to PostgreSQL carries a certificate that did not exist before the decision.</figcaption>
+  </figure>
+</section>
+
+<section id="c4-container">
+  <h2>2 · Containers <small>C4 · LEVEL 2</small></h2>
+  <p class="lede">What runs where. Two process boundaries today — agent and broker, separated by the kernel — and the tower's boundary, which in stage 1 is a code path inside the broker and in stage 2 becomes its own uid.</p>
+  <figure>
+    <pre class="mermaid">
+flowchart TB
+  operator[&quot;&lt;b&gt;Operator&lt;/b&gt;&lt;br/&gt;[Person]&quot;]
+  agent[&quot;&lt;b&gt;Agent process&lt;/b&gt;&lt;br/&gt;[Container, external: uid 1001]&lt;br/&gt;&lt;i&gt;Token chain + proving key. JSON over a unix socket, or MCP tools.&lt;/i&gt;&quot;]
+
+  subgraph host[&quot;Broker host · taper · uid 1002&quot;]
+    direction TB
+    cli[&quot;&lt;b&gt;taper CLI&lt;/b&gt;&lt;br/&gt;[Container: Python]&lt;br/&gt;&lt;i&gt;grant · inspect · revoke · audit · cert. Prints policy-pressure warnings at mint.&lt;/i&gt;&quot;]
+    ipc[&quot;&lt;b&gt;Socket server&lt;/b&gt;&lt;br/&gt;[Container: Python, AF_UNIX]&lt;br/&gt;&lt;i&gt;SO_PEERCRED: the kernel reports the caller&#x27;s uid, gid, pid.&lt;/i&gt;&quot;]
+    mcp[&quot;&lt;b&gt;MCP server&lt;/b&gt;&lt;br/&gt;[Container: Python]&lt;br/&gt;&lt;i&gt;taper serve. One tool per typed operation.&lt;/i&gt;&quot;]
+    broker[&quot;&lt;b&gt;Broker&lt;/b&gt;&lt;br/&gt;[Container: Python]&lt;br/&gt;&lt;i&gt;chain → proof → schema → policy by intersection → plan. Unknown field, unknown constraint kind, unconstrained attribute: refuse.&lt;/i&gt;&quot;]
+    exec[&quot;&lt;b&gt;Executor + adapters&lt;/b&gt;&lt;br/&gt;[Container: Python]&lt;br/&gt;&lt;i&gt;ssh.exec · pg.query · pg.migrate · pg.describe · http.request. Asks taper.invariants() before a write.&lt;/i&gt;&quot;]
+    vault[(&quot;&lt;b&gt;Vault&lt;/b&gt;&lt;br/&gt;[Container: directory, 0700]&lt;br/&gt;&lt;i&gt;Resource secrets. Under Tower, for Postgres: the CA key only.&lt;/i&gt;&quot;)]
+    audit[(&quot;&lt;b&gt;Audit log&lt;/b&gt;&lt;br/&gt;[Container: JSONL, hash chain]&lt;br/&gt;&lt;i&gt;decision · clearance · result. Each record hashes the one before.&lt;/i&gt;&quot;)]
+    revoked[(&quot;&lt;b&gt;Revocation list&lt;/b&gt;&lt;br/&gt;[Container: in memory]&lt;br/&gt;&lt;i&gt;One list, shared with the tower.&lt;/i&gt;&quot;)]
+    subgraph towerb[&quot;Tower · stage 1 in-process · stage 2 own uid&quot;]
+      direction LR
+      tower[&quot;&lt;b&gt;Tower&lt;/b&gt;&lt;br/&gt;[Container: Python]&lt;br/&gt;&lt;i&gt;Re-verifies chain and proof with its own root key and nonce cache. Refuses a decision about another chain or subject.&lt;/i&gt;&quot;]
+      ca[&quot;&lt;b&gt;CA&lt;/b&gt;&lt;br/&gt;[Container: ECDSA P-256]&lt;br/&gt;&lt;i&gt;One client certificate per clearance: CN=role, OU=subject, SAN urn:taper:clearance:id, 60 s.&lt;/i&gt;&quot;]
+    end
+  end
+
+  pg[(&quot;&lt;b&gt;PostgreSQL 16&lt;/b&gt;&lt;br/&gt;[Container, external]&lt;br/&gt;&lt;i&gt;hostssl … cert clientcert=verify-full. Role has PASSWORD NULL. taper.invariants() is SECURITY DEFINER.&lt;/i&gt;&quot;)]
+
+  operator -- &quot;mints, revokes, reads&quot; --&gt; cli
+  cli -- &quot;reads · --refusals&quot; --&gt; audit
+  agent -- &quot;request + proof&lt;br/&gt;[AF_UNIX]&quot; --&gt; ipc
+  agent -- &quot;tool call&lt;br/&gt;[MCP]&quot; --&gt; mcp
+  ipc -- &quot;decide(…, peer)&quot; --&gt; broker
+  mcp -- &quot;decide()&quot; --&gt; broker
+  broker -- &quot;revoked?&quot; --&gt; revoked
+  broker -- &quot;decision · result&quot; --&gt; audit
+  broker -- &quot;clear(decision, chain, proof)&quot; --&gt; tower
+  tower -- &quot;revoked?&quot; --&gt; revoked
+  tower -- &quot;issue_client(role, subject, id)&quot; --&gt; ca
+  tower -- &quot;clearance · refusal&quot; --&gt; audit
+  broker -- &quot;run(plan)&quot; --&gt; exec
+  exec -- &quot;take(id), once&quot; --&gt; tower
+  exec -. &quot;reads a secret — targets without Tower&quot; .-&gt; vault
+  ca -. &quot;reads the CA key&quot; .-&gt; vault
+  exec -- &quot;TLS + client cert · invariants · statement&quot; --&gt; pg
+
+  classDef person fill:#08427b,stroke:#052e56,color:#fff
+  classDef container fill:#438dd5,stroke:#2e6295,color:#fff
+  classDef store fill:#438dd5,stroke:#2e6295,color:#fff
+  classDef ext fill:#8a8a8a,stroke:#5f5f5f,color:#fff
+  class operator person
+  class cli,ipc,mcp,broker,exec,tower,ca container
+  class vault,audit,revoked store
+  class agent,pg ext
+  style host fill:none,stroke:#666,stroke-dasharray:6 4
+  style towerb fill:none,stroke:#b45309,stroke-dasharray:6 4
+    </pre>
+    <div class="legend"><span><i style="background:#08427b"></i>Person</span><span><i style="background:#1168bd"></i>Software system</span><span><i style="background:#438dd5"></i>Container</span><span><i style="background:#8a8a8a"></i>External</span><span><i style="border:1px dashed #666;background:none"></i>Boundary</span></div>
+    <figcaption>Every container exists in the repository except the stage-2 uid boundary around the tower, drawn as a boundary because the interface was written for it. The vault under Tower holds the CA key for PostgreSQL; the secrets for SSH and HTTP targets are still stored.</figcaption>
+  </figure>
+</section>
+
+<section id="seq-decision">
+  <h2>3 · The decision <small>UML 2.5 · SEQUENCE</small></h2>
+  <p class="lede">One request, in order. The order is the security property: “you are not the holder” is decided before anything about what the holder may do.</p>
+  <figure>
+    <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor Agent as Agent (uid 1001)
+  participant Sock as Socket server
+  participant Broker
+  participant Audit as Audit log
+  participant Exec as Executor
+  participant PG as PostgreSQL
+
+  Agent-&gt;&gt;Sock: {token, operation, request, proof}
+  Sock-&gt;&gt;Sock: SO_PEERCRED → peer {uid, gid, pid}
+  Sock-&gt;&gt;Broker: decide(token, operation, request, peer, proof)
+  Broker-&gt;&gt;Broker: 1 · chain: signatures, expiry, revocation, subject only in root
+  Broker-&gt;&gt;Broker: 2 · proof of possession: holder key, nonce cache, this exact request
+  Broker-&gt;&gt;Broker: 3 · typed schema: unknown field or wrong type refuses
+  Broker-&gt;&gt;Broker: 4 · policy: derive attributes · intersect every block · each attribute named and allowed
+  Broker-&gt;&gt;Broker: 5 · plan: argv, or SQL with bound parameters
+  Broker-&gt;&gt;Audit: decision {allowed, reason, subject, token ids, peer}
+  alt refused at 1–4
+    Broker--&gt;&gt;Sock: {allowed: false, reason}
+    Sock--&gt;&gt;Agent: refusal names the check — identity, schema, or policy
+  else allowed
+    Broker-&gt;&gt;Exec: run(plan)
+    opt write — pg.query non-SELECT, pg.migrate
+      Exec-&gt;&gt;PG: SELECT taper.invariants(schema, table)
+      PG--&gt;&gt;Exec: [] or names, e.g. production, no_recent_backup, another_agent_active
+      Exec-&gt;&gt;Exec: each name in the grant&#x27;s invariants? (a wildcard never counts)
+      Note over Exec,PG: TAPER_REQUIRE_INVARIANTS=1: a target that declared nothing is refused
+    end
+    alt an invariant is not named
+      Exec--&gt;&gt;Broker: Result {refused_by_invariant, the target&#x27;s words}
+      Broker-&gt;&gt;Audit: result {ok: false, invariants}
+      Broker--&gt;&gt;Agent: refused, exit 3
+    else
+      Exec-&gt;&gt;PG: execute, parameters bound
+      PG--&gt;&gt;Exec: rows / status
+      Exec--&gt;&gt;Broker: Result
+      Broker-&gt;&gt;Audit: result {ok: true, invariants}
+      Broker--&gt;&gt;Agent: result
+    end
+  end
+    </pre>
+    <figcaption>Steps 4 to 8 are Broker.decide(); the write path from step 13 is Executor.run(). A refusal at any of the first four checks names the check, and a refusal by the target arrives in the target's own words with exit code 3.</figcaption>
+  </figure>
+</section>
+
+<section id="seq-clearance">
+  <h2>4 · The clearance <small>UML 2.5 · SEQUENCE · TOWER STAGE 1</small></h2>
+  <p class="lede">The same decision, then a second party is asked, and the credential exists only because it said yes.</p>
+  <figure>
+    <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor Agent
+  participant Broker as ClearedBroker
+  participant Tower
+  participant CA
+  participant Audit as Audit log
+  participant Exec as ClearedExecutor
+  participant PG as PostgreSQL (role: PASSWORD NULL)
+
+  Agent-&gt;&gt;Broker: {token, pg.migrate, request, proof}
+  Broker-&gt;&gt;Broker: decide(): chain → proof → schema → policy → plan (diagram 3)
+  Broker-&gt;&gt;Audit: decision {allowed: true, subject, token ids}
+  Broker-&gt;&gt;Tower: clear(token, operation, request, proof, decision, role)
+  Tower-&gt;&gt;Tower: verify chain with its own root key and the shared revocation list
+  Tower-&gt;&gt;Tower: verify proof with its own nonce cache
+  Tower-&gt;&gt;Tower: decision.token_ids = chain ids? decision.subject = token subject?
+  alt any check fails
+    Tower-&gt;&gt;Audit: clearance_refused {reason}
+    Tower--&gt;&gt;Broker: ClearanceRefused
+    Broker-&gt;&gt;Audit: decision {allowed: false, &quot;no clearance: …&quot;}
+    Broker--&gt;&gt;Agent: refused
+  else verified
+    Tower-&gt;&gt;CA: issue_client(role, subject, clearance id)
+    CA--&gt;&gt;Tower: Material {certificate, key, serial, not_after = now + 60 s}
+    Tower-&gt;&gt;Audit: clearance {id, role, subject, chain, serial, not_after}
+    Tower--&gt;&gt;Broker: Clearance {id, serial, not_after} — the material stays in the tower
+    Broker-&gt;&gt;Exec: run(plan + clearance id)
+    Exec-&gt;&gt;Tower: take(clearance id)
+    Tower--&gt;&gt;Exec: Material, exactly once — a second take is refused
+    Exec-&gt;&gt;Exec: cert and key to 0600 temp files · a DSN carrying a password is refused
+    Exec-&gt;&gt;PG: TLS connect with sslcert, sslkey
+    PG-&gt;&gt;PG: pg_hba: cert, clientcert=verify-full — CN must equal the role
+    PG--&gt;&gt;Exec: identity=&quot;CN=taper_agent,OU=alice@example.com,O=taper&quot; method=cert
+    Exec-&gt;&gt;PG: SELECT taper.invariants(schema, table)
+    PG--&gt;&gt;Exec: names
+    alt each name is in the grant
+      Exec-&gt;&gt;PG: execute
+      PG--&gt;&gt;Exec: status
+    else
+      Exec--&gt;&gt;Broker: refused by invariant
+    end
+    Exec-&gt;&gt;Exec: remove cert and key · the certificate expires at not_after
+    Broker-&gt;&gt;Audit: result
+    Broker--&gt;&gt;Agent: result
+  end
+    </pre>
+    <figcaption>The material never rides on the plan: the plan is logged verbatim and carries only the clearance id. The executor takes the certificate once, writes it to 0600 files for the length of one connection, and removes it. Verified against PostgreSQL 16 by validate/check_postgres.py.</figcaption>
+  </figure>
+</section>
+
+<section id="dfd">
+  <h2>5 · Data flow with trust boundaries <small>DFD · LEVEL 1 · THREAT MODEL</small></h2>
+  <p class="lede">Circles are processes, cylinders are stores, rectangles are external entities, dashed red frames are trust boundaries.</p>
+  <figure>
+    <pre class="mermaid">
+flowchart TB
+  subgraph TB0[&quot;Trust boundary · operator workstation — root key offline&quot;]
+    OP[Operator]
+    P1((1.0 Mint grant&lt;br/&gt;taper grant))
+    D0[(D0 Root signing key)]
+  end
+
+  subgraph TB1[&quot;Trust boundary · agent process, uid 1001&quot;]
+    AG[AI agent]
+    D1[(D1 Token chain +&lt;br/&gt;proving key)]
+  end
+
+  subgraph TB2[&quot;Trust boundary · broker process, uid 1002&quot;]
+    P2((2.0 Verify and decide))
+    P3((3.0 Execute))
+    D2[(D2 Vault, 0700&lt;br/&gt;secrets · CA key)]
+    D3[(D3 Audit log&lt;br/&gt;hash chain)]
+    D4[(D4 Revocation list)]
+    D5[(D5 Nonce cache)]
+    subgraph TB3[&quot;Trust boundary · tower — stage 1 in-process, stage 2 own uid&quot;]
+      P4((4.0 Clear))
+      D6[(D6 Issued material&lt;br/&gt;taken once)]
+    end
+  end
+
+  subgraph TB4[&quot;Trust boundary · target host&quot;]
+    PG[PostgreSQL]
+    D7[(D7 taper.protected ·&lt;br/&gt;taper.backups ·&lt;br/&gt;pg_stat_activity)]
+  end
+
+  OP --&gt;|policy, subject, expiry| P1
+  D0 -.-&gt;|signs the root block| P1
+  P1 --&gt;|token — narrows only| AG
+  AG &lt;--&gt; D1
+  AG --&gt;|token · operation · request · proof&lt;br/&gt;AF_UNIX, SO_PEERCRED| P2
+  P2 &lt;--&gt;|nonce seen?| D5
+  P2 &lt;--&gt;|revoked?| D4
+  P2 --&gt;|decision| D3
+  P2 --&gt;|plan| P3
+  P2 --&gt;|decision · chain · proof| P4
+  P4 &lt;--&gt;|revoked?| D4
+  P4 --&gt;|clearance or refusal| D3
+  D2 -.-&gt;|CA key| P4
+  P4 --&gt;|certificate + key, 60 s| D6
+  D6 --&gt;|once| P3
+  D2 -.-&gt;|secret ref — targets without Tower| P3
+  P3 --&gt;|TLS client cert · invariants probe · statement| PG
+  PG --&gt;|invariants · rows| P3
+  D7 --&gt; PG
+  P3 --&gt;|result| D3
+  P3 --&gt;|result| AG
+
+  classDef boundary fill:none,stroke:#b42318,stroke-width:1.5px,stroke-dasharray:6 4;
+  class TB0,TB1,TB2,TB3,TB4 boundary;
+    </pre>
+    <figcaption>The claim of the design, read off the picture: no store inside the agent's boundary holds a credential, and under Tower the only store that holds one (D6) is inside the tower's boundary, is written once per clearance, is read once, and is empty sixty seconds later.</figcaption>
+  </figure>
+</section>
+
+<section id="state-token">
+  <h2>6 · A token&#x27;s lifecycle <small>UML 2.5 · STATE MACHINE</small></h2>
+  <p class="lede">A token is minted once, narrowed any number of times, presented with a proof, and ends by expiry or revocation.</p>
+  <figure>
+    <pre class="mermaid">
+stateDiagram-v2
+  [*] --&gt; Minted : taper grant — root block with subject and expiry
+  Minted --&gt; Narrowed : attenuate — child block, caps ⊆ parent
+  Narrowed --&gt; Narrowed : attenuate again
+  state &quot;Presented with a proof&quot; as Use {
+    [*] --&gt; Verifying
+    Verifying --&gt; Verified : chain verifies and proof verifies
+    Verifying --&gt; Refused : forged, widened, wrong holder, or subject outside the root
+  }
+  Minted --&gt; Use : request
+  Narrowed --&gt; Use : request
+  note right of Use : Presenting does not consume the token. It is reusable until it expires or a block id in it is revoked.
+  Minted --&gt; Expired : not_after passes
+  Narrowed --&gt; Expired : not_after passes
+  Minted --&gt; Revoked : taper revoke
+  Narrowed --&gt; Revoked : any ancestor id revoked
+  Expired --&gt; [*]
+  Revoked --&gt; [*]
+    </pre>
+    <figcaption>Presenting a token does not consume it; a chain is reusable until not_after passes or any block id in it is revoked. Widening is not a transition: a child block whose caps are not a subset of its parent's never enters the machine.</figcaption>
+  </figure>
+</section>
+
+<section id="state-clearance">
+  <h2>7 · A clearance&#x27;s lifecycle <small>UML 2.5 · STATE MACHINE · TOWER</small></h2>
+  <p class="lede">A clearance is requested by an allowed decision, refused or issued by the tower, taken once, used once, and gone.</p>
+  <figure>
+    <pre class="mermaid">
+stateDiagram-v2
+  [*] --&gt; Requested : ClearedBroker allowed a SQL plan
+  Requested --&gt; Refused : chain, proof, token ids or subject do not verify — or the token is revoked
+  Requested --&gt; Issued : CA mints the certificate — audit record &quot;clearance&quot;
+  Issued --&gt; Taken : take(id), exactly once — a second take is refused
+  Issued --&gt; Expired : sixty seconds without use
+  Taken --&gt; Connected : TLS handshake — PostgreSQL verifies the certificate
+  Connected --&gt; Done : every invariant named — the statement runs
+  Connected --&gt; RefusedByTarget : an invariant not named, or nothing declared under fail-closed
+  Done --&gt; Expired : files removed, not_after passes
+  RefusedByTarget --&gt; Expired : files removed, not_after passes
+  Refused --&gt; [*]
+  Expired --&gt; [*]
+    </pre>
+    <figcaption>Revoking a token is the go-around: from that moment the tower refuses every clearance the token or any child of it asks for. A clearance already issued is not recalled; it is one operation and expires within sixty seconds.</figcaption>
+  </figure>
+</section>
+
+<footer>Generated from docs/diagrams.md by scripts/build-diagrams.py. Prose about the mechanisms is in <a href="https://github.com/Walex4/taper/blob/main/DESIGN.md">DESIGN.md</a> and <a href="https://github.com/Walex4/taper/blob/main/docs/no-vault.md">docs/no-vault.md</a>; the <a href="index.html">playground</a> runs the decision and the clearance in the browser. Unaudited; read the status block in the README before pointing Taper at anything you would mind losing.</footer>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "strict", flowchart: { htmlLabels: true, curve: "basis" } });</script>
+</body>
+</html>

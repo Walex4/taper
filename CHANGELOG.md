@@ -3,6 +3,16 @@
 The first section is what `release.yml` attaches to the GitHub release, so it
 is written to be read on its own.
 
+## Unreleased
+
+- `docs/diagrams.md`: the architecture in standard notation — C4 system
+  context and container diagrams, UML 2.5 sequence diagrams for the decision
+  and the clearance, a level-1 data flow diagram with trust boundaries, and
+  state machines for a token and a clearance. Mermaid, so GitHub renders it.
+  `scripts/build-diagrams.py` lifts the same fences into `site/diagrams.html`
+  for GitHub Pages; `--check` fails if the page is stale. Linked from
+  DESIGN.md, docs/no-vault.md and the README. No code changes.
+
 ## v0.2.1 — 2026-09-14
 
 What came of asking "what if the tower is wrong?" A wrong clearance was

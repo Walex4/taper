@@ -8,6 +8,8 @@
 
 A credential broker for AI agents. The agent holds no resource credential; it names a typed operation, and a process behind a kernel boundary decides whether to perform it and performs it. Authority is carried by a signed chain of capability blocks that can only narrow.
 
+Diagrams in standard notation — C4 context and containers, UML sequence and state machines, a data flow diagram with trust boundaries — are in [docs/diagrams.md](docs/diagrams.md), rendered at [walex4.github.io/taper/diagrams.html](https://walex4.github.io/taper/diagrams.html). §6 and §8 below are diagrams 3 and 5 in prose.
+
 Contents
 
 1.  [Scope and non-goals](#scope)
