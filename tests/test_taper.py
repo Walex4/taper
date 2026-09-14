@@ -1470,7 +1470,7 @@ class TestInvariants:
         fake.connect = lambda dsn, connect_timeout=None: Conn()
         return fake, executed
 
-    def _run(self, grant, declared=True, raised=(), op="pg.migrate"):
+    def _run(self, grant, declared=True, raised=(), op="pg.migrate", require=False):
         import sys
         from taper.adapters import PostgresAdapter, PostgresMigrateAdapter
         from taper.execute import Executor
@@ -1489,7 +1489,7 @@ class TestInvariants:
         try:
             class Fixed:
                 def get(self, ref): return "postgresql://u@h/db"
-            result = Executor(ChainProvider(Fixed())).run(plan)
+            result = Executor(ChainProvider(Fixed()), require_invariants=require).run(plan)
         finally:
             if real is not None:
                 sys.modules["psycopg"] = real
@@ -1546,6 +1546,49 @@ class TestInvariants:
         assert result.invariants == {"declared": False, "raised": [],
                                      "overridden": [], "refused": []}
         assert not any("taper.invariants(" in sql for sql, _ in executed)
+
+    def test_a_silent_target_is_refused_when_invariants_are_required(self):
+        """The runway with no status lights: by default treated as clear, and
+        with the flag set, treated as unable to say - which for a write is a
+        refusal, with the reason and the fix quoted."""
+        result, wrote, _ = self._run({}, declared=False, raised=[self.NO_BACKUP], require=True)
+        assert not result.ok and not wrote and result.exit_code == 3
+        assert "declares no invariants" in result.stderr
+        assert "taper.invariants is not installed" in result.stderr
+        assert "setup-invariants.sql" in result.stderr
+        assert result.invariants["declared"] is False
+        assert result.invariants["refused"][0]["name"] == "(undeclared)"
+        assert result.invariants["refused"][0]["subject"] == "production.orders"
+        # a target that does declare is unaffected by the flag
+        result, wrote, _ = self._run({"invariants": OneOf(["production"])},
+                                     raised=[self.PROD], require=True)
+        assert result.ok and wrote
+
+    def test_the_flag_reads_the_environment(self, monkeypatch):
+        from taper.execute import Executor
+        from taper.secrets import ChainProvider
+
+        class Fixed:
+            def get(self, ref): return None
+        monkeypatch.delenv("TAPER_REQUIRE_INVARIANTS", raising=False)
+        assert Executor(ChainProvider(Fixed())).require_invariants is False
+        monkeypatch.setenv("TAPER_REQUIRE_INVARIANTS", "1")
+        assert Executor(ChainProvider(Fixed())).require_invariants is True
+        assert Executor(ChainProvider(Fixed()), require_invariants=False).require_invariants is False
+
+    def test_an_undeclared_refusal_is_counted_in_the_report(self, broker):
+        from taper.audit import INVARIANT, summarize_refusals
+        from taper.broker import Decision
+        from taper.execute import Result
+        broker.record_result(
+            Decision(True, "ok", "pg.migrate", {}),
+            Result(False, 3, "", "refused", invariants={
+                "declared": False, "raised": [], "overridden": [],
+                "refused": [{"name": "(undeclared)", "subject": "production.orders",
+                             "detail": "taper.invariants is not installed"}]}))
+        s = summarize_refusals(broker.audit.read())
+        assert s["buckets"][INVARIANT] == 1
+        assert s["invariants"][("pg.migrate", "(undeclared)")]["count"] == 1
 
     def test_the_probe_binds_the_table_and_never_the_agents_text(self):
         _, _, executed = self._run({}, raised=[])

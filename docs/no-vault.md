@@ -225,11 +225,51 @@ The demo has a third run, `scripts/tower-demo.sh` and
 `docker-compose.tower.yml`: same database, same incident, and the password
 gone from the role.
 
+**When the tower is wrong.** A controller can clear a plane onto an
+occupied runway; the lesson aviation drew was not a smarter controller but
+runway status lights and ground radar — the runway saying "occupied" no
+matter what the tower said. Tower is built the same way, and the pieces are
+worth listing against that question. The tower judges nothing: it checks
+facts that are true or not (signature, proof, chain, subject, grant), so the
+controller's error — misjudging a situation — is not one it can make. A wrong
+clearance is a small one: one operation, sixty seconds. It never overrides
+the runway: the target's own role privileges and its own invariants are
+consulted with the tower's clearance in hand and the tower's opinion
+disregarded, and stage 3 has the target check the flight plan itself. In
+stage 2 the broker and the tower each hold half a key, so an error has to
+occur in both plus a valid chain. Every clearance is on the tape beside the
+decision it rested on, and revoking the token is the go-around — one
+revocation list, shared by broker and tower, so no second call is needed.
+And a hold released in error clears one operation, expires, is logged, and
+was never released by the one who asked.
+
+What it does not do is judge the flight plan. If a human granted the drop,
+the tower clears the drop. The instruments for that are the wildcard warnings
+at mint and the refusals report; they are a smoke alarm, not a firewall, and
+this note does not pretend otherwise.
+
+Two things followed from asking that question. A target with no
+`taper.invariants` function used to be treated as having no objection — the
+runway with no status lights read as clear. `TAPER_REQUIRE_INVARIANTS=1` on
+the broker now makes silence fail closed: a write to a target that declared
+nothing is refused, with the reason and the fix quoted. And the runway
+occupied is a real invariant now: `another_agent_active`, read from
+`pg_stat_activity`, raised while another session as the agent role is
+mid-transaction on the database and cleared the moment it commits or leaves.
+`scripts/setup-invariants.sql` is the reference implementation an operator
+installs — `protected`, `no_recent_backup`, `another_agent_active` — and the
+demo raises all three.
+
 What stage 1 does not yet do: SSH per-operation certificates and AWS/STS
 (the same shape, not yet written); the tower is a class in the broker's
 process, so its independence is a property of the code path and not yet of
 a uid boundary — that is stage 2, and the interface was written so that
-stage 2 is a transport change.
+stage 2 is a transport change. And in stage 1 the invariants probe runs
+*under* the clearance rather than before it: the certificate is issued, the
+connection is made with it, the target is asked, and only then does the
+write run or not. The clearance is still one operation and sixty seconds,
+and a refusal by the target is on the tape beside it; stage 2 reorders this
+so the tower does not sign until the runway has answered.
 
 Working name for the track: **Tower**. Its own package now; its own
 repository when it is more than one stage.

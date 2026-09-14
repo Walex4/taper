@@ -89,7 +89,7 @@ GRANT EXECUTE ON FUNCTION production.taper_add_column(text, text, text, text, te
 -- write path runs, the broker calls taper.invariants(schema, table) and
 -- proceeds only if the grant names, by name, every invariant it raises.
 --
--- Two invariants here, chosen to show the two outcomes. `production` is raised
+-- Three invariants here, chosen to show the outcomes. `production` is raised
 -- for every production table; the demo policy names it in pg.migrate's
 -- `invariants`, so the migration proceeds and the audit log records that the
 -- operator overrode it on purpose. `no_recent_backup` is raised when the newest
@@ -97,7 +97,10 @@ GRANT EXECUTE ON FUNCTION production.taper_add_column(text, text, text, text, te
 -- it, so a stale backup stops the migration with the reason quoted back -
 -- which is the PocketOS shape exactly, caught by the resource rather than the
 -- agent. The seed writes a fresh backup_log row so the demo runs; delete it
--- to watch the refusal.
+-- to watch the refusal. `another_agent_active` is the runway occupied: another
+-- session as taper_agent is mid-transaction on this database right now, read
+-- from pg_stat_activity so it is the server's word. The policy does not name
+-- it either; two agents converging on production stop each other.
 --
 -- SECURITY DEFINER for the same reason as taper_add_column: the function
 -- reads what the agent role cannot, and the agent role may only ask.
@@ -121,6 +124,7 @@ AS $taper$
 DECLARE
     v_out    jsonb := '[]'::jsonb;
     v_latest timestamptz;
+    v_others integer;
 BEGIN
     IF lower(p_schema) = 'production' THEN
         v_out := v_out || jsonb_build_object(
@@ -132,6 +136,17 @@ BEGIN
                 'name', 'no_recent_backup',
                 'detail', 'last backup ' || coalesce(v_latest::text, 'never'));
         END IF;
+    END IF;
+    SELECT count(*) INTO v_others FROM pg_stat_activity
+     WHERE datname = current_database()
+       AND usename = session_user
+       AND pid <> pg_backend_pid()
+       AND state IN ('active', 'idle in transaction');
+    IF v_others > 0 THEN
+        v_out := v_out || jsonb_build_object(
+            'name', 'another_agent_active',
+            'detail', v_others || ' other session(s) as ' || session_user ||
+                      ' mid-transaction: the runway is occupied');
     END IF;
     RETURN v_out;
 END;

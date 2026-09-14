@@ -235,6 +235,26 @@ class TestClearedBroker:
         assert records[1]["refused"]
 
 
+    def test_revoking_at_the_broker_is_a_go_around_at_the_tower(self, broker, tower, root):
+        """One revocation list. The tower keeps its own copy of nothing, so a
+        token revoked at the broker gets no clearance from the tower either -
+        and neither does any child of it."""
+        token = Token.issue(root, CAPS, ttl_seconds=3600, now=NOW, subject="alice@example.com")
+        child = token.attenuate({"pg.query": CAPS["pg.query"]}, note="sub", now=NOW)
+        assert call(broker, child, "pg.query", SELECT).allowed
+        broker.revoke(token.revocation_ids()[0])
+        d = call(broker, child, "pg.query", SELECT)
+        assert not d.allowed and "revoked" in d.reason
+        # and the tower, asked directly with a decision that lies, agrees
+        wire = child.serialize()
+        proof = prove(child.proving_key(), wire, "pg.query", SELECT, now=NOW)
+        lie = Decision(True, "ok", "pg.query", {}, token_ids=child.revocation_ids(),
+                       subject="alice@example.com")
+        with pytest.raises(ClearanceRefused, match="revoked"):
+            tower.clear(wire, "pg.query", SELECT, proof, lie, "taper_agent")
+        assert tower.revoked is broker.revoked
+
+
 class TestClearedExecutor:
     def _fake_psycopg(self, seen):
         class Cursor:

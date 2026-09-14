@@ -5,6 +5,22 @@ is written to be read on its own.
 
 ## Unreleased
 
+- **Silence fails closed.** `TAPER_REQUIRE_INVARIANTS=1` on `taper broker`
+  or `taper serve` refuses a write to any target that has no
+  `taper.invariants` function, with the reason and the fix quoted; the
+  refusal is counted in `audit --refusals` as `(undeclared)`. Without the
+  flag the old default stands and the broker says so at startup.
+- **The runway occupied.** `another_agent_active`: raised while another
+  session as the agent role is mid-transaction on the database, read from
+  `pg_stat_activity`, cleared when it commits or leaves. In the demo seed
+  and in the new `scripts/setup-invariants.sql`, a reference
+  `taper.invariants` for operators (`protected`, `no_recent_backup`,
+  `another_agent_active`). Both use `session_user`, not `current_user`,
+  which inside a SECURITY DEFINER function is the owner — found on a real
+  server, where the first version counted the wrong sessions.
+- **Revocation reaches the tower.** A cleared broker shares its revocation
+  list with the tower, so revoking a token at the broker is the go-around:
+  no clearance for it or any child from that moment, no second call.
 - The playground at walex4.github.io/taper runs v0.2.0: the token names who
   it acts for and three forgeries of that are refused on screen; a
   migration is stopped by the database's own invariants, with the probe

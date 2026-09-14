@@ -24,6 +24,11 @@ class ClearedBroker(Broker):
         super().__init__(*args, **kwargs)
         self.tower = tower
         self.role = role
+        # One revocation list, shared. Revoking a token at the broker is the
+        # go-around: from that moment the tower refuses every clearance the
+        # token or any child of it asks for, without a second call.
+        # verified-by: tests/test_tower.py::TestClearedBroker::test_revoking_at_the_broker_is_a_go_around_at_the_tower
+        self.tower.revoked = self.revoked
 
     def decide(self, token_text: str, operation: str, request: dict,
                peer: Optional[dict] = None, proof: Optional[dict] = None) -> Decision:

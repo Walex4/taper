@@ -60,9 +60,21 @@ def _truncate(text: str) -> tuple[str, bool]:
 
 
 class Executor:
-    def __init__(self, secrets: ChainProvider, timeout: float = 60.0):
+    def __init__(self, secrets: ChainProvider, timeout: float = 60.0,
+                 require_invariants: Optional[bool] = None):
         self.secrets = secrets
         self.timeout = timeout
+        # A target that has no taper.invariants function "declares nothing",
+        # and by default a write to it proceeds - the runway with no status
+        # lights is treated as clear. For anything that matters that is the
+        # wrong default, so this flag makes silence fail closed: a write to a
+        # target that declared nothing is refused, with the reason quoted.
+        # TAPER_REQUIRE_INVARIANTS=1 sets it for `taper broker` and `serve`.
+        # verified-by: tests/test_taper.py::TestInvariants::test_a_silent_target_is_refused_when_invariants_are_required
+        if require_invariants is None:
+            require_invariants = os.environ.get("TAPER_REQUIRE_INVARIANTS", "").strip() \
+                in ("1", "true", "yes")
+        self.require_invariants = require_invariants
 
     def run(self, plan: ExecPlan) -> Result:
         if plan.kind == "process":
@@ -176,6 +188,19 @@ class Executor:
                     report = None
                     if probe is not None:
                         report = _ask_invariants(cur, probe)
+                        if not report["declared"] and self.require_invariants:
+                            subjects = ", ".join(f"{s}.{t}" for s, t in probe["subjects"])
+                            report["refused"].append({
+                                "name": "(undeclared)", "subject": subjects,
+                                "detail": f"{probe['function']} is not installed on this target"})
+                            return Result(
+                                False, REFUSED_BY_INVARIANT, "",
+                                f"refused: the target declares no invariants "
+                                f"({probe['function']} is not installed) and "
+                                f"TAPER_REQUIRE_INVARIANTS is set. A write to {subjects} "
+                                f"needs a target that can say whether it is safe. "
+                                f"scripts/setup-invariants.sql is a starting point.",
+                                invariants=report)
                         if report["refused"]:
                             names = ", ".join(
                                 f"{i['name']} on {i['subject']} ({i['detail']})"

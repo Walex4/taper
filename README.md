@@ -530,9 +530,13 @@ counts. An unnamed one stops the write with the target's words quoted back,
 and `taper audit --refusals` reports it under its own heading, because "read
 what the target said" is a different answer from "widen the grant". A target
 without the function declares nothing and the log says so. The demo's
-function raises `production` (which the policy names) and `no_recent_backup`
-when `production.backup_log` is stale (which it does not) — delete the seed's
-backup row and watch the migration stop. The idea is Christian Posta's,
+function raises `production` (which the policy names), `no_recent_backup`
+when `production.backup_log` is stale, and `another_agent_active` while another
+agent session is mid-transaction (neither of which it does) — delete the seed's
+backup row and watch the migration stop. `scripts/setup-invariants.sql`
+installs the same three on your own database, and `TAPER_REQUIRE_INVARIANTS=1`
+on the broker refuses a write to any target that has not installed it, so a
+silent target fails closed rather than open. The idea is Christian Posta's,
 ["APIs for Probabilistic Callers"](https://blog.christianposta.com/apis-for-probabilistic-callers/);
 DESIGN.md says what was taken and what was left.
 

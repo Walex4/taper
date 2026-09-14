@@ -36,8 +36,9 @@ def carries_password(dsn: str) -> bool:
 
 
 class ClearedExecutor(Executor):
-    def __init__(self, secrets: ChainProvider, tower: Tower, timeout: float = 60.0):
-        super().__init__(secrets, timeout)
+    def __init__(self, secrets: ChainProvider, tower: Tower, timeout: float = 60.0,
+                 require_invariants=None):
+        super().__init__(secrets, timeout, require_invariants=require_invariants)
         self.tower = tower
 
     @contextlib.contextmanager

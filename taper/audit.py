@@ -80,7 +80,8 @@ IDENTITY = "identity"        # chain, proof, expiry, revocation: not the holder
 SCHEMA = "schema"            # malformed request: unknown field, wrong type
 ATTACK = "attack-shaped"     # well-formed, but the statement itself is hostile
 POLICY = "policy"            # well-formed, legitimate shape, outside the grant
-INVARIANT = "invariant"      # permitted by the grant; the target itself said no
+INVARIANT = "invariant"      # permitted by the grant; the target itself said no,
+                             # or (as "(undeclared)") could not say and was required to
 OTHER = "other"
 
 BUCKETS = (IDENTITY, SCHEMA, ATTACK, POLICY, INVARIANT, OTHER)

@@ -265,8 +265,11 @@ def main() -> int:
                 cur.execute("SELECT to_regprocedure('taper.invariants(text,text)')")
                 declared = cur.fetchone()[0] is not None
                 if not declared:
-                    print(f"  {DIM}- taper.invariants(text,text) not present: this "
-                          f"target declares no invariants{OFF}")
+                    print(f"  {YELLOW}!{OFF} taper.invariants(text,text) not present: this "
+                          f"target declares no invariants, and a broker without "
+                          f"TAPER_REQUIRE_INVARIANTS treats that as no objection.")
+                    print(f"    {DIM}scripts/setup-invariants.sql installs a reference "
+                          f"implementation{OFF}")
                 else:
                     cur.execute("""
                         SELECT has_function_privilege(current_user,

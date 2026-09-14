@@ -851,6 +851,13 @@ def cmd_broker(args) -> int:
     if tower is not None:
         print(f"{GREEN}tower attached{OFF} — Postgres decisions carry a clearance; "
               f"the DSN must carry no password", file=sys.stderr)
+    if executor.require_invariants:
+        print(f"{GREEN}invariants required{OFF} — a write to a target that declares "
+              f"none is refused", file=sys.stderr)
+    else:
+        print(f"{YELLOW}!{OFF} TAPER_REQUIRE_INVARIANTS is not set: a target with no "
+              f"taper.invariants function is treated as having no objection to a "
+              f"write. Set it for anything that matters.", file=sys.stderr)
     print(f"{GREEN}broker ready{OFF} — ^C to stop", file=sys.stderr)
     try:
         server.serve_forever()
