@@ -1164,13 +1164,38 @@ class TestPolicyPressure:
             "args": {"kind": "subset", "values": ["status"]}}})
         assert policy_pressure(caps, self.KNOWN) == []
 
-    def test_defaults_to_the_registry_and_skips_unknown_operations(self):
+    def test_the_policy_attributes_match_what_the_adapters_derive(self):
+        """The warning about an unconstrained field has to be about a field
+        the broker will actually check - what derive() returns - or it nags
+        about pg.query.statement, which policy never sees. v0.1.2 shipped
+        that nag; this pins the map to the adapters."""
+        from taper.adapters import default_adapters
+        requests = {
+            "ssh.exec": {"host": "h", "program": "git", "args": ["status"]},
+            "pg.query": {"database": "d", "statement": "SELECT 1 FROM public.t", "max_rows": 1},
+            "pg.migrate": {"database": "d", "table": "s.t", "column": "c", "type": "text",
+                           "default": "x", "not_null": True},
+            "pg.describe": {"database": "d", "table": "s.t"},
+            "http.request": {"method": "GET", "host": "h", "path": "/v1/x", "body": "b"},
+        }
+        for name, adapter in default_adapters().items():
+            derived = set(adapter.derive(ops.get(name).validate(requests[name])))
+            assert derived == set(ops.POLICY_ATTRIBUTES[name]), name
+        # and the full default policy in the playground warns about nothing
+        # it should not: no request-only field is ever named
+        for name in ops.POLICY_ATTRIBUTES:
+            for field in ("statement", "body", "column", "default", "not_null"):
+                assert field not in ops.POLICY_ATTRIBUTES[name]
+
+    def test_defaults_to_the_policy_attributes_and_skips_unknown_operations(self):
         caps = caps_from_json({"pg.migrate": {"database": {"kind": "any"}},
                                "not.an.op": {"x": {"kind": "any"}}})
         lines = policy_pressure(caps)
         assert any(line.startswith("pg.migrate.database is `any`") for line in lines)
-        # the four other pg.migrate fields are reported as unconstrained
-        assert sum("is not constrained" in line for line in lines) == 5
+        # the two other policy attributes of pg.migrate are reported as
+        # unconstrained; column/default/not_null are request fields and are not
+        assert sum("is not constrained" in line for line in lines) == 2
+        assert not any("column" in line or "default" in line for line in lines)
         # the unknown op's explicit `any` is still named; its fields are not guessed
         assert any(line.startswith("not.an.op.x is `any`") for line in lines)
         assert not any("not.an.op." in line and "not constrained" in line

@@ -176,6 +176,21 @@ HTTP_REQUEST = Operation(
     ),
 )
 
+# The attributes policy actually constrains, per operation: what each adapter's
+# derive() returns, plus grant-only fields (`invariants`) that no request
+# carries. Distinct from the request fields above: pg.query's request has a
+# `statement`, but policy sees `statement_kind` and `tables`, and a warning
+# that pg.query.statement is unconstrained would be nagging about a field
+# the broker never checks. Pinned to the adapters by a test.
+# verified-by: tests/test_taper.py::TestPolicyPressure::test_the_policy_attributes_match_what_the_adapters_derive
+POLICY_ATTRIBUTES: dict[str, tuple[str, ...]] = {
+    "ssh.exec": ("host", "program", "args"),
+    "pg.query": ("database", "statement_kind", "tables", "max_rows"),
+    "pg.migrate": ("database", "table", "type"),
+    "pg.describe": ("database", "table"),
+    "http.request": ("method", "host", "path"),
+}
+
 REGISTRY: dict[str, Operation] = {
     op.name: op for op in (SSH_EXEC, PG_QUERY, PG_MIGRATE, PG_DESCRIBE, HTTP_REQUEST)
 }

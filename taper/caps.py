@@ -305,18 +305,18 @@ def policy_pressure(caps: dict[str, dict[str, Constraint]],
     refused, and the operator should learn that from the grant, not from the
     first denial.
 
-    `known_fields` maps operation name to the attribute names an adapter
-    accepts; it defaults to the registry in ops.py. Operations the registry
-    does not know are skipped rather than guessed at.
+    `known_fields` maps operation name to the attribute names policy checks
+    for it - what the adapter derives, not the request's fields; it defaults
+    to ops.POLICY_ATTRIBUTES. Operations it does not know are skipped rather
+    than guessed at.
 
     verified-by: tests/test_taper.py::TestPolicyPressure::test_every_any_is_named
     verified-by: tests/test_taper.py::TestPolicyPressure::test_a_missing_field_is_named_as_fail_closed
     verified-by: tests/test_taper.py::TestPolicyPressure::test_a_fully_narrowed_grant_is_silent
     """
     if known_fields is None:
-        from .ops import REGISTRY
-        known_fields = {name: [f.name for f in op.fields]
-                        for name, op in REGISTRY.items()}
+        from .ops import POLICY_ATTRIBUTES
+        known_fields = POLICY_ATTRIBUTES
 
     lines: list[str] = []
     for op in sorted(caps):

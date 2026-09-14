@@ -3,6 +3,21 @@
 The first section is what `release.yml` attaches to the GitHub release, so it
 is written to be read on its own.
 
+## Unreleased
+
+- The playground at walex4.github.io/taper runs v0.2.0: the token names who
+  it acts for and three forgeries of that are refused on screen; a
+  migration is stopped by the database's own invariants, with the probe
+  shown; `taper audit --refusals` is a step; and Tower mints a sixty-second
+  clearance certificate in the tab, with the clearance record on the tape.
+  A stand-in plays the database for the two steps that need one, and the
+  page says so where it happens.
+- The policy-pressure warning about an unconstrained field now checks the
+  attributes policy actually sees (what each adapter derives) rather than
+  the request's fields. v0.1.2 nagged about `pg.query.statement` and
+  `http.request.body`, which the broker never checks; a test pins the map
+  to the adapters.
+
 ## v0.2.0 — 2026-09-14
 
 The first release with something in it that is not a vault. Tower is a

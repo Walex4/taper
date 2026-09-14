@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Taper — the agent never holds the key</title>
-<meta name="description" content="A credential broker for AI agents, running for real in your browser. Mint a token, narrow it for a subagent, try to widen it, fire the red team's payloads, and watch the audit chain break when you tamper with it.">
+<meta name="description" content="A credential broker for AI agents, running for real in your browser. Mint a token that names who it acts for, narrow it, try to widen it, fire the red team's payloads, let the database refuse a write on its own invariants, and watch a sixty-second credential exist because a decision caused it to.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -78,8 +78,9 @@
 
   /* explainer */
   .explain { padding: 8px 0 28px; }
-  .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
-  @media (max-width: 900px) { .cards { grid-template-columns: 1fr; } }
+  .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+  @media (max-width: 1100px) { .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 700px) { .cards { grid-template-columns: 1fr; } }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px 22px; box-shadow: var(--shadow); }
   .card h3 { margin: 0 0 8px; font-size: 15px; display: flex; align-items: center; gap: 9px; }
   .card h3 .ic { width: 28px; height: 28px; border-radius: 8px; background: var(--accent-soft); color: var(--accent-ink); display: grid; place-items: center; font-size: 14px; }
@@ -177,9 +178,9 @@
 </div></div>
 
 <section class="hero"><div class="wrap">
-  <span class="eyebrow">Credential broker for AI agents · v0.1 · unaudited</span>
+  <span class="eyebrow">Credential broker for AI agents · v0.2 · unaudited</span>
   <h1>The agent never holds the key. <em>It asks the desk.</em></h1>
-  <p class="lead">Coding agents keep deleting production because they're handed credentials. Taper is a locked box that holds the keys and only carries out the specific, narrow operations an agent is allowed to ask for — and a helper can always be given less, never more. This page runs the real library in your browser.</p>
+  <p class="lead">Coding agents keep deleting production because they're handed credentials. Taper is a locked box that holds the keys and only carries out the specific, narrow operations an agent is allowed to ask for — and a helper can always be given less, never more. As of v0.2 the token also says <em>who</em> it acts for, the database gets a say before a write, and Tower mints a sixty-second credential per operation instead of keeping one. This page runs the real library in your browser.</p>
   <div class="cta">
     <a class="btn primary" href="#bench" id="cta-start">Start the 90-second tour</a>
     <span class="install"><span>pip install taper-broker</span><button id="copy-install">copy</button></span>
@@ -191,7 +192,8 @@
   <div class="cards">
     <div class="card"><h3><span class="ic">◇</span>The token</h3><p>A signed list of typed operations with constraints — <code>ssh.exec</code> on this host running this program, <code>pg.query</code> of this statement kind on these tables. It only ever narrows: a subagent gets a strictly smaller one, signed offline, and a widening block is rejected structurally rather than by policy.</p></div>
     <div class="card"><h3><span class="ic">▣</span>The broker</h3><p>A separate process under a different Unix user holds the real credentials. It checks proof of possession, validates the typed request, evaluates policy, and <em>performs the operation itself</em>. The credential is never in the agent's memory, environment, or shell.</p></div>
-    <div class="card"><h3><span class="ic">▤</span>The second boundary</h3><p>Taper is never the only thing saying no. The database role can't <code>ALTER</code>; <code>sshd</code> runs a <code>force-command</code>. Scripts in the repo prove each target refuses the dangerous operation with the broker removed from the path.</p></div>
+    <div class="card"><h3><span class="ic">▤</span>The target speaks</h3><p>Taper is never the only thing saying no. The database role can't <code>ALTER</code>; <code>sshd</code> runs a <code>force-command</code>. And before a write, the broker asks the database for its own invariants — no backup since Tuesday, three views depend on this — and proceeds only if the grant named each one. A wildcard never does.</p></div>
+    <div class="card"><h3><span class="ic">◈</span>Tower: clearance, not custody</h3><p>The next track. Instead of holding a database password, the broker holds a CA and mints a sixty-second certificate per operation, with the human's name in it, only after re-verifying the chain itself. The database has no password to steal. Stage 1 shipped in v0.2; <a href="https://github.com/Walex4/taper/blob/main/docs/no-vault.md">the design</a> removes the vault entirely.</p></div>
   </div>
   <div class="analogy">
     <div><h3>If you had to explain it at dinner</h3><p>Today's agents get the hotel's master key: it opens every door, and if the agent is confused or tricked, the wrong door opens. Taper is the front desk. The agent never touches a key. It says "open room 412," the desk checks its list, and a staff member opens that one door. The agent can hand a helper a shorter list — just 412, just for five minutes — but can never write a longer one. Every request, allowed or refused, goes in a ledger where tearing out a page leaves a visible gap.</p></div>
@@ -201,7 +203,7 @@
 
 <section class="bench" id="bench"><div class="wrap">
   <div class="bench-head">
-    <div><h2>Playground</h2><p>Six steps, one property each. Every button drives the unmodified <code>taper</code> package — nothing is mocked, nothing leaves this tab.</p></div>
+    <div><h2>Playground</h2><p>Nine steps, one property each. Every button drives the unmodified <code>taper-broker</code> package — nothing leaves this tab. Two steps need a database to answer, and a stand-in plays that one part; the page says so where it happens.</p></div>
     <button class="btn" id="btn-reset">Start over</button>
   </div>
 
@@ -215,6 +217,9 @@
         <li data-step="4"><span class="n">4</span><div><b>Send a request, then attack</b><span>See what the broker would run, then the real payloads.</span></div></li>
         <li data-step="5"><span class="n">5</span><div><b>Steal the token</b><span>Without the proving key it's worthless.</span></div></li>
         <li data-step="6"><span class="n">6</span><div><b>Revoke, expire, tamper</b><span>The chain says exactly where.</span></div></li>
+        <li data-step="7"><span class="n">7</span><div><b>The target speaks</b><span>The database refuses a write on its own invariants.</span></div></li>
+        <li data-step="8"><span class="n">8</span><div><b>Read the refusals</b><span>Policy pressure, counted; attacks kept apart.</span></div></li>
+        <li data-step="9"><span class="n">9</span><div><b>Mint a clearance</b><span>Tower: a credential that exists for one operation.</span></div></li>
       </ol>
       <button class="btn primary sm" id="btn-auto" disabled>Run the whole tour for me</button>
     </aside>
@@ -223,15 +228,23 @@
       <section class="step" id="s1">
         <h2><span class="n">1</span>Write a policy and mint the root token</h2>
         <p class="lede">A policy is an operation plus a constraint per field. This is the widest this token will ever be — everything downstream is a subset of it.</p>
-        <div class="howto"><b>Do:</b> read the policy (three operations, each with typed constraints), optionally edit it, then click <b>Mint root token</b>. Notice an unknown constraint kind is refused rather than ignored — an old verifier that skipped what it didn't understand would silently widen authority.</div>
+        <div class="howto"><b>Do:</b> read the policy (five operations, each with typed constraints), optionally edit it, then click <b>Mint root token</b>. The token names who it acts for — a subject, signed by the root, that every narrowing inherits and none can change. Try the three forgeries afterwards. Notice an unknown constraint kind is refused rather than ignored, and that every <code>any</code> is called out: that is policy pressure, made visible at the moment it is written.</div>
         <textarea id="policy" spellcheck="false"></textarea>
         <div class="row">
           <label>ttl <input id="ttl" type="number" value="3600" min="1" style="width:90px"> s</label>
-          <label>note <input id="note" type="text" value="developer session" style="width:200px"></label>
+          <label>note <input id="note" type="text" value="developer session" style="width:170px"></label>
+          <label>acts for <input id="subject" type="text" value="alice@example.com" style="width:190px"></label>
           <button class="btn primary" id="btn-mint" disabled>Mint root token</button>
           <button class="btn sm ghost" id="btn-reset-policy">Reset policy</button>
         </div>
         <div id="mint-out" class="out"></div>
+        <div class="row" id="forge-row" style="display:none">
+          <span class="muted">Change who it acts for, holding only the bytes:</span>
+          <button class="btn sm" id="btn-forge-root">rewrite the root's subject</button>
+          <button class="btn sm" id="btn-forge-strip">strip it</button>
+          <button class="btn sm" id="btn-forge-child" disabled title="needs a subagent token">a child claims another</button>
+        </div>
+        <div id="forge-out" class="out"></div>
       </section>
 
       <section class="step" id="s2">
@@ -253,7 +266,7 @@
         <div class="howto"><b>Do:</b> click <b>Send request</b> and open "what the broker would run". Then click any attack — they are the payloads from <code>validate/redteam.py</code>, including the four that got through the first time. For step 5, untick <b>with proof of possession</b> and send again: that's someone who copied the token text out of a log.</div>
         <div class="row">
           <label>token <select id="ask-token"><option value="sub">subagent</option><option value="dev">root</option></select></label>
-          <label>operation <select id="ask-op"><option>ssh.exec</option><option>pg.query</option><option>http.request</option></select></label>
+          <label>operation <select id="ask-op"><option>ssh.exec</option><option>pg.query</option><option>pg.describe</option><option>pg.migrate</option><option>http.request</option></select></label>
           <label><input type="checkbox" id="ask-proof" checked> with proof of possession</label>
         </div>
         <textarea id="ask-req" spellcheck="false" style="min-height:64px;margin-top:10px">{"host": "build-1.internal", "program": "git", "args": ["status"]}</textarea>
@@ -272,11 +285,40 @@
         </div>
         <div id="revoke-out" class="out"></div>
       </section>
+
+      <section class="step" id="s5">
+        <h2><span class="n">7</span>The target speaks</h2>
+        <p class="lede">A token can be exactly right and the write still wrong, because only the database knows whether <em>this</em> table has a backup from this morning. Before a write, the broker calls a function the database owns and proceeds only if the grant names every invariant it raises. The agent has no say; a wildcard never counts.</p>
+        <div class="howto"><b>Do:</b> the root token's <code>pg.migrate</code> grant names <code>production</code> in its <code>invariants</code>. Click <b>Migrate</b> with the database raising only <code>production</code>: the write proceeds and the override is on the tape. Then tick <b>stale backup</b> so it also raises <code>no_recent_backup</code>, which the grant does not name, and click again. <span class="muted">The database here is a stand-in that answers the invariants probe; the broker, executor, refusal and audit record are the real code.</span></div>
+        <textarea id="mig-req" spellcheck="false" style="min-height:64px">{"database": "analytics", "table": "production.orders", "column": "currency", "type": "text"}</textarea>
+        <div class="row">
+          <label><input type="checkbox" id="mig-stale"> the database also raises <code>no_recent_backup</code> (stale backup)</label>
+          <button class="btn primary" id="btn-migrate" disabled>Migrate</button>
+        </div>
+        <div id="mig-out" class="out"></div>
+      </section>
+
+      <section class="step" id="s6">
+        <h2><span class="n">8</span>Read the refusals</h2>
+        <p class="lede"><code>taper audit --refusals</code> sorts every denial in the log by kind. The <b>policy</b> bucket — well-formed requests the grant did not cover — is the policy-pressure metric from the design document. Attacks are counted apart, so the report can never argue for widening a grant to admit one; refusals by the target are apart again, because the answer to those is "read what it said".</p>
+        <div class="howto"><b>Do:</b> click <b>Summarize</b>. If you ran the attacks in step 4 and both migrations in step 7, you will see all three kinds, and the policy bucket grouped by the field and the value it wanted.</div>
+        <div class="row"><button class="btn primary" id="btn-refusals" disabled>Summarize the log's refusals</button></div>
+        <div id="ref-out" class="out"></div>
+      </section>
+
+      <section class="step" id="s7">
+        <h2><span class="n">9</span>Mint a clearance — Tower, stage 1</h2>
+        <p class="lede">A credential that exists because a decision caused it to. The tower re-verifies the chain and the proof with its own state, refuses a decision about any other chain or subject, and mints a client certificate valid for sixty seconds: CN the database role, OU the human, serial derived from the clearance. The executor connects with it — and with no password, because there is none — and it is gone.</p>
+        <div class="howto"><b>Do:</b> click <b>Clear and connect</b>. Read the certificate's subject and lifetime, then look at the tape: a <code>clearance</code> record sits between the decision and the result, and the tower holds nothing afterwards. Try it again after step 6's revoke. <span class="muted">The certificate and its issuance are real; the database it connects to is the stand-in.</span></div>
+        <textarea id="clr-req" spellcheck="false" style="min-height:64px">{"database": "analytics", "statement": "SELECT * FROM public.events", "max_rows": 10}</textarea>
+        <div class="row"><button class="btn primary" id="btn-clear" disabled>Clear and connect</button></div>
+        <div id="clr-out" class="out"></div>
+      </section>
     </div>
 
     <aside class="side"><div class="panel">
       <h3>Audit log <span id="audit-verdict" class="verdict allow" style="display:none">chain intact</span></h3>
-      <p>Every decision and every denial, with the attributes the broker derived. Each record hashes the one before it.</p>
+      <p>Every decision, result and clearance, with who it acted for. Each record hashes the one before it.</p>
       <div id="audit" class="log"><span class="muted">nothing yet — mint a token and send a request</span></div>
       <div class="row"><button class="btn sm" id="btn-export" disabled>Export session as JSON</button></div>
     </div></aside>
@@ -285,7 +327,7 @@
 
 <footer><div class="wrap">
   <span>Unaudited. Not yet suitable for production credentials — read the status block in the <a href="https://github.com/Walex4/taper#readme">README</a> first.</span>
-  <span>Policies you edit here stay in this browser's local storage. Apache-2.0.</span>
+  <span>Policies you edit here stay in this browser's local storage. Apache-2.0. <a href="https://github.com/Walex4/taper/blob/main/docs/no-vault.md">Toward no vault →</a></span>
 </div></footer>
 <div class="toast" id="toast"></div>
 
@@ -307,8 +349,11 @@
   const DEFAULT_POLICY = {
     "ssh.exec": { "host": {"kind":"one_of","values":["build-1.internal","build-2.internal"]}, "program": {"kind":"one_of","values":["git","make","ls"]}, "args": {"kind":"subset","values":["status","--version","build","test","-la"]} },
     "pg.query": { "database": {"kind":"one_of","values":["analytics"]}, "statement_kind": {"kind":"one_of","values":["select","write"]}, "tables": {"kind":"subset","values":["public.events","public.users"]}, "max_rows": {"kind":"range","lo":0,"hi":10000} },
+    "pg.describe": { "database": {"kind":"one_of","values":["analytics"]}, "table": {"kind":"one_of","values":["public.events","public.users"]} },
+    "pg.migrate": { "database": {"kind":"one_of","values":["analytics"]}, "table": {"kind":"one_of","values":["production.orders"]}, "type": {"kind":"one_of","values":["text","integer","boolean"]}, "invariants": {"kind":"one_of","values":["production"]} },
     "http.request": { "method": {"kind":"one_of","values":["GET"]}, "host": {"kind":"one_of","values":["api.example.com"]}, "path": {"kind":"prefix","prefix":"/v1/"} }
   };
+  const POLICY_VERSION = 'v0.2';
   const DEFAULT_NARROW = { "ssh.exec": { "host": {"kind":"one_of","values":["build-1.internal"]}, "program": {"kind":"one_of","values":["git"]}, "args": {"kind":"subset","values":["status"]} } };
   const WIDER = { "ssh.exec": { "host": {"kind":"one_of","values":["build-1.internal","prod-db.internal"]}, "program": {"kind":"one_of","values":["git"]}, "args": {"kind":"subset","values":["status"]} } };
   const OK_REQ = {"host":"build-1.internal","program":"git","args":["status"]};
@@ -329,9 +374,14 @@
     ["http.request","dev",{"method":"GET","host":"api.example.com","path":"/v1/%2e%2e/%2e%2e/admin"},"double-encoded traversal"],
     ["http.request","dev",{"method":"DELETE","host":"api.example.com","path":"/v1/x"},"method escalation"],
     ["pg.query","sub",{"database":"analytics","statement":"SELECT * FROM public.events","max_rows":10},"operation the subagent dropped"],
+    ["pg.describe","dev",{"database":"analytics","table":"pg_catalog.pg_shadow"},"describe the catalogue itself"],
+    ["pg.describe","dev",{"database":"analytics","table":"public.events; DROP TABLE public.events"},"injection in a table name"],
+    ["pg.migrate","dev",{"database":"analytics","table":"production.users","column":"x","type":"text"},"migrate a table outside the grant"],
+    ["pg.migrate","dev",{"database":"analytics","table":"production.orders","column":"x","type":"text\n"},"trailing newline in a type name"],
   ];
 
   const store = { get(k, d) { try { const v = localStorage.getItem('taper.' + k); return v == null ? d : v; } catch { return d; } }, set(k, v) { try { localStorage.setItem('taper.' + k, v); } catch {} } };
+  if (store.get('policy.version', '') !== POLICY_VERSION) { store.set('policy', JSON.stringify(DEFAULT_POLICY, null, 2)); store.set('policy.version', POLICY_VERSION); }
   $('policy').value = store.get('policy', JSON.stringify(DEFAULT_POLICY, null, 2));
   $('narrow-policy').value = store.get('narrow', JSON.stringify(DEFAULT_NARROW, null, 2));
   $('policy').addEventListener('input', () => store.set('policy', $('policy').value));
@@ -349,13 +399,13 @@
 
   // ---- tour state ----
   const tourEl = $('tour'); const done = new Set(); let current = 1;
-  const stepFor = { 1: 's1', 2: 's2', 3: 's2', 4: 's3', 5: 's3', 6: 's4' };
+  const stepFor = { 1: 's1', 2: 's2', 3: 's2', 4: 's3', 5: 's3', 6: 's4', 7: 's5', 8: 's6', 9: 's7' };
   function setTour(n) {
     current = n;
     tourEl.querySelectorAll('li').forEach(li => { const k = +li.dataset.step; li.classList.toggle('now', k === n); li.classList.toggle('done', done.has(k)); });
     document.querySelectorAll('.step').forEach(s => s.classList.toggle('now', s.id === stepFor[n]));
   }
-  const complete = (n) => { done.add(n); setTour(Math.min(6, Math.max(current, n + 1))); };
+  const complete = (n) => { done.add(n); setTour(Math.min(9, Math.max(current, n + 1))); };
   tourEl.querySelectorAll('li').forEach(li => li.onclick = () => { const n = +li.dataset.step; setTour(n); $(stepFor[n]).scrollIntoView({ behavior: 'smooth', block: 'start' }); });
   $('cta-start').onclick = () => setTour(1);
 
@@ -367,23 +417,24 @@
     py = await loadPyodide();
     say('Installing taper-broker from PyPI…');
     await py.loadPackage('micropip');
-    await py.runPythonAsync(`import micropip\nawait micropip.install("taper-broker")`);
+    await py.runPythonAsync(`import micropip\nawait micropip.install("taper-broker>=0.2.0")`);
     py.runPython(await (await fetch('bridge.py', {cache: 'no-cache'})).text());
     bridge = py.globals;
     const r = JSON.parse(bridge.get('reset')());
-    say(`Ready · taper ${r.version} in this tab`, 'ready');
+    say(`Ready · taper ${r.version}${r.tower ? ' + tower' : ''} in this tab`, 'ready');
   } catch (e) {
     say('Runtime failed to start — ' + (e && e.message ? e.message.split('\n')[0] : e), 'failed');
     console.error(e); return;
   }
   const call = (fn, ...args) => JSON.parse(bridge.get(fn)(...args));
   gate(true); setTour(1);
-  const later = ['btn-narrow','btn-widen','btn-revoke','btn-expire']; for (const id of later) $(id).disabled = true;
+  const later = ['btn-narrow','btn-widen','btn-revoke','btn-expire','btn-migrate','btn-refusals','btn-clear','btn-forge-child']; for (const id of later) $(id).disabled = true;
 
-  const tokenCard = (t) => `<div class="tok"><b>${esc(t.name)}</b> · ${t.blocks} block${t.blocks>1?'s':''} · operations: <b>${esc(t.ops.join(', ') || '(none)')}</b> · expires in ${t.expires_in}s · id <b>${esc(t.ids[t.ids.length-1])}</b>
+  const tokenCard = (t) => `<div class="tok"><b>${esc(t.name)}</b> · ${t.blocks} block${t.blocks>1?'s':''} · acts for <b>${esc(t.subject || 'nobody in particular')}</b> · operations: <b>${esc(t.ops.join(', ') || '(none)')}</b> · expires in ${t.expires_in}s · id <b>${esc(t.ids[t.ids.length-1])}</b>
+    ${t.pressure && t.pressure.length ? `<div style="margin-top:8px"><span class="verdict warn">policy pressure</span> <span class="muted">${t.pressure.length} field${t.pressure.length>1?'s':''} to look at</span><pre class="out" style="white-space:pre-wrap">${esc(t.pressure.join('\n'))}</pre></div>` : ''}
     <details><summary>effective capabilities</summary><pre class="out">${esc(JSON.stringify(t.caps, null, 2))}</pre></details>
     <div class="text">${esc(t.text)}</div></div>`;
-  const verdict = (d) => d.allowed ? `<span class="verdict allow">✓ ALLOW</span> <span class="muted">${esc(d.operation)}</span>` : `<span class="verdict deny">✗ DENY</span> ${esc(d.reason)}`;
+  const verdict = (d) => d.allowed ? `<span class="verdict allow">✓ ALLOW</span> <span class="muted">${esc(d.operation)}${d.subject ? ' · for ' + esc(d.subject) : ''}</span>` : `<span class="verdict deny">✗ DENY</span> ${esc(d.reason)}`;
   let haveRoot = false, haveSub = false;
 
   function renderAudit(a) {
@@ -392,28 +443,92 @@
     v.style.display = ''; v.className = 'verdict ' + (a.intact ? 'allow' : 'deny');
     v.textContent = a.intact ? `chain intact · ${a.records.length} records` : `chain broken at record ${a.broken_at}`;
     el.innerHTML = a.records.map((r, i) => {
-      const b = r.body, attrs = b.attributes || {}; const cls = (b.allowed ? 'allow' : 'deny') + (!a.intact && i >= a.broken_at ? ' broken' : '');
-      const what = b.operation + (Object.keys(attrs).length ? ' ' + JSON.stringify(attrs) : '');
-      return `<div class="rec ${cls}"><span class="i">${i}</span><div><div>${b.allowed ? '✓' : '✗'} ${esc(what)}</div><div class="r">${esc(b.reason || '')}</div></div><button class="x" title="delete this record from the log file" data-i="${i}">×</button></div>`;
+      const b = r.body, attrs = b.attributes || {}; const broken = (!a.intact && i >= a.broken_at ? ' broken' : '');
+      const who = b.subject ? ` <span class="muted">· ${esc(b.subject)}</span>` : '';
+      let cls, line, sub;
+      if (b.record === 'clearance') {
+        cls = b.clearance ? 'allow' : 'deny';
+        line = b.clearance ? `◈ clearance ${esc(b.operation)} → ${esc(b.role)} serial ${esc(String(b.serial).slice(0, 10))}…` : `◈ clearance refused ${esc(b.operation)}`;
+        sub = b.clearance ? `certificate ${esc(b.clearance)} · expires ${esc(String(b.not_after))}` : esc(b.refused || '');
+      } else if (b.record === 'result') {
+        const inv = b.invariants || null;
+        cls = b.ok ? 'allow' : 'deny';
+        line = `${b.ok ? '✓' : '✗'} result ${esc(b.operation)}${inv ? (inv.declared ? ` · target raised ${inv.raised.length}` : ' · target declared no invariants') : ''}`;
+        sub = inv && inv.refused && inv.refused.length ? `refused by the target: ${esc(inv.refused.map(x => x.name).join(', '))}` : inv && inv.overridden && inv.overridden.length ? `overridden by the grant: ${esc(inv.overridden.map(x => x.name).join(', '))}` : (b.enforced_by || []).join(' ');
+      } else {
+        cls = b.allowed ? 'allow' : 'deny';
+        line = `${b.allowed ? '✓' : '✗'} ${esc(b.operation + (Object.keys(attrs).length ? ' ' + JSON.stringify(attrs) : ''))}`;
+        sub = esc(b.reason || '');
+      }
+      return `<div class="rec ${cls}${broken}"><span class="i">${i}</span><div><div>${line}${who}</div><div class="r">${sub}</div></div><button class="x" title="delete this record from the log file" data-i="${i}">×</button></div>`;
     }).join('');
     el.querySelectorAll('button[data-i]').forEach(b => b.onclick = () => { renderAudit(call('tamper', +b.dataset.i)); complete(6); toast('Record deleted — the chain reports where'); });
   }
   const refreshAudit = () => renderAudit(call('audit'));
 
   function mint() {
-    const r = call('mint', 'dev', $('policy').value, $('ttl').value, $('note').value);
+    const r = call('mint', 'dev', $('policy').value, $('ttl').value, $('note').value, $('subject').value.trim());
     $('mint-out').innerHTML = r.ok ? tokenCard(r.token) : `<span class="verdict warn">policy refused</span> ${esc(r.error)}`;
     haveRoot = r.ok; haveSub = false;
-    $('btn-narrow').disabled = !haveRoot; $('btn-revoke').disabled = !haveRoot; $('btn-expire').disabled = !haveRoot;
-    $('narrow-out').innerHTML = ''; $('btn-widen').disabled = true;
+    for (const id of ['btn-narrow','btn-revoke','btn-expire','btn-migrate','btn-refusals','btn-clear']) $(id).disabled = !haveRoot;
+    $('forge-row').style.display = r.ok && r.token.subject ? '' : 'none'; $('forge-out').innerHTML = '';
+    $('narrow-out').innerHTML = ''; $('btn-widen').disabled = true; $('btn-forge-child').disabled = true;
     if (r.ok) complete(1);
     return r.ok;
   }
+  function forge(how) {
+    const r = call('forge_subject', how === 'child' ? 'sub' : 'dev', how);
+    if (!r.ok) { $('forge-out').innerHTML = `<span class="verdict warn">${esc(r.error)}</span>`; return; }
+    $('forge-out').innerHTML = (r.allowed ? '<span class="verdict deny">BUG: the forgery was accepted</span>' : `<span class="verdict deny">✗ REFUSED</span> ${esc(r.reason)}`) + ` <span class="muted">· subject recorded: ${esc(r.subject || '(none — a rejected chain claims nobody)')}</span>`;
+    refreshAudit();
+  }
+  $('btn-forge-root').onclick = () => forge('root'); $('btn-forge-strip').onclick = () => forge('strip'); $('btn-forge-child').onclick = () => forge('child');
   function narrow() {
     const r = call('narrow', 'dev', 'sub', $('narrow-policy').value, $('narrow-ttl').value, 'subagent');
     $('narrow-out').innerHTML = r.ok ? tokenCard(r.token) : r.refused ? `<span class="verdict deny">✗ REFUSED</span> ${esc(r.error)}` : `<span class="verdict warn">error</span> ${esc(r.error)}`;
-    haveSub = r.ok; $('btn-widen').disabled = !haveSub; if (r.ok) complete(2); return r.ok;
+    haveSub = r.ok; $('btn-widen').disabled = !haveSub; $('btn-forge-child').disabled = !haveSub; if (r.ok) complete(2); return r.ok;
   }
+  function migrate() {
+    const raised = [{"name":"production","detail":"production schema; a grant must name this to write here"}];
+    if ($('mig-stale').checked) raised.push({"name":"no_recent_backup","detail":"last backup 2026-09-09"});
+    const r = call('write', 'dev', $('mig-req').value, JSON.stringify(raised));
+    if (!r.ok) { $('mig-out').innerHTML = `<span class="verdict warn">error</span> ${esc(r.error)}`; return; }
+    let html = verdict(r);
+    if (r.allowed) {
+      const inv = r.invariants || {declared:false, raised:[], overridden:[], refused:[]};
+      html += `<div style="margin-top:8px">the database raised: <b>${esc(inv.raised.map(x => x.name).join(', ') || 'nothing')}</b>`;
+      if (inv.overridden.length) html += ` · named by the grant, so overridden: <span class="verdict allow">${esc(inv.overridden.map(x => x.name).join(', '))}</span>`;
+      if (inv.refused.length) html += ` · not named: <span class="verdict deny">${esc(inv.refused.map(x => x.name).join(', '))}</span>`;
+      html += `</div><div style="margin-top:8px">${r.wrote ? '<span class="verdict allow">✓ the write ran</span>' : '<span class="verdict deny">✗ the write never ran</span>'}${r.stderr ? ` <span class="muted">${esc(r.stderr)}</span>` : ''}</div>`;
+      html += `<details><summary>what the executor asked the database, in order</summary><pre class="out">${esc(r.probe.map(p => p.sql.replace(/\s+/g,' ').slice(0, 60) + (p.params ? '   ← ' + JSON.stringify(p.params) : '')).join('\n'))}</pre></details>`;
+    }
+    $('mig-out').innerHTML = html; refreshAudit(); complete(7);
+  }
+  function refusalsReport() {
+    const r = call('refusals');
+    const total = r.refused;
+    let html = `<div>decisions <b>${r.decisions}</b> · allowed <b>${r.allowed}</b> · refused <b>${total}</b></div>`;
+    if (!total) { $('ref-out').innerHTML = html + '<div class="muted">no refusals recorded — run the attacks in step 4 first</div>'; complete(8); return; }
+    html += '<div style="margin-top:8px">' + Object.entries(r.buckets).filter(([,n]) => n).map(([k, n]) => `<span class="verdict ${k === 'policy' ? 'warn' : k === 'invariant' ? 'deny' : 'allow'}" style="margin:2px 6px 2px 0">${esc(k)} ${n} · ${(100*n/total).toFixed(0)}%</span>`).join('') + '</div>';
+    if (r.policy.length) html += `<div style="margin-top:10px"><b>policy pressure</b> <span class="muted">— what a legitimate request wanted and the grant did not cover</span><pre class="out">${esc(r.policy.map(p => `${p.operation}.${p.field}  ×${p.count}\n` + Object.entries(p.wanted).map(([w, n]) => `    wanted ${w}  ×${n}`).join('\n')).join('\n'))}</pre></div>`;
+    else html += '<div class="muted" style="margin-top:8px">no policy refusals: nothing legitimate fell outside a grant</div>';
+    if (r.invariants.length) html += `<div style="margin-top:10px"><b>refused by the target</b> <span class="muted">— the grant permitted it; the database's own invariants did not</span><pre class="out">${esc(r.invariants.map(i => `${i.operation}: ${i.name}  ×${i.count}  on ${Object.keys(i.subjects).join(', ')}`).join('\n'))}</pre></div>`;
+    $('ref-out').innerHTML = html; complete(8);
+  }
+  function clearance() {
+    const r = call('clear', 'dev', $('clr-req').value);
+    if (!r.ok) { $('clr-out').innerHTML = `<span class="verdict warn">${esc(r.error)}</span>`; return; }
+    let html = verdict(r);
+    if (r.allowed) {
+      const c = r.certificate;
+      html += `<div class="tok" style="border-left-color: var(--allow)"><b>clearance ${esc(r.clearance.id)}</b> · for <b>${esc(r.subject || 'nobody in particular')}</b>
+        <div style="margin-top:6px">certificate subject <b>${esc(c.subject)}</b><br>issued by <b>${esc(c.issuer)}</b> · serial <b>${esc(c.serial.slice(0, 14))}…</b><br>valid <b>${c.lifetime_s} s</b> from issue, expiring ${esc(c.not_after.slice(11,19))} UTC (30 s of clock skew tolerated before) · ${esc(c.san.join(', '))}</div>
+        <div style="margin-top:8px">connected with: certificate <span class="verdict ${r.connected_with.sslcert ? 'allow' : 'deny'}">${r.connected_with.sslcert ? 'yes' : 'no'}</span> key <span class="verdict ${r.connected_with.sslkey ? 'allow' : 'deny'}">${r.connected_with.sslkey ? 'yes' : 'no'}</span> password <span class="verdict ${r.connected_with.password ? 'deny' : 'allow'}">${r.connected_with.password ? 'YES' : 'none'}</span> · material left in the tower afterwards: <b>${r.material_left}</b></div>
+        <details><summary>the certificate</summary><pre class="out">${esc(c.pem)}</pre></details></div>`;
+    }
+    $('clr-out').innerHTML = html; refreshAudit(); complete(9);
+  }
+  $('btn-migrate').onclick = migrate; $('btn-refusals').onclick = refusalsReport; $('btn-clear').onclick = clearance;
   function widen() {
     const r = call('narrow', 'sub', 'wider', JSON.stringify(WIDER), '', 'subagent, widening itself');
     $('narrow-out').insertAdjacentHTML('beforeend', `<div style="margin-top:10px">${r.ok ? '<span class="verdict deny">BUG: widening succeeded</span>' : `<span class="verdict deny">✗ REFUSED</span> ${esc(r.error)}`}</div>`);
@@ -443,7 +558,8 @@
   };
   $('btn-reset').onclick = () => {
     call('reset'); haveRoot = haveSub = false; done.clear();
-    for (const id of ['mint-out','narrow-out','ask-out','revoke-out']) $(id).innerHTML = '';
+    for (const id of ['mint-out','narrow-out','ask-out','revoke-out','forge-out','mig-out','ref-out','clr-out']) $(id).innerHTML = '';
+    $('forge-row').style.display = 'none'; $('mig-stale').checked = false;
     for (const id of later) $(id).disabled = true;
     refreshAudit(); setTour(1); toast('New root key, empty log');
   };
@@ -465,7 +581,12 @@
       await go('s3', 4); okReq(); ask(); await sleep(900);
       const atk = grid.querySelectorAll('button'); atk[7].click(); await sleep(900); atk[11].click(); await sleep(900);
       await go('s3', 5); okReq(); $('ask-proof').checked = false; ask(); $('ask-proof').checked = true; await sleep(900);
+      await go('s1', 1, 600); forge('root'); await sleep(900);
+      await go('s5', 7); $('mig-stale').checked = false; migrate(); await sleep(1000); $('mig-stale').checked = true; migrate(); await sleep(1100);
+      await go('s6', 8); refusalsReport(); await sleep(1100);
+      await go('s7', 9); clearance(); await sleep(1300);
       await go('s4', 6); $('btn-revoke').click(); await sleep(900);
+      await go('s7', 9, 600); clearance(); await sleep(900);
       const x = $('audit').querySelector('button[data-i="1"]'); if (x) x.click();
       toast('Tour complete — every claim above was demonstrated, not asserted');
     } finally { $('btn-auto').disabled = false; }
