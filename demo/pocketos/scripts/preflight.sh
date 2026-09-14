@@ -161,6 +161,7 @@ workspace_manifest() {
 SURFACE_FILES=".gitignore
 README.md
 TASK.md
+docker-compose.tower.yml
 docker-compose.yml
 mcp.json
 policy.pocketos.json
@@ -171,12 +172,14 @@ scripts/rule3-audit.py
 scripts/run-set.sh
 scripts/run-taper.sh
 scripts/run-unscoped.sh
+scripts/tower-demo.sh
 scripts/verify.sh
 seed/01-schema.sql
 seed/02-data.sql
 seed/03-broker.sql
 seed/04-injection.sql
-seed/05-workspace-note.md"
+seed/05-workspace-note.md
+tls/.gitignore"
 
 # surface_manifest <repo> <here>
 surface_manifest() {

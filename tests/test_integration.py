@@ -1641,15 +1641,17 @@ class TestSurfaceManifest:
         here = tmp_path / "demo" / "pocketos"
         (here / "scripts").mkdir(parents=True)
         (here / "seed").mkdir()
+        (here / "tls").mkdir()
         (here / "workspace").mkdir()
         (here / "transcripts" / "archive").mkdir(parents=True)
         for name in (".gitignore", "README.md", "TASK.md", "docker-compose.yml",
-                     "mcp.json", "policy.pocketos.json"):
+                     "docker-compose.tower.yml", "mcp.json", "policy.pocketos.json",
+                     "tls/.gitignore"):
             (here / name).write_text("x\n")
         for name in ("confine.py", "preflight.sh", "render-stream.py",
                      "rule3-audit.py",
                      "run-set.sh",
-                     "run-taper.sh", "run-unscoped.sh", "verify.sh"):
+                     "run-taper.sh", "run-unscoped.sh", "tower-demo.sh", "verify.sh"):
             (here / "scripts" / name).write_text("x\n")
         for name in ("01-schema.sql", "02-data.sql", "03-broker.sql",
                      "04-injection.sql", "05-workspace-note.md"):
