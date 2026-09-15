@@ -3,6 +3,16 @@
 The first section is what `release.yml` attaches to the GitHub release, so it
 is written to be read on its own.
 
+## Unreleased
+
+- `docs/readiness.md`: could a company run this? What the field says the
+  problem is (IDSA on PocketOS, OWASP ASI02/ASI03, NIST's agent standards
+  initiative, GitGuardian and Akeyless numbers, the vendor moves), the
+  shape of a deployment, a sixteen-item risk register with the true state
+  of each, what is proven and by which test, and the ordered work to
+  "ready" — external review first. The code-size line in README and
+  DESIGN.md was two thousand and is now the measured four and a half.
+
 ## v0.3.0 — 2026-09-14
 
 Rule 1 — never filter a command string, expose typed operations — had a

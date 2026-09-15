@@ -7,7 +7,7 @@ so a subagent cannot exceed its parent.
 
 > ## Status: unaudited. Not yet suitable for production credentials.
 >
-> No external security review has been done. This is about two thousand lines
+> No external security review has been done. This is about four and a half thousand lines
 > of Python written by one person, and the broker is the thing that holds your
 > credentials — so the failure mode of trusting it too early is the failure
 > mode it exists to prevent.
@@ -119,7 +119,7 @@ strictly smaller one, signed offline, and a widening block is rejected
 structurally rather than by policy. Shell injection is not filtered, it is
 inexpressible, because the SSH adapter builds `argv` directly. And Taper is
 never the only boundary: the database role and `sshd` are configured to refuse
-the dangerous operation on their own. It is unaudited, about two thousand
+the dangerous operation on their own. It is unaudited, about four and a half thousand
 lines, and the measured result so far is deliberately modest — in a rebuild of
 the PocketOS incident, both arms did the job ten out of ten. Taper does not
 stop an agent working; it bounds what else it could have done.
@@ -705,6 +705,8 @@ four bypasses with their fixes, and what the harness does not prove.
   and socket rather than OAuth. The 2026-07-28 revision's Multi Round-Trip
   Requests give you spec-blessed mid-call human approval — "this DELETE affects
   40k rows, confirm?" — without holding a stream open.
+
+**Could a company run this?** [`docs/readiness.md`](docs/readiness.md) answers it the way a security review would: the risk register with the true state of each item, what is proven by which test, and the ordered work to "ready", external review first.
 
 **Where this is going.** Taper today is a vault with a good lock, and honest
 about being one. [`docs/no-vault.md`](docs/no-vault.md) is the design note for
