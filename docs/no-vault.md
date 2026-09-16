@@ -355,16 +355,46 @@ mid-transaction on the database and cleared the moment it commits or leaves.
 installs — `protected`, `no_recent_backup`, `another_agent_active` — and the
 demo raises all three.
 
-What stage 1 does not yet do: SSH per-operation certificates and AWS/STS
-(the same shape, not yet written); the tower is a class in the broker's
-process, so its independence is a property of the code path and not yet of
-a uid boundary — that is stage 2, and the interface was written so that
-stage 2 is a transport change. And in stage 1 the invariants probe runs
-*under* the clearance rather than before it: the certificate is issued, the
-connection is made with it, the target is asked, and only then does the
-write run or not. The clearance is still one operation and sixty seconds,
-and a refusal by the target is on the tape beside it; stage 2 reorders this
-so the tower does not sign until the runway has answered.
+**Stage 1, SSH and AWS — built, 16 September 2026.** The same shape,
+twice more. For SSH the vault stops holding an identity and holds an
+Ed25519 CA; `tower init --ssh` creates it. Every allowed `ssh.exec` — and
+every declared `ssh` operation — gets a key generated for that operation
+and a certificate the tower writes itself, without `ssh-keygen`, in
+OpenSSH's own format: sixty seconds, no extensions (no pty, no forwarding,
+no agent), the login user and `user@host` as principals so a target that
+opts into `AuthorizedPrincipalsFile` binds it to itself, a key id of
+`taper:<clearance>:<subject>` so the sshd log names the human, and a
+critical `force-command` that runs the shim with `--expect <sha256>` of
+exactly the program and arguments in the plan. The shim compares that
+hash with what arrives on stdin before it consults its allowlist, so a
+certificate stolen in its sixty seconds can run nothing but the one
+request it was minted for, on any host that trusts the CA. The executor
+writes key and certificate to 0600 files for one `ssh` process and
+removes them; the vault is not consulted.
+
+For AWS the vault stops holding an access key an agent could use and holds
+a *seed*: an IAM principal whose only permission is `sts:AssumeRole` on one
+role. A declared operation carries an `aws` block — the role, the actions,
+the resources with the request's fields in them — and every allowed
+operation calls AssumeRole with a session policy built from the request's
+own values: this bucket, this prefix, nothing wider, for 900 seconds, named
+`taper-<clearance>-<subject>` so CloudTrail reads like the tape. Signature
+Version 4 is written out in `tower/sts.py` rather than pulled from boto3;
+the tests stand up a fake STS and prove what was asked for. The session
+reaches the process as three environment variables in one child and the
+vault key in the declaration's `secrets.env`, if any, is not injected
+beside it. The loader refuses an action wildcard and a resource wildcard —
+the second was found by the red team, not by design.
+
+Two things this stage still does not do: the tower is a class in the
+broker's process, so its independence is a property of the code path and
+not yet of a uid boundary — that is stage 2, and the interface was written
+so that stage 2 is a transport change. And the invariants probe runs
+*under* the clearance rather than before it: the certificate is issued,
+the connection is made with it, the target is asked, and only then does
+the write run or not. The clearance is still one operation and sixty
+seconds, and a refusal by the target is on the tape beside it; stage 2
+reorders this so the tower does not sign until the runway has answered.
 
 Working name for the track: **Tower**. Its own package now; its own
 repository when it is more than one stage. The clearance as a UML sequence

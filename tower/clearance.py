@@ -41,6 +41,7 @@ from taper.chain import ChainError, Token, verify
 from taper.pop import NonceCache, PopError, verify_proof
 
 from .ca import CA, Material
+from .sshcert import SSHCA, SSHMaterial
 
 
 class ClearanceRefused(Exception):
@@ -51,11 +52,12 @@ class ClearanceRefused(Exception):
 class Clearance:
     id: str
     operation: str
-    role: str
+    role: str                # the database role, the SSH principal, or the AWS role ARN
     subject: str
     token: str               # the last block id, as the audit records it
     serial: int
     not_after: float
+    kind: str = "sql"        # what the material is for: sql, ssh, aws
 
 
 @dataclass
@@ -63,6 +65,14 @@ class Tower:
     ca: CA
     root_pub: Ed25519PublicKey
     audit: AuditLog
+    # Stage 1 for SSH: an Ed25519 CA that mints one certificate per
+    # operation, pinned to one program and argument list. None means the
+    # tower clears Postgres only and SSH keeps its vault identity.
+    ssh_ca: Optional[SSHCA] = None
+    shim: str = "/usr/local/libexec/taper-shim"
+    # Stage 1 for AWS: something that can mint a session per operation
+    # (tower.sts.STS, or a fake in tests). None means AWS keeps its vault key.
+    sts: object = None
     clock: Callable[[], float] = time.time
     revoked: set = field(default_factory=set)
     nonces: NonceCache = field(default_factory=NonceCache)
@@ -128,13 +138,56 @@ class Tower:
         clearance_id = hashlib.sha256(
             f"{ids[-1]}|{operation}|{json.dumps(request, sort_keys=True)}|{now:.3f}"
             .encode()).hexdigest()[:24]
-        material = self.ca.issue_client(role, token.subject(), clearance_id, now=now)
+        # What to mint follows the plan the broker made, not the caller's
+        # word: a SQL plan gets a client certificate for the role; an SSH plan
+        # gets a certificate pinned to the exact program and arguments the
+        # plan will send; an AWS plan gets a session scoped to the values in
+        # the request. The plan is logged verbatim, so what was cleared is on
+        # the tape beside the clearance.
+        # verified-by: tests/test_tower.py::TestSSHClearance::test_an_ssh_clearance_is_pinned_to_the_plan_not_the_request
+        plan = decision.plan
+        kind = plan.kind if plan is not None else "sql"
+        extra: dict = {}
+        if kind == "process" and plan.detail.get("aws") is not None:
+            kind = "aws"
+        if kind == "sql":
+            material = self.ca.issue_client(role, token.subject(), clearance_id, now=now)
+        elif kind == "process":
+            if self.ssh_ca is None:
+                self._refuse("tower has no SSH CA; ssh operations are not cleared here",
+                             operation, decision, now)
+            host, program, args = plan.detail["host"], plan.detail["program"], \
+                list(plan.detail.get("args", []))
+            material = self.ssh_ca.issue(role, host, program, args, clearance_id,
+                                         token.subject(), self.shim, now=now)
+            kind = "ssh"
+            extra = {"host": host, "program": program, "args": args,
+                     "key_id": material.key_id, "force_command":
+                     f"{self.shim} --expect …"}
+        elif kind == "aws":
+            if self.sts is None:
+                self._refuse("tower has no STS seed; aws operations are not cleared here",
+                             operation, decision, now)
+            from .sts import session_policy
+            spec = plan.detail["aws"]
+            policy = session_policy(spec)
+            try:
+                material = self.sts.assume(spec["role_arn"], policy, clearance_id,
+                                           token.subject(), now=now)
+            except Exception as exc:        # noqa: BLE001 - STS said no, or was unreachable
+                self._refuse(f"sts refused the session: {exc}", operation, decision, now)
+            role = spec["role_arn"]
+            extra = {"session_policy": policy}
+        else:
+            self._refuse(f"tower does not clear plans of kind {kind!r}", operation,
+                         decision, now)
         clearance = Clearance(clearance_id, operation, role, token.subject(),
-                              ids[-1], material.serial, material.not_after)
+                              ids[-1], material.serial, material.not_after, kind)
         self._issued[clearance_id] = material
         self.audit.append({
             "t": round(now, 3),
             "record": "clearance",
+            "kind": kind,
             "clearance": clearance_id,
             "operation": operation,
             "role": role,
@@ -144,11 +197,13 @@ class Tower:
             "serial": str(material.serial),
             "not_after": round(material.not_after, 3),
             "issued_by": "tower:in-process",
+            **extra,
         })
         return clearance
 
-    def take(self, clearance_id: str) -> Material:
-        """Hand over the material exactly once."""
+    def take(self, clearance_id: str):
+        """Hand over the material exactly once. A Material (Postgres), an
+        SSHMaterial, or an AWSSession, by the clearance's kind."""
         try:
             return self._issued.pop(clearance_id)
         except KeyError:

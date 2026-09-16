@@ -90,13 +90,13 @@ class TestSecrets:
 
 # ---------------------------------------------------------------------- shim
 
-def run_shim(payload: str, allowlist: dict, tmp_path: Path) -> dict:
+def run_shim(payload: str, allowlist: dict, tmp_path: Path, argv: list | None = None) -> dict:
     config = tmp_path / "allowlist.json"
     config.write_text(json.dumps(allowlist))
     env = {**os.environ, "TAPER_ALLOWLIST": str(config),
            "PYTHONPATH": str(ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")}
     result = subprocess.run(
-        [sys.executable, str(ROOT / "taper" / "shim.py")],
+        [sys.executable, str(ROOT / "taper" / "shim.py"), *(argv or [])],
         input=payload, capture_output=True, text=True, env=env, timeout=30)
     try:
         return json.loads(result.stdout)
@@ -156,6 +156,27 @@ class TestShim:
             capture_output=True, text=True, env=env, timeout=30)
         assert result.returncode != 0
         assert "refusing to run" in result.stdout
+
+    def test_a_request_that_is_not_the_one_the_clearance_named_is_refused(self, tmp_path):
+        """Tower's SSH certificate carries force-command `shim --expect <hash>`
+        of the one request it was minted for. The shim compares before it
+        consults the allowlist: a permitted program with different arguments
+        is still refused, because it is not the operation that was cleared."""
+        from tower.sshcert import expect_hash
+        cleared = expect_hash("echo", ["hello"])
+        ok = run_shim(json.dumps({"program": "echo", "args": ["hello"]}), ECHO_ALLOWLIST,
+                      tmp_path, argv=["--expect", cleared])
+        assert ok["ok"], ok
+        other = run_shim(json.dumps({"program": "echo", "args": ["world"]}), ECHO_ALLOWLIST,
+                         tmp_path, argv=["--expect", cleared])
+        assert not other["ok"] and "not the one this clearance" in other["error"]
+        # the value must be a digest; anything else and the shim does not start
+        bad = run_shim(json.dumps({"program": "echo", "args": ["hello"]}), ECHO_ALLOWLIST,
+                       tmp_path, argv=["--expect", "; id"])
+        assert not bad["ok"] and "sha256" in bad["error"]
+        # and without --expect the shim behaves as before
+        plain = run_shim(json.dumps({"program": "echo", "args": ["hello"]}), ECHO_ALLOWLIST, tmp_path)
+        assert plain["ok"]
 
 
 # ------------------------------------------------------------------- executor

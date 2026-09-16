@@ -5,6 +5,39 @@ is written to be read on its own.
 
 ## Unreleased
 
+**Tower stage 1 for SSH and AWS.** The vault stops holding an SSH identity
+and an AWS access key; it holds an SSH CA and an STS seed, and every
+operation gets a credential minted for it.
+
+- SSH: `tower/sshcert.py` writes OpenSSH user certificates itself, in the
+  format from PROTOCOL.certkeys, without `ssh-keygen`; the tests parse and
+  verify them by hand and, where OpenSSH is installed, with `ssh-keygen
+  -L`. Each certificate: sixty seconds, no extensions, principals
+  `user@host` and `user`, key id `taper:<clearance>:<subject>`, and a
+  critical `force-command` running the shim with `--expect <sha256>` of
+  exactly the plan's program and arguments. The shim (`taper/shim.py`)
+  compares that hash with what arrives on stdin before consulting its
+  allowlist. The executor gains a `_ssh_identity` seam; the cleared
+  executor answers it with the tower's material, once, and the vault is
+  not consulted. `tower init --ssh`, `tower ssh-ca init|trust|issue`,
+  `tower ssh-inspect`.
+- AWS: `tower/sts.py` calls AssumeRole with a session policy built from the
+  request's own values, for 900 seconds, named `taper-<clearance>-<subject>`;
+  Signature Version 4 over urllib, no boto3. A declared operation carries an
+  `aws` block (`role_arn`, `actions`, `resources` with one placeholder in
+  the resource part, `conditions`); the loader refuses an action wildcard
+  and a resource wildcard. The session reaches the child process as three
+  environment variables and the declaration's vault key is not injected
+  beside it. The seed is `aws.seed.access_key_id` / `aws.seed.secret_access_key`
+  in the vault; `tower aws-seed` explains the IAM shape. `ops/aws.s3ls.json`
+  carries the block.
+- `ClearedBroker` clears `sql`, `ssh` and `aws` plans; each clearance record
+  says which, and for SSH names the host, program, arguments and key id, for
+  AWS the session policy. Without an SSH CA or a seed, those paths are
+  exactly as before.
+- Red team: section 11, twenty-five cases, 140 in all. One of them found
+  the resource-wildcard gap in the first draft of the `aws` block.
+
 - `docs/readiness.md`: could a company run this? What the field says the
   problem is (IDSA on PocketOS, OWASP ASI02/ASI03, NIST's agent standards
   initiative, GitGuardian and Akeyless numbers, the vendor moves), the

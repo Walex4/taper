@@ -371,6 +371,87 @@ def _compile_secrets(where: str, raw: Any) -> dict[str, dict]:
     return out
 
 
+_ROLE_ARN = re.compile(r"^arn:aws(-[a-z]+)?:iam::\d{12}:role/[\w+=,.@/-]{1,512}\Z")
+_AWS_ACTION = re.compile(r"^[a-z0-9-]{1,32}:[A-Za-z0-9*]{1,128}\Z")
+_AWS_RESOURCE = re.compile(r"^arn:aws(-[a-z]+)?:[a-z0-9-]{1,32}:[a-z0-9-]{0,32}:\d{0,12}:[\w+=,.@/:*{}-]{1,1024}\Z")
+
+
+def _compile_aws(where: str, raw: Any, fields: dict[str, DeclaredField]) -> set[str]:
+    """{"role_arn", "actions", "resources", "conditions"?}: what Tower's AWS
+    stage asks STS for, per operation. Resources and condition values may
+    carry placeholders - exactly one, whole, as everywhere else - filled from
+    the request, so the session is scoped to this bucket and this prefix
+    and not to the role's whole reach. Returns the fields used."""
+    if not isinstance(raw, dict):
+        raise _fail(where, "'aws' is an object")
+    unknown = set(raw) - {"role_arn", "actions", "resources", "conditions"}
+    if unknown:
+        raise _fail(where, f"unknown aws keys {sorted(unknown)}")
+    arn = _expect_str(where, raw, "role_arn")
+    if not _ROLE_ARN.match(arn):
+        raise _fail(where, f"role_arn {arn!r} is not an IAM role ARN")
+    actions = raw.get("actions")
+    if (not isinstance(actions, list) or not actions
+            or not all(isinstance(a, str) and _AWS_ACTION.match(a) for a in actions)):
+        raise _fail(where, "'actions' is a non-empty list like [\"s3:ListBucket\"]")
+    if any(a.endswith(":*") or a == "*" for a in actions):
+        raise _fail(where, "an action wildcard is the role's whole reach; name the actions")
+    used: set[str] = set()
+
+    def check_value(v: Any, label: str) -> None:
+        if not isinstance(v, str):
+            raise _fail(where, f"{label} must be a string")
+        name = _placeholder(v) if v.startswith("{") and v.endswith("}") else None
+        if name is not None:
+            if name not in fields or fields[name].type != "string":
+                raise _fail(where, f"{label}: placeholder must name a string field")
+            used.add(name)
+            return
+        if "{" in v or "}" in v:
+            # a placeholder inside an ARN is the composition the grammar forbids
+            # everywhere else - except here, where an ARN has structure the
+            # placeholder must sit inside. Permit exactly one, and only in the
+            # resource part after the last colon.
+            pre, _, tail = v.rpartition(":")
+            m = re.fullmatch(r"([\w/+=,.@*-]*)\{([a-z][a-z0-9_]{0,31})\}([\w/+=,.@*-]*)", tail)
+            if m is None or "{" in pre:
+                raise _fail(where, f"{label}: one placeholder, in the resource part only")
+            fname = m.group(2)
+            if fname not in fields or fields[fname].type != "string":
+                raise _fail(where, f"{label}: placeholder names no string field")
+            used.add(fname)
+
+    resources = raw.get("resources")
+    if not isinstance(resources, list) or not resources:
+        raise _fail(where, "'resources' is a non-empty list of ARNs")
+    for r in resources:
+        check_value(r, "resources")
+        if isinstance(r, str) and not _AWS_RESOURCE.match(r):
+            raise _fail(where, f"resource {r!r} is not an ARN")
+        # A resource of `*`, or an ARN whose resource part is only a
+        # wildcard, is the role's whole reach again - the thing a session
+        # policy exists to narrow. Found by the red team, not by design.
+        # verified-by: tests/test_taper.py::TestDeclared::test_an_aws_resource_wildcard_is_refused_at_load
+        tail = r.rpartition(":")[2] if isinstance(r, str) else ""
+        if r == "*" or tail.strip("*/") == "":
+            raise _fail(where, f"resource {r!r} is a wildcard; name the resource, "
+                        f"with the request's field in it")
+    conditions = raw.get("conditions")
+    if conditions is not None:
+        if not isinstance(conditions, dict):
+            raise _fail(where, "'conditions' is an IAM condition block")
+        for op, block in conditions.items():
+            if not isinstance(block, dict):
+                raise _fail(where, f"condition {op!r} is an object of key: value")
+            for key, val in block.items():
+                if isinstance(val, list):
+                    for item in val:
+                        check_value(item, f"conditions.{op}.{key}")
+                else:
+                    check_value(val, f"conditions.{op}.{key}")
+    return used
+
+
 def _compile_layer2(where: str, raw: Any) -> Layer2 | None:
     if raw is None:
         return None
@@ -387,7 +468,7 @@ def _compile_layer2(where: str, raw: Any) -> Layer2 | None:
 
 
 _TOP_KEYS = {
-    "process": {"argv", "secrets"},
+    "process": {"argv", "secrets", "aws"},
     "ssh": {"host", "program", "args"},
     "sql": {"database", "statement", "params", "writes", "tables", "max_rows", "dsn"},
     "http": {"method", "host", "path", "body", "authorization"},
@@ -426,6 +507,8 @@ def compile_spec(spec: dict, source: str = "<spec>") -> Declaration:
         tpl = _compile_template(where + ".argv", spec.get("argv"), fields, True)
         used = {v for k, v in tpl if k == "field"}
         _compile_secrets(where + ".secrets", spec.get("secrets"))
+        if spec.get("aws") is not None:
+            used |= _compile_aws(where + ".aws", spec["aws"], fields)
     elif kind == "ssh":
         host = _expect_str(where, spec, "host")
         h = _placeholder(host)
@@ -584,6 +667,28 @@ class DeclaredAdapter(Adapter):
         return out
 
     @staticmethod
+    def _fill_aws(block: dict, request: dict) -> dict:
+        """The aws block with this request's values in place of its
+        placeholders. Whole-value placeholders and the one-inside-an-ARN
+        form the compiler admitted; nothing else is substituted."""
+        def one(v):
+            if not isinstance(v, str):
+                return v
+            if v.startswith("{") and v.endswith("}") and "{" not in v[1:]:
+                return str(request[v[1:-1]])
+            def sub(m):
+                return str(request[m.group(1)])
+            return re.sub(r"\{([a-z][a-z0-9_]{0,31})\}", sub, v)
+        out = {"role_arn": block["role_arn"], "actions": list(block["actions"]),
+               "resources": [one(r) for r in block["resources"]]}
+        if block.get("conditions"):
+            out["conditions"] = {
+                op: {k: ([one(i) for i in v] if isinstance(v, list) else one(v))
+                     for k, v in blk.items()}
+                for op, blk in block["conditions"].items()}
+        return out
+
+    @staticmethod
     def _one(value: str, request: dict) -> str:
         name = _placeholder(value)
         return value if name is None else str(request[name])
@@ -599,13 +704,16 @@ class DeclaredAdapter(Adapter):
         if kind == "process":
             argv = self._fill(s["argv"], request)
             inject = _compile_secrets("", s.get("secrets"))
+            detail = {**base_detail, "inject": inject,
+                      "boundary": "local process; " + (
+                          self.decl.layer2.enforced_by if self.decl.layer2
+                          else "layer 1 only")}
+            if s.get("aws") is not None:
+                detail["aws"] = self._fill_aws(s["aws"], request)
             return ExecPlan(
                 kind="process", argv=argv,
                 secret_refs={var: how["ref"] for var, how in inject.items()},
-                detail={**base_detail, "inject": inject,
-                        "boundary": "local process; " + (
-                            self.decl.layer2.enforced_by if self.decl.layer2
-                            else "layer 1 only")},
+                detail=detail,
             )
         if kind == "ssh":
             if self._ssh is None:

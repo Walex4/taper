@@ -37,7 +37,21 @@
     }
   },
   "layer2": {
-    "enforced_by": "IAM: the access key in the vault belongs to a user or role whose policy allows s3:ListBucket on the named buckets and nothing else. Tower stage 1 for AWS replaces the stored key with an STS session per operation; until then the vault holds it.",
-    "check": "aws s3api put-object --bucket <b> --key x --body /dev/null  ->  AccessDenied; aws iam list-users  ->  AccessDenied"
+    "enforced_by": "IAM. Without Tower: the access key in the vault belongs to a principal whose policy allows s3:ListBucket on the named buckets and nothing else. With Tower (an STS seed in the vault): the seed can only sts:AssumeRole into the role in `aws`, and every operation runs under a 900-second session whose policy names this one bucket and this one prefix - narrower than the role, and the role is still the ceiling.",
+    "check": "aws s3api put-object --bucket <b> --key x --body /dev/null  ->  AccessDenied; aws iam list-users  ->  AccessDenied; with a session from `tower`: aws s3api list-objects-v2 --bucket <other-bucket>  ->  AccessDenied"
+  },
+  "aws": {
+    "role_arn": "arn:aws:iam::123456789012:role/taper-s3-reader",
+    "actions": [
+      "s3:ListBucket"
+    ],
+    "resources": [
+      "arn:aws:s3:::{bucket}"
+    ],
+    "conditions": {
+      "StringLike": {
+        "s3:prefix": "{prefix}*"
+      }
+    }
   }
 }

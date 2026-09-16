@@ -631,7 +631,7 @@ refuses anyone else before a token is even parsed. Set the socket's group to the
 ## Tests and validation
 
 ```bash
-make validate    # preflight + the test suite + 115 attacks. The release gate.
+make validate    # preflight + the test suite + 140 attacks. The release gate.
 ```
 
 Four layers, and they check different things:
@@ -639,7 +639,7 @@ Four layers, and they check different things:
 | Command | Checks | Needs |
 |---|---|---|
 | `pytest` | the code does what you meant — 273 tests | nothing |
-| `python validate/redteam.py` | the system refuses what someone *else* meant — 115 attacks | nothing |
+| `python validate/redteam.py` | the system refuses what someone *else* meant — 140 attacks | nothing |
 | `bash scripts/preflight.sh` | this machine can host a broker safely | nothing |
 | `python validate/check_postgres.py <dsn>` | **the database refuses on its own** | a real Postgres |
 | `bash validate/check_ssh.sh <host> <key>` | **sshd refuses on its own** | a real target host |
@@ -681,7 +681,7 @@ stacked statements classifying as `SELECT`, the real pgAdmin backslash payload
 getting through, `pg_read_file` passing as a plain select because it touched no
 table, and `/v1/../../admin` satisfying a `/v1/` prefix. All four are fixed and
 pinned by regression tests. Expect it to find more when you extend the adapters.
-[`docs/redteam.md`](docs/redteam.md) walks through the cases (fifty-nine at v0.1.1, eighty-one at v0.2.1, one hundred and fifteen now), the
+[`docs/redteam.md`](docs/redteam.md) walks through the cases (fifty-nine at v0.1.1, eighty-one at v0.2.1, one hundred and forty now), the
 four bypasses with their fixes, and what the harness does not prove.
 
 ## Production notes
@@ -716,10 +716,17 @@ that verify the token themselves, and a *clearance* model — a separate
 co-signer that makes a credential exist for one operation only when shown a
 verified decision, and a hold released by a second party when the target or
 the policy asks for one. A separate track, reusing every part of this one.
-Stage 1 for Postgres is built: the `tower` package, `tower init`, and
-`TAPER_TOWER` on the broker — the agent role has no password, and every
-allowed operation mints a sixty-second certificate with the subject's name in
-it. The demo's third run, `scripts/tower-demo.sh`, shows it.
+Stage 1 is built for Postgres, SSH and AWS: the `tower` package, `tower
+init --ssh`, and `TAPER_TOWER` on the broker. The agent role has no
+password and every allowed Postgres operation mints a sixty-second
+certificate with the subject's name in it; every allowed `ssh.exec` mints a
+sixty-second OpenSSH certificate — written by the tower itself, no
+`ssh-keygen` — whose `force-command` pins the shim to the hash of that one
+request; every declared operation with an `aws` block runs under a
+900-second STS session whose policy names only the request's own bucket and
+prefix. The vault holds a CA, an SSH CA and an STS seed, none of which a
+target accepts as a credential. The demo's third run,
+`scripts/tower-demo.sh`, shows the Postgres path.
 
 ## Prior art — read this before you get excited
 

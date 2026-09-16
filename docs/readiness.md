@@ -129,7 +129,7 @@ means the design accepts it and says so; *open* means work not yet done;
 | # | Risk | State | What is true today |
 |---|------|-------|--------------------|
 | 1 | The broker's code has never been externally reviewed | **open** | About four and a half thousand lines of Python (seven thousand with the comments) across `taper/` and `tower/`, one author, a red team of 115 cases and a lint that ties every claim to a test. No external audit. No formal proof that intersection is monotone, though the algebra is small enough for one. |
-| 2 | The broker holds credentials at rest | **inherent, narrowing** | For Postgres under Tower: the CA key only, and the agent role has no password. For SSH and HTTP: the vault still holds them. Tower stage 1 for SSH and AWS is designed, not built. |
+| 2 | The broker holds credentials at rest | **inherent, narrowing** | Under Tower: for Postgres the CA key only, and the agent role has no password; for SSH an SSH CA only, and every operation gets a sixty-second certificate pinned to its one request; for AWS a seed that can only assume one role, and every operation gets a 900-second session scoped to its own values. For HTTP the vault still holds the bearer token. |
 | 3 | A broker compromise yields what it holds | **built** | Layer 2. A total policy bypass yields what the target itself permits — a read on granted tables, the shim's allowlist. Verified with the broker removed. |
 | 4 | Side channels: the agent reads a secret from somewhere else | **inherent** | Taper is not a sandbox and says so in DESIGN.md §1. It bounds what a credential can *do*; a credential the agent finds elsewhere is the operator's problem. The PocketOS rig puts the password in the README on purpose to keep this honest. |
 | 5 | Revocation needs online state | **inherent** | Short TTLs are the answer, as for macaroons since 2014. One revocation list is shared by broker and tower, so a revoked token stops the next clearance. An issued clearance lives out its sixty seconds. |
@@ -138,7 +138,7 @@ means the design accepts it and says so; *open* means work not yet done;
 | 8 | Workload attestation: who may hold a root token at all | **open** | SPIFFE solves this and Taper does not integrate with it. Today, possession of the proving key file is the answer. |
 | 9 | The policy file and the catalog are agent-writable in the repository | **open, deployment** | Inert while minting needs the root key; the correct home is `/etc/taper`, root-owned. Documented, not enforced. |
 | 10 | Typed surface fails to cover real tasks | **open, measured** | The falsification test. Declared operations and `taper coverage` are the relief and the measurement; a week of real use has not happened. |
-| 11 | Tower's independence is a code path, not a uid | **open** | Stage 1. The interface was written for stage 2 (own uid, split key, holds), which is not built. |
+| 11 | Tower's independence is a code path, not a uid | **open** | Stage 1, now for Postgres, SSH and AWS. The interface was written for stage 2 (own uid, split key, holds), which is not built. |
 | 12 | Supply chain: is the package what the repository says | **partly built** | PyPI trusted publishing (OIDC, no token anywhere). No signed releases, no SBOM, no SLSA provenance, no reproducible build. |
 | 13 | SaaS targets | **out of scope** | GitHub, Slack, Salesforce need someone to hold a token. The design says: do not be the thing that stores it. A proxy is the right tool there. |
 | 14 | Prompt injection | **inherent, bounded** | Not prevented — Taper is not a model-layer control. Bounded: an injected instruction can only name an operation inside the grant, and the injected-run experiment showed exactly that. |
@@ -209,10 +209,9 @@ reaches it. Each item is one deliverable; none is started unless listed.
 10. **Load and soak.** A day of sustained requests through the socket, the
     MCP path and the tower, with numbers in the README. The design makes no
     performance claim today because it has none.
-11. **Tower stage 1 for SSH and AWS; then stage 2.** Per-operation SSH
-    certificates and STS sessions remove the stored secrets for two more
-    targets; stage 2 puts the tower in its own uid with a split key and
-    holds, and moves the invariants probe before the signature.
+11. **Tower stage 2.** Stage 1 for SSH and AWS shipped on 16 September;
+    stage 2 puts the tower in its own uid with a split key and holds, and
+    moves the invariants probe before the signature.
 12. **A week of real use, measured.** The falsification test in DESIGN.md
     §10, run for real: one team, one week, `taper audit --refusals` at the
     end, and the result published whatever it says.

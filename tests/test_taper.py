@@ -1927,6 +1927,21 @@ class TestDeclared:
         with pytest.raises(SpecError, match="shadows"):
             compile_spec(_spec(operation="ssh.exec"))
 
+    def test_an_aws_resource_wildcard_is_refused_at_load(self):
+        """An `aws` block scopes the STS session to the request's values. A
+        resource of `*`, or an ARN that is only a wildcard, would make the
+        session the role's whole reach. The red team found the second form."""
+        from taper.declared import SpecError, compile_spec
+        spec = _spec(argv=["aws", "s3api", "list-objects-v2", "--bucket", "{namespace}"],
+                     aws={"role_arn": "arn:aws:iam::123456789012:role/r", "actions": ["s3:ListBucket"],
+                          "resources": ["arn:aws:s3:::{namespace}"]})
+        assert compile_spec(spec).spec["aws"]["resources"] == ["arn:aws:s3:::{namespace}"]
+        for bad in ("*", "arn:aws:s3:::*", "arn:aws:s3:::*/*", "arn:aws:iam::123456789012:*"):
+            with pytest.raises(SpecError, match="wildcard|not an ARN"):
+                compile_spec({**spec, "aws": {**spec["aws"], "resources": [bad]}})
+        with pytest.raises(SpecError, match="whole reach"):
+            compile_spec({**spec, "aws": {**spec["aws"], "actions": ["s3:*"]}})
+
     # -- condition 3: layer 2 named or loud -----------------------------------
 
     def test_a_spec_without_layer2_is_marked_layer_1_only(self):

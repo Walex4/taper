@@ -105,6 +105,7 @@ class SSHAdapter(Adapter):
                 "host": host,
                 "program": program,
                 "args": args,
+                "user": self.user,
                 "stdin_json": payload,
                 # No enforced_by here on purpose. What was enforced is not known
                 # until the exchange has happened; taper/attest.py derives it

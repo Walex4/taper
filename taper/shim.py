@@ -375,8 +375,25 @@ def apply_landlock(config) -> str:
     return f"applied(abi={abi}, paths={len(paths)})"
 
 
+def expected_hash(argv: list[str]) -> str | None:
+    """`--expect <sha256>` from the force-command of a Tower clearance
+    certificate: the hash of the one request this session may carry. sshd
+    runs the force-command through the login shell, so the value arrives in
+    argv; it is hex and nothing else, or the shim refuses to start."""
+    if "--expect" not in argv:
+        return None
+    i = argv.index("--expect")
+    if i + 1 >= len(argv):
+        fail("--expect needs a value")
+    value = argv[i + 1]
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        fail("--expect is not a sha256 hex digest")
+    return value
+
+
 def main() -> None:
     config = load_allowlist()
+    expect = expected_hash(sys.argv[1:])
 
     raw = sys.stdin.read(64 * 1024)
     if not raw.strip():
@@ -398,6 +415,19 @@ def main() -> None:
         fail("program must be a string")
     if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
         fail("args must be a list of strings")
+
+    # Under a Tower clearance the certificate that opened this session was
+    # minted for exactly one request. Whatever arrives on stdin is compared
+    # with that request before the allowlist is consulted: a stolen
+    # certificate in its sixty seconds can carry nothing else, on any host.
+    # verified-by: tests/test_integration.py::TestShim::test_a_request_that_is_not_the_one_the_clearance_named_is_refused
+    if expect is not None:
+        import hashlib
+        actual = hashlib.sha256(json.dumps(
+            {"program": program, "args": list(args)},
+            sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        if actual != expect:
+            fail("request is not the one this clearance was issued for")
 
     entry = config["programs"].get(program)
     if entry is None:

@@ -20,10 +20,12 @@ from .clearance import ClearanceRefused, Tower
 
 
 class ClearedBroker(Broker):
-    def __init__(self, *args, tower: Tower, role: str = "taper_agent", **kwargs):
+    def __init__(self, *args, tower: Tower, role: str = "taper_agent",
+                 ssh_user: str = "taper-agent", **kwargs):
         super().__init__(*args, **kwargs)
         self.tower = tower
         self.role = role
+        self.ssh_user = ssh_user
         # One revocation list, shared. Revoking a token at the broker is the
         # go-around: from that moment the tower refuses every clearance the
         # token or any child of it asks for, without a second call.
@@ -33,11 +35,31 @@ class ClearedBroker(Broker):
     def decide(self, token_text: str, operation: str, request: dict,
                peer: Optional[dict] = None, proof: Optional[dict] = None) -> Decision:
         decision = super().decide(token_text, operation, request, peer=peer, proof=proof)
-        if not decision.allowed or decision.plan is None or decision.plan.kind != "sql":
+        if not decision.allowed or decision.plan is None:
+            return decision
+        plan = decision.plan
+        # Which plans the tower clears, and with what role:
+        #   sql      -> the database role
+        #   ssh      -> a process plan carrying an SSH identity ref; the
+        #               login principal is the role, and the tower must have
+        #               an SSH CA or the vault identity is used as before
+        #   aws      -> a process plan whose declaration carries an `aws`
+        #               block; the role is the ARN in that block
+        if plan.kind == "sql":
+            role = self.role
+        elif plan.kind == "process" and plan.detail.get("aws") is not None:
+            if self.tower.sts is None:
+                return decision                    # vault key, as before
+            role = plan.detail["aws"]["role_arn"]
+        elif plan.kind == "process" and "identity" in plan.secret_refs:
+            if self.tower.ssh_ca is None:
+                return decision                    # vault identity, as before
+            role = plan.detail.get("user") or self.ssh_user
+        else:
             return decision
         try:
             clearance = self.tower.clear(token_text, operation, request, proof,
-                                         decision, self.role)
+                                         decision, role)
         except ClearanceRefused as exc:
             # The broker said yes and the tower said no. The tower wins, and
             # the audit already has both records. What the caller sees is a
@@ -50,5 +72,6 @@ class ClearedBroker(Broker):
         decision.plan.detail["clearance"] = {
             "id": clearance.id, "serial": str(clearance.serial),
             "not_after": round(clearance.not_after, 3), "role": clearance.role,
+            "kind": clearance.kind,
         }
         return decision

@@ -557,6 +557,156 @@ def run(report: Report, tmp: Path) -> None:
     report.check("declared: every refusal is on an intact tape", intact)
 
     # ---------------------------------------------------------------------
+    section("11. Tower for SSH and AWS — a credential for one operation carries no other")
+    from tower.sshcert import SSHCA as _SSHCA, expect_hash as _expect, verify as _sshverify
+    from tower.broker import ClearedBroker as _CB
+    from tower.executor import ClearedExecutor as _CE
+    import base64 as _b64mod
+    ssh_ca = _SSHCA.create()
+    stower = _Tower(ca=_CA.create(), root_pub=root.public_key(),
+                    audit=_Audit(tmp / "ssh-tower-audit.jsonl"), clock=lambda: NOW,
+                    ssh_ca=ssh_ca, shim="/usr/local/libexec/taper-shim")
+    sbroker = _CB(root_pub=root.public_key(),
+                  adapters={"ssh.exec": SSHAdapter(), "pg.query": PostgresAdapter()},
+                  audit_path=tmp / "ssh-tower-audit.jsonl", clock=lambda: NOW, tower=stower)
+    stok = Token.issue(root, FULL, ttl_seconds=3600, now=NOW, subject="alice@example.com")
+    sw = stok.serialize()
+    sreq = {"host": "build-1.internal", "program": "git", "args": ["status"]}
+    sd = sbroker.decide(sw, "ssh.exec", sreq,
+                        proof=prove(stok.proving_key(), sw, "ssh.exec", sreq, now=NOW))
+    report.check("ssh: the honest request is cleared", sd.allowed and
+                 sd.plan.detail["clearance"]["kind"] == "ssh",
+                 sd.reason if not sd.allowed else "clearance " + sd.plan.detail["clearance"]["id"])
+    smat = stower.take(sd.plan.detail["clearance"]["id"])
+    scert = _sshverify(smat.cert_line, ssh_ca.key.public_key())
+    fc = scert.critical_options.get("force-command", "")
+    report.check("ssh: the certificate pins the shim to this request's hash",
+                 fc == "/usr/local/libexec/taper-shim --expect " + _expect("git", ["status"]), fc)
+    report.check("ssh: a different argument list has a different hash",
+                 _expect("git", ["status", "--porcelain"]) != _expect("git", ["status"]))
+    report.check("ssh: the certificate carries no extensions (no pty, no forwarding, no agent)",
+                 scert.extensions == {}, str(scert.extensions))
+    report.check("ssh: the certificate names this host as a principal",
+                 scert.principals == ["taper-agent@build-1.internal", "taper-agent"],
+                 str(scert.principals))
+    report.check("ssh: the certificate lives sixty seconds",
+                 scert.valid_before - int(NOW) == 60, f"{scert.valid_before - int(NOW)} s")
+    try:
+        stower.take(sd.plan.detail["clearance"]["id"])
+        report.check("ssh: material taken twice", False, "HANDED OUT AGAIN")
+    except _Refused as exc:
+        report.check("ssh: material taken twice", True, str(exc))
+    # a certificate edited to point at another command does not verify
+    parts = smat.cert_line.split()
+    blob = bytearray(_b64mod.b64decode(parts[1]))
+    at = blob.index(b"--expect ")
+    blob[at + 9] ^= 0x01
+    try:
+        _sshverify(parts[0] + b" " + _b64mod.b64encode(bytes(blob)), ssh_ca.key.public_key())
+        report.check("ssh: a certificate with its force-command edited", False, "VERIFIED")
+    except ValueError as exc:
+        report.check("ssh: a certificate with its force-command edited", True, str(exc))
+    # a certificate from another CA
+    other_ca = _SSHCA.create()
+    om = other_ca.issue("taper-agent", "build-1.internal", "git", ["status"], "x",
+                        "mallory@example.com", "/usr/local/libexec/taper-shim", now=NOW)
+    try:
+        _sshverify(om.cert_line, ssh_ca.key.public_key())
+        report.check("ssh: a certificate signed by another CA", False, "VERIFIED")
+    except ValueError as exc:
+        report.check("ssh: a certificate signed by another CA", True, str(exc))
+    # the shim itself, if runnable here: the cleared hash admits one request
+    import subprocess as _sp, sys as _sys, json as _json
+    allow = tmp / "allowlist.json"
+    allow.write_text(_json.dumps({"programs": {"echo": {"path": "/bin/echo",
+                                                        "args": ["hello", "world"]}}}))
+    _root = Path(__file__).resolve().parent.parent
+    env = {**__import__("os").environ, "TAPER_ALLOWLIST": str(allow),
+           "PYTHONPATH": str(_root)}
+    def shim(payload, expect):
+        r = _sp.run([_sys.executable, str(_root / "taper" / "shim.py"), "--expect", expect],
+                    input=_json.dumps(payload), capture_output=True, text=True, env=env, timeout=30)
+        try:
+            return _json.loads(r.stdout)
+        except _json.JSONDecodeError:
+            return {"ok": False, "error": r.stdout + r.stderr}
+    h = _expect("echo", ["hello"])
+    report.check("shim: the request the clearance named runs",
+                 shim({"program": "echo", "args": ["hello"]}, h).get("ok") is True)
+    for payload in ({"program": "echo", "args": ["world"]},
+                    {"program": "echo", "args": ["hello", "world"]},
+                    {"program": "echo", "args": []}):
+        out = shim(payload, h)
+        report.check(f"shim: {payload['args']} under a clearance for ['hello']",
+                     not out.get("ok") and "not the one this clearance" in out.get("error", ""),
+                     out.get("error", "RAN"))
+
+    # AWS: the session policy is the request's values and nothing wider
+    from taper import ops as _ops2
+    from taper.declared import DeclaredAdapter as _DA2, compile_spec as _compile2, SpecError as _SE2
+    from tower.sts import AWSSession as _Session, session_policy as _policy
+    aws_spec = {
+        "operation": "aws.s3ls", "summary": "list", "kind": "process",
+        "fields": {"bucket": {"type": "string", "pattern": "[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]"},
+                   "prefix": {"type": "string", "pattern": "[A-Za-z0-9_./-]{0,512}"}},
+        "argv": ["aws", "s3api", "list-objects-v2", "--bucket", "{bucket}", "--prefix", "{prefix}"],
+        "aws": {"role_arn": "arn:aws:iam::123456789012:role/reader", "actions": ["s3:ListBucket"],
+                "resources": ["arn:aws:s3:::{bucket}"],
+                "conditions": {"StringLike": {"s3:prefix": "{prefix}*"}}},
+        "layer2": {"enforced_by": "IAM", "check": "put-object -> AccessDenied"},
+    }
+    adecl = _compile2(aws_spec)
+    _ops2.REGISTRY[adecl.name] = adecl.operation()
+    _ops2.POLICY_ATTRIBUTES[adecl.name] = adecl.policy_attributes()
+    asked = []
+    class _FakeSTS:
+        def assume(self, role_arn, policy, cid, subject, now=None, seconds=900):
+            asked.append(policy)
+            return _Session("ASIA", "s", "t", 1, NOW + 900)
+    atower = _Tower(ca=_CA.create(), root_pub=root.public_key(),
+                    audit=_Audit(tmp / "aws-tower-audit.jsonl"), clock=lambda: NOW,
+                    sts=_FakeSTS(), definitions={adecl.name: adecl.definition_hash()})
+    abroker = _CB(root_pub=root.public_key(), adapters={adecl.name: _DA2(adecl)},
+                  audit_path=tmp / "aws-tower-audit.jsonl", clock=lambda: NOW, tower=atower)
+    acaps = {"aws.s3ls": {"bucket": OneOf(["reports"]), "prefix": Prefix("2026/")}}
+    atok = Token.issue(root, acaps, ttl_seconds=3600, now=NOW, subject="alice@example.com",
+                       definitions={adecl.name: adecl.definition_hash()})
+    aw = atok.serialize()
+    areq = {"bucket": "reports", "prefix": "2026/09/"}
+    ad = abroker.decide(aw, "aws.s3ls", areq, proof=prove(atok.proving_key(), aw, "aws.s3ls", areq, now=NOW))
+    report.check("aws: the honest request is cleared with a session",
+                 ad.allowed and ad.plan.detail["clearance"]["kind"] == "aws",
+                 ad.reason if not ad.allowed else "ok")
+    report.check("aws: the session policy names this bucket and this prefix only",
+                 asked and asked[-1]["Statement"][0]["Resource"] == ["arn:aws:s3:::reports"]
+                 and asked[-1]["Statement"][0]["Condition"]["StringLike"]["s3:prefix"] == "2026/09/*",
+                 str(asked[-1] if asked else None))
+    for label, req in (("another bucket", {"bucket": "payroll", "prefix": "2026/"}),
+                       ("a prefix outside the grant", {"bucket": "reports", "prefix": "2025/"}),
+                       ("a bucket name with a wildcard", {"bucket": "*", "prefix": "2026/"}),
+                       ("a prefix that escapes to a sibling", {"bucket": "reports", "prefix": "../"})):
+        n = len(asked)
+        d = abroker.decide(aw, "aws.s3ls", req, proof=prove(atok.proving_key(), aw, "aws.s3ls", req, now=NOW))
+        report.check(f"aws: {label} never reaches STS", not d.allowed and len(asked) == n, d.reason)
+    for label, block in (("an action wildcard", {"actions": ["s3:*"]}),
+                         ("a resource wildcard", {"resources": ["*"]}),
+                         ("a placeholder outside the resource part", {"resources": ["arn:aws:{bucket}:::x"]}),
+                         ("a user ARN as the role", {"role_arn": "arn:aws:iam::123456789012:user/admin"})):
+        try:
+            _compile2({**aws_spec, "aws": {**aws_spec["aws"], **block}})
+            report.check(f"aws declaration: {label}", False, "LOADED")
+        except _SE2 as exc:
+            report.check(f"aws declaration: {label}", True, str(exc)[:100])
+    try:
+        _policy({"actions": ["s3:ListBucket"], "resources": []})
+        report.check("aws: a policy with no resource", False, "BUILT")
+    except ValueError as exc:
+        report.check("aws: a policy with no resource", True, str(exc))
+    intact, _ = stower.audit.verify()
+    intact2, _ = atower.audit.verify()
+    report.check("tower ssh/aws: every clearance and refusal is on an intact tape", intact and intact2)
+
+    # ---------------------------------------------------------------------
     section("8. Audit integrity")
     intact, _ = broker.audit.verify()
     report.check("audit chain intact after the whole run", intact)

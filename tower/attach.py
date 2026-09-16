@@ -36,6 +36,7 @@ def attach(root_pub, adapters, audit_path, secrets, *, require_proof: bool = Fal
     from .ca import CA
     from .clearance import Tower
     from .executor import ClearedExecutor
+    from .sshcert import SSHCA
 
     directory = Path(where).expanduser()
     if not (directory / "ca.key").is_file():
@@ -51,9 +52,27 @@ def attach(root_pub, adapters, audit_path, secrets, *, require_proof: bool = Fal
     if ops_dir:
         from taper.declared import load_dir
         definitions = load_dir(Path(ops_dir).expanduser()).hashes()
+    # Stage 1 for SSH: present when `tower init --ssh` (or `tower ssh-ca init`)
+    # has put an Ed25519 CA beside the X.509 one. Absent, SSH keeps the vault
+    # identity and only Postgres is cleared.
+    ssh_ca = SSHCA.load(directory) if (directory / "ssh_ca.key").is_file() else None
+    # Stage 1 for AWS: a seed in the vault - an IAM principal whose only
+    # permission is sts:AssumeRole - and a region. Absent, AWS declarations
+    # inject the vault key as before.
+    sts = None
+    seed_id = secrets.get("aws.seed.access_key_id")
+    seed_secret = secrets.get("aws.seed.secret_access_key")
+    if seed_id and seed_secret:
+        from .sts import STS
+        sts = STS(seed_id, seed_secret, region=env.get("AWS_REGION", "us-east-1"),
+                  endpoint=env.get("TAPER_STS_ENDPOINT") or None,
+                  session_token=secrets.get("aws.seed.session_token"))
     tower = Tower(ca=CA.load(directory), root_pub=root_pub,
-                  audit=AuditLog(Path(audit_path)), definitions=definitions)
+                  audit=AuditLog(Path(audit_path)), definitions=definitions,
+                  ssh_ca=ssh_ca, shim=env.get("TAPER_SHIM", "/usr/local/libexec/taper-shim"),
+                  sts=sts)
     broker = ClearedBroker(root_pub=root_pub, adapters=adapters, audit_path=audit_path,
                            secrets=secrets.get, require_proof=require_proof,
-                           tower=tower, role=env.get("TAPER_TOWER_ROLE", role))
+                           tower=tower, role=env.get("TAPER_TOWER_ROLE", role),
+                           ssh_user=env.get("TAPER_TOWER_SSH_USER", "taper-agent"))
     return broker, ClearedExecutor(secrets, tower), tower

@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import types
+from pathlib import Path
 
 import pytest
 from cryptography import x509
@@ -20,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from taper.adapters import PostgresAdapter, PostgresDescribeAdapter, SSHAdapter  # noqa: E402
 from taper.audit import AuditLog  # noqa: E402
 from taper.broker import Decision  # noqa: E402
-from taper.caps import OneOf, Range, Subset  # noqa: E402
+from taper.caps import OneOf, Prefix, Range, Subset  # noqa: E402
 from taper.chain import Token, _b64, _unb64  # noqa: E402
 from taper.pop import prove  # noqa: E402
 from taper.secrets import ChainProvider  # noqa: E402
@@ -455,3 +456,352 @@ class TestAttach:
         with pytest.raises(SystemExit, match="tower init"):
             attach(root.public_key(), {}, tmp_path / "a.jsonl", ChainProvider(Fixed()),
                    env={"TAPER_TOWER": str(tmp_path / "nowhere")})
+
+
+# ------------------------------------------------------------------ SSH stage 1
+
+class TestSSHCA:
+    """The certificate bytes, written by hand, read back by hand - and by
+    ssh-keygen where it is installed."""
+
+    def test_a_certificate_parses_and_verifies_against_the_ca(self):
+        from tower.sshcert import SSHCA, parse, verify
+        ca = SSHCA.create()
+        m = ca.issue("taper-agent", "build-1.internal", "git", ["status"], "c1a2b3",
+                     "alice@example.com", "/usr/local/libexec/taper-shim", now=NOW)
+        cert = verify(m.cert_line, ca.key.public_key())
+        assert cert.key_id == "taper:c1a2b3:alice@example.com"
+        assert parse(m.cert_line).serial == cert.serial == m.serial
+        other = SSHCA.create()
+        with pytest.raises(ValueError, match="not signed by this CA"):
+            verify(m.cert_line, other.key.public_key())
+        # one bit anywhere in the signed region and it does not verify
+        import base64
+        parts = m.cert_line.split()
+        blob = bytearray(base64.b64decode(parts[1]))
+        at = blob.index(b"taper:c1a2b3")           # inside the key id, not a length
+        blob[at] ^= 0x01
+        with pytest.raises(ValueError, match="bad certificate signature"):
+            verify(parts[0] + b" " + base64.b64encode(bytes(blob)), ca.key.public_key())
+
+    def test_the_certificate_grants_one_principal_one_command_sixty_seconds_and_nothing_else(self):
+        from tower.sshcert import SSHCA, expect_hash, verify
+        ca = SSHCA.create()
+        m = ca.issue("taper-agent", "build-1.internal", "git", ["log", "--oneline"], "c1",
+                     "alice@example.com", "/usr/local/libexec/taper-shim", now=NOW)
+        cert = verify(m.cert_line, ca.key.public_key())
+        assert cert.cert_type == 1                                   # a user certificate
+        assert cert.principals == ["taper-agent@build-1.internal", "taper-agent"]
+        assert cert.valid_before - cert.valid_after == CLEARANCE_TTL + CLEARANCE_SKEW
+        assert cert.valid_before == int(NOW) + CLEARANCE_TTL
+        assert cert.extensions == {}                                 # no pty, no forwarding, no agent
+        assert cert.critical_options == {
+            "force-command": "/usr/local/libexec/taper-shim --expect "
+                             + expect_hash("git", ["log", "--oneline"])}
+        # a different argument list is a different hash: the certificate
+        # cannot carry it
+        assert expect_hash("git", ["log"]) != expect_hash("git", ["log", "--oneline"])
+        # the private key is OpenSSH format, unencrypted, and not the CA's
+        from cryptography.hazmat.primitives import serialization
+        key = serialization.load_ssh_private_key(m.key_openssh, password=None)
+        assert key.public_key().public_bytes_raw() == cert.public_key[-32:]
+        assert key.public_key().public_bytes_raw() != ca.key.public_key().public_bytes_raw()
+
+    def test_ssh_keygen_agrees_when_present(self, tmp_path):
+        import shutil
+        import subprocess
+        if not shutil.which("ssh-keygen"):
+            pytest.skip("ssh-keygen not installed here; CI has it")
+        from tower.sshcert import SSHCA
+        ca = SSHCA.create()
+        m = ca.issue("taper-agent", "build-1.internal", "git", ["status"], "c1",
+                     "alice@example.com", "/usr/local/libexec/taper-shim", now=NOW)
+        path = tmp_path / "id-cert.pub"
+        path.write_bytes(m.cert_line + b"\n")
+        out = subprocess.run(["ssh-keygen", "-L", "-f", str(path)],
+                             capture_output=True, text=True, timeout=30)
+        assert out.returncode == 0, out.stderr
+        assert "taper:c1:alice@example.com" in out.stdout
+        assert "taper-agent@build-1.internal" in out.stdout
+        assert "force-command" in out.stdout and "--expect" in out.stdout
+        assert "Extensions: (none)" in out.stdout or "Extensions:" not in out.stdout \
+            or "\n                Extensions: \n" in out.stdout
+        # and the CA key file loads in ssh-keygen too, so an operator with
+        # OpenSSH can still verify or sign in an emergency
+        ca.save(tmp_path / "ca")
+        chk = subprocess.run(["ssh-keygen", "-y", "-f", str(tmp_path / "ca" / "ssh_ca.key")],
+                             capture_output=True, text=True, timeout=30)
+        assert chk.returncode == 0 and chk.stdout.split()[1] == ca.public_line().decode().split()[1]
+
+
+@pytest.fixture
+def ssh_tower(root, ca, tmp_path):
+    from tower.sshcert import SSHCA
+    return Tower(ca=ca, root_pub=root.public_key(), audit=AuditLog(tmp_path / "audit.jsonl"),
+                 clock=lambda: NOW, ssh_ca=SSHCA.create(), shim="/opt/taper/shim")
+
+
+@pytest.fixture
+def ssh_broker(root, ssh_tower, tmp_path):
+    return ClearedBroker(
+        root_pub=root.public_key(),
+        adapters={"pg.query": PostgresAdapter(), "ssh.exec": SSHAdapter()},
+        audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW, tower=ssh_tower)
+
+
+SSH_REQ = {"host": "build-1", "program": "git", "args": ["status"]}
+
+
+class TestSSHClearance:
+    def test_an_allowed_ssh_decision_carries_a_clearance_pinned_to_the_plan(self, ssh_broker, root):
+        token = Token.issue(root, CAPS, ttl_seconds=3600, now=NOW, subject="alice@example.com")
+        d = call(ssh_broker, token, "ssh.exec", SSH_REQ)
+        assert d.allowed, d.reason
+        c = d.plan.detail["clearance"]
+        assert c["kind"] == "ssh" and c["role"] == "taper-agent"
+        # the plan still names the vault identity refs, but the executor will
+        # not consult them; the material waits in the tower
+        assert d.plan.secret_refs["identity"] == "ssh.cert"
+        bodies = [json.loads(l)["body"] for l in ssh_broker.tower.audit.path.read_text().splitlines()]
+        rec = [b for b in bodies if b.get("record") == "clearance" and b.get("clearance")][-1]
+        assert rec["kind"] == "ssh" and rec["host"] == "build-1" and rec["program"] == "git"
+        assert rec["args"] == ["status"] and rec["key_id"].startswith("taper:")
+        assert rec["subject"] == "alice@example.com"
+
+    def test_an_ssh_clearance_is_pinned_to_the_plan_not_the_request(self, ssh_tower, root):
+        """What the certificate pins is what the plan will send, taken from the
+        broker's plan - so a decision whose plan says `git status` yields a
+        certificate the shim will accept for `git status` and nothing else."""
+        from tower.sshcert import expect_hash, verify
+        token = Token.issue(root, CAPS, ttl_seconds=3600, now=NOW, subject="alice@example.com")
+        wire = token.serialize()
+        proof = prove(token.proving_key(), wire, "ssh.exec", SSH_REQ, now=NOW)
+        plan = SSHAdapter().plan(SSH_REQ, CAPS["ssh.exec"])
+        allow = Decision(True, "ok", "ssh.exec", {}, plan=plan,
+                         token_ids=token.revocation_ids(), subject="alice@example.com")
+        c = ssh_tower.clear(wire, "ssh.exec", SSH_REQ, proof, allow, "taper-agent")
+        m = ssh_tower.take(c.id)
+        cert = verify(m.cert_line, ssh_tower.ssh_ca.key.public_key())
+        assert cert.critical_options["force-command"] == \
+            "/opt/taper/shim --expect " + expect_hash("git", ["status"])
+        assert cert.principals[0] == "taper-agent@build-1"
+        assert cert.key_id == f"taper:{c.id}:alice@example.com"
+        with pytest.raises(ClearanceRefused, match="already taken"):
+            ssh_tower.take(c.id)
+
+    def test_without_an_ssh_ca_the_vault_identity_is_used_as_before(self, broker, root):
+        token = Token.issue(root, CAPS, ttl_seconds=3600, now=NOW)
+        d = call(broker, token, "ssh.exec", SSH_REQ)
+        assert d.allowed and "clearance" not in d.plan.detail
+
+    def test_the_ssh_process_gets_the_clearance_identity_once(self, ssh_broker, root, tmp_path, monkeypatch):
+        """The executor writes the tower's key and certificate to 0600 files,
+        passes them to ssh, and removes them; the vault is never asked."""
+        token = Token.issue(root, CAPS, ttl_seconds=3600, now=NOW, subject="alice@example.com")
+        d = call(ssh_broker, token, "ssh.exec", SSH_REQ)
+        assert d.allowed
+        fake = tmp_path / "ssh"
+        fake.write_text("#!/bin/sh\n"
+                        "i=0; for a in \"$@\"; do i=$((i+1)); if [ \"$a\" = -i ]; then eval k=\\${$((i+1))}; fi; done\n"
+                        "echo KEY=$(stat -c %a \"$k\") $(head -c 35 \"$k\")\n"
+                        "echo CERT=$(stat -c %a \"$k-cert.pub\") $(cut -c1-32 \"$k-cert.pub\")\n"
+                        "echo \"$k\" > " + str(tmp_path / "keypath") + "\n")
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+
+        class Vault:
+            def require(self, ref):
+                raise AssertionError(f"the vault was asked for {ref}")
+            def get(self, ref):
+                raise AssertionError(f"the vault was asked for {ref}")
+
+        ex = ClearedExecutor(Vault(), ssh_broker.tower)
+        r = ex.run(d.plan)
+        assert r.ok, r.stderr
+        assert "KEY=600 -----BEGIN OPENSSH PRIVATE KEY-----" in r.stdout
+        assert "CERT=600 ssh-ed25519-cert-v01@openssh.com" in r.stdout
+        keypath = Path((tmp_path / "keypath").read_text().strip())
+        assert not keypath.exists() and not Path(str(keypath) + "-cert.pub").exists()
+        with pytest.raises(ClearanceRefused, match="already taken"):
+            ex.run(d.plan)
+
+
+# ------------------------------------------------------------------ AWS stage 1
+
+class FakeSTS:
+    """Stands in for STS: records the policy it was asked for, answers with a
+    session. What matters is what the tower asked, not what AWS would do."""
+
+    def __init__(self):
+        self.calls = []
+
+    def assume(self, role_arn, policy, clearance_id, subject, now=None, seconds=900):
+        from tower.sts import AWSSession
+        self.calls.append({"role_arn": role_arn, "policy": policy,
+                           "clearance_id": clearance_id, "subject": subject})
+        return AWSSession("ASIAFAKE", "secretfake", f"token-{clearance_id}",
+                          serial=1, not_after=(now or NOW) + seconds)
+
+
+AWS_SPEC = {
+    "operation": "aws.s3ls", "summary": "List one prefix of one bucket.", "kind": "process",
+    "fields": {"bucket": {"type": "string", "pattern": "[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]"},
+               "prefix": {"type": "string", "pattern": "[A-Za-z0-9_./-]{0,512}"}},
+    "argv": ["aws", "s3api", "list-objects-v2", "--bucket", "{bucket}", "--prefix", "{prefix}",
+             "--output", "json"],
+    "secrets": {"env": {"AWS_ACCESS_KEY_ID": {"value": "aws.access_key_id"},
+                        "AWS_SECRET_ACCESS_KEY": {"value": "aws.secret_access_key"}}},
+    "aws": {"role_arn": "arn:aws:iam::123456789012:role/taper-reader",
+            "actions": ["s3:ListBucket"],
+            "resources": ["arn:aws:s3:::{bucket}"],
+            "conditions": {"StringLike": {"s3:prefix": "{prefix}*"}}},
+    "layer2": {"enforced_by": "IAM on the role", "check": "aws s3api put-object -> AccessDenied"},
+}
+
+
+@pytest.fixture
+def aws_setup(root, ca, tmp_path, monkeypatch):
+    from taper import ops
+    from taper.declared import DeclaredAdapter, compile_spec
+    decl = compile_spec(AWS_SPEC)
+    monkeypatch.setitem(ops.REGISTRY, decl.name, decl.operation())
+    monkeypatch.setitem(ops.POLICY_ATTRIBUTES, decl.name, decl.policy_attributes())
+    sts = FakeSTS()
+    tower = Tower(ca=ca, root_pub=root.public_key(), audit=AuditLog(tmp_path / "audit.jsonl"),
+                  clock=lambda: NOW, sts=sts, definitions={decl.name: decl.definition_hash()})
+    broker = ClearedBroker(root_pub=root.public_key(),
+                           adapters={decl.name: DeclaredAdapter(decl)},
+                           audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW, tower=tower)
+    caps = {"aws.s3ls": {"bucket": OneOf(["reports"]), "prefix": Prefix("2026/")}}
+    token = Token.issue(root, caps, ttl_seconds=3600, now=NOW, subject="alice@example.com",
+                        definitions={decl.name: decl.definition_hash()})
+    return broker, tower, sts, token
+
+
+class TestAWSClearance:
+    def test_the_session_policy_names_only_the_requests_values(self, aws_setup):
+        broker, tower, sts, token = aws_setup
+        d = call(broker, token, "aws.s3ls", {"bucket": "reports", "prefix": "2026/09/"})
+        assert d.allowed, d.reason
+        assert d.plan.detail["clearance"]["kind"] == "aws"
+        assert d.plan.detail["clearance"]["role"] == "arn:aws:iam::123456789012:role/taper-reader"
+        [asked] = sts.calls
+        assert asked["subject"] == "alice@example.com"
+        assert asked["policy"] == {"Version": "2012-10-17", "Statement": [{
+            "Effect": "Allow", "Action": ["s3:ListBucket"],
+            "Resource": ["arn:aws:s3:::reports"],
+            "Condition": {"StringLike": {"s3:prefix": "2026/09/*"}}}]}
+        # a request for another bucket never reaches STS: policy refused it first
+        d2 = call(broker, token, "aws.s3ls", {"bucket": "secrets", "prefix": "2026/"})
+        assert not d2.allowed and len(sts.calls) == 1
+        bodies = [json.loads(l)["body"] for l in tower.audit.path.read_text().splitlines()]
+        rec = [b for b in bodies if b.get("record") == "clearance" and b.get("clearance")][-1]
+        assert rec["kind"] == "aws" and rec["session_policy"]["Statement"][0]["Resource"] == ["arn:aws:s3:::reports"]
+
+    def test_the_request_to_sts_is_signed_and_scoped(self):
+        """The real client, against a fake endpoint: the body carries the role,
+        the policy, 900 seconds and a session name with the clearance and the
+        human; the headers carry a SigV4 signature the seed key produced."""
+        import io
+        import urllib.parse
+        from tower.sts import STS, session_policy
+        seen = {}
+
+        class Response(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def opener(request, timeout):
+            seen["url"] = request.full_url
+            seen["headers"] = {k.lower(): v for k, v in request.header_items()}
+            seen["body"] = urllib.parse.parse_qs(request.data.decode())
+            return Response(b"""<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+<AssumeRoleResult><Credentials><AccessKeyId>ASIAEXAMPLE</AccessKeyId>
+<SecretAccessKey>wJalrXUtnFEMI</SecretAccessKey><SessionToken>FQoGZXIvYXdz</SessionToken>
+<Expiration>2026-09-16T01:15:00Z</Expiration></Credentials></AssumeRoleResult></AssumeRoleResponse>""")
+
+        sts = STS("AKIASEED", "seedsecret", region="us-west-2",
+                  endpoint="https://sts.us-west-2.amazonaws.com/", opener=opener)
+        policy = session_policy({"actions": ["s3:ListBucket"], "resources": ["arn:aws:s3:::reports"]})
+        s = sts.assume("arn:aws:iam::123456789012:role/taper-reader", policy,
+                       "abcdef0123456789abcdef01", "alice@example.com", now=NOW)
+        assert s.access_key_id == "ASIAEXAMPLE" and s.session_token == "FQoGZXIvYXdz"
+        assert s.env()["AWS_SESSION_TOKEN"] == "FQoGZXIvYXdz"
+        b = seen["body"]
+        assert b["Action"] == ["AssumeRole"] and b["DurationSeconds"] == ["900"]
+        assert b["RoleArn"] == ["arn:aws:iam::123456789012:role/taper-reader"]
+        assert b["RoleSessionName"] == ["taper-abcdef0123456789-alice@example.com"]
+        assert json.loads(b["Policy"][0]) == policy
+        auth = seen["headers"]["authorization"]
+        assert auth.startswith("AWS4-HMAC-SHA256 Credential=AKIASEED/")
+        assert "/us-west-2/sts/aws4_request" in auth and "SignedHeaders=content-type;host;x-amz-date" in auth
+        assert len(auth.rsplit("Signature=", 1)[1]) == 64
+        with pytest.raises(ValueError, match="not well formed"):
+            sts.assume("arn:aws:iam::123456789012:user/not-a-role", policy, "x", "y")
+        with pytest.raises(ValueError, match="whole reach"):
+            from taper.declared import compile_spec
+            compile_spec({**AWS_SPEC, "aws": {**AWS_SPEC["aws"], "actions": ["s3:*"]}})
+
+    def test_a_session_reaches_the_process_as_environment_once(self, aws_setup, tmp_path, monkeypatch):
+        broker, tower, sts, token = aws_setup
+        d = call(broker, token, "aws.s3ls", {"bucket": "reports", "prefix": "2026/"})
+        assert d.allowed
+        fake = tmp_path / "aws"
+        fake.write_text("#!/bin/sh\necho ID=$AWS_ACCESS_KEY_ID TOKEN=$AWS_SESSION_TOKEN\n"
+                        "echo ARGS=$*\nenv | grep -c . \n")
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+
+        class Vault:
+            def require(self, ref):
+                raise AssertionError(f"the vault was asked for {ref}")
+            def get(self, ref):
+                return None
+
+        ex = ClearedExecutor(Vault(), tower)
+        r = ex.run(d.plan)
+        assert r.ok, r.stderr
+        assert "ID=ASIAFAKE TOKEN=token-" in r.stdout
+        assert "ARGS=s3api list-objects-v2 --bucket reports --prefix 2026/ --output json" in r.stdout
+        with pytest.raises(ClearanceRefused, match="already taken"):
+            ex.run(d.plan)
+
+    def test_the_vault_key_is_not_injected_beside_a_session(self, aws_setup, tmp_path, monkeypatch):
+        """The declaration's secrets.env names the vault key for the
+        non-Tower path. Under a clearance it is not read at all: the
+        environment carries the session and nothing from the vault."""
+        broker, tower, sts, token = aws_setup
+        d = call(broker, token, "aws.s3ls", {"bucket": "reports", "prefix": "2026/"})
+        fake = tmp_path / "aws"
+        fake.write_text("#!/bin/sh\nenv | sort | grep '^AWS_' | cut -d= -f1 | tr '\\n' ' '\n")
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+        asked = []
+
+        class Vault:
+            def require(self, ref):
+                asked.append(ref); return "vault-key"
+            def get(self, ref):
+                asked.append(ref); return "vault-key"
+
+        r = ClearedExecutor(Vault(), tower).run(d.plan)
+        assert r.ok and r.stdout.split() == ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]
+        assert asked == []
+
+    def test_without_a_seed_the_vault_key_is_injected_as_before(self, root, ca, tmp_path, monkeypatch):
+        from taper import ops
+        from taper.declared import DeclaredAdapter, compile_spec
+        decl = compile_spec(AWS_SPEC)
+        monkeypatch.setitem(ops.REGISTRY, decl.name, decl.operation())
+        monkeypatch.setitem(ops.POLICY_ATTRIBUTES, decl.name, decl.policy_attributes())
+        tower = Tower(ca=ca, root_pub=root.public_key(), audit=AuditLog(tmp_path / "audit.jsonl"),
+                      clock=lambda: NOW, definitions={decl.name: decl.definition_hash()})
+        broker = ClearedBroker(root_pub=root.public_key(), adapters={decl.name: DeclaredAdapter(decl)},
+                               audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW, tower=tower)
+        caps = {"aws.s3ls": {"bucket": OneOf(["reports"]), "prefix": Prefix("2026/")}}
+        token = Token.issue(root, caps, ttl_seconds=3600, now=NOW,
+                            definitions={decl.name: decl.definition_hash()})
+        d = call(broker, token, "aws.s3ls", {"bucket": "reports", "prefix": "2026/"})
+        assert d.allowed and "clearance" not in d.plan.detail
+        assert d.plan.secret_refs == {"AWS_ACCESS_KEY_ID": "aws.access_key_id",
+                                      "AWS_SECRET_ACCESS_KEY": "aws.secret_access_key"}

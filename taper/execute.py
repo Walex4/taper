@@ -87,6 +87,38 @@ class Executor:
 
     # ------------------------------------------------------------------ process
 
+    def _ssh_identity(self, plan: ExecPlan):
+        """The SSH private key and certificate for a process plan, as text,
+        or None when the plan carries no identity. The one seam Tower's SSH
+        stage uses: a cleared executor answers with a key that was generated
+        for this operation instead of the vault's."""
+        identity_ref = plan.secret_refs.get("identity")
+        if not identity_ref:
+            return None
+        key = self.secrets.require(identity_ref)
+        cert_ref = plan.secret_refs.get("certificate")
+        cert = self.secrets.get(cert_ref) if cert_ref else None
+        return key, cert
+
+    def _inject(self, plan: ExecPlan) -> dict:
+        """The environment a declared process gets beyond PATH and HOME:
+        each `inject` entry resolved from the vault. The seam Tower's AWS
+        stage uses to hand a session in place of the vault's key."""
+        env: dict = {}
+        files: list = []
+        for var, how in (plan.detail.get("inject") or {}).items():
+            value = self.secrets.require(how["ref"])
+            if how["as"] == "file":
+                fd, name = tempfile.mkstemp(prefix="taper-secret-")
+                with os.fdopen(fd, "w") as handle:
+                    os.fchmod(fd, 0o600)
+                    handle.write(value if value.endswith("\n") else value + "\n")
+                files.append(Path(name))
+                env[var] = name
+            else:
+                env[var] = value
+        return {"env": env, "files": files}
+
     def _process(self, plan: ExecPlan) -> Result:
         if not isinstance(plan.argv, list) or not plan.argv:
             return Result(False, -1, "", "plan has no argv")
@@ -96,9 +128,9 @@ class Executor:
         try:
             # An SSH identity must reach ssh as a FILE, not an argument. Write it
             # to a 0600 temp file, pass the path, delete it in `finally`.
-            identity_ref = plan.secret_refs.get("identity")
-            if identity_ref:
-                key = self.secrets.require(identity_ref)
+            identity = self._ssh_identity(plan)
+            if identity is not None:
+                key, cert = identity
                 handle = tempfile.NamedTemporaryFile(
                     mode="w", prefix="taper-id-", delete=False)
                 os.chmod(handle.name, 0o600)
@@ -107,14 +139,11 @@ class Executor:
                 path = Path(handle.name)
                 cleanup.append(path)
 
-                cert_ref = plan.secret_refs.get("certificate")
-                if cert_ref:
-                    cert = self.secrets.get(cert_ref)
-                    if cert:
-                        cert_path = path.with_name(path.name + "-cert.pub")
-                        cert_path.write_text(cert if cert.endswith("\n") else cert + "\n")
-                        os.chmod(cert_path, 0o600)
-                        cleanup.append(cert_path)
+                if cert:
+                    cert_path = path.with_name(path.name + "-cert.pub")
+                    cert_path.write_text(cert if cert.endswith("\n") else cert + "\n")
+                    os.chmod(cert_path, 0o600)
+                    cleanup.append(cert_path)
 
                 argv = [argv[0], "-i", str(path), "-o", "IdentitiesOnly=yes", *argv[1:]]
 
@@ -127,17 +156,9 @@ class Executor:
             # verified-by: tests/test_taper.py::TestDeclared::test_a_local_process_sees_only_the_secrets_its_declaration_names
             env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                    "HOME": os.environ.get("HOME", "/tmp")}
-            for var, how in (plan.detail.get("inject") or {}).items():
-                value = self.secrets.require(how["ref"])
-                if how["as"] == "file":
-                    fd, name = tempfile.mkstemp(prefix="taper-secret-")
-                    with os.fdopen(fd, "w") as handle:
-                        os.fchmod(fd, 0o600)
-                        handle.write(value if value.endswith("\n") else value + "\n")
-                    cleanup.append(Path(name))
-                    env[var] = name
-                else:
-                    env[var] = value
+            injected = self._inject(plan)
+            env.update(injected["env"])
+            cleanup.extend(injected["files"])
 
             completed = subprocess.run(
                 argv,
