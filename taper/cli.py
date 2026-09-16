@@ -236,6 +236,18 @@ def cmd_grant(args) -> int:
     """
     from .pop import PopError, write_proving_key
 
+    # Configuration the agent can write is not configuration. Refuse a
+    # policy file or an ops directory the agent's uid owns or anyone can
+    # write; --allow-writable-config warns instead, for a laptop checkout.
+    # verified-by: tests/test_integration.py::TestConfigOwnership::test_a_world_writable_policy_is_refused_at_mint
+    from .hardening import WritableConfig, require as _require_owned
+    try:
+        _require_owned([Path(args.policy).expanduser(), OPS], None,
+                       allow_writable=args.allow_writable_config, what="the policy or ops directory",
+                       warn=lambda m: print(f"{YELLOW}!{OFF} {m}", file=sys.stderr))
+    except WritableConfig as exc:
+        sys.exit(f"{RED}refused:{OFF} {exc}")
+
     policy = json.loads(Path(args.policy).read_text())
     caps = caps_from_json(policy["capabilities"])
     ttl = parse_duration(args.ttl)
@@ -909,6 +921,28 @@ def cmd_doctor(args) -> int:
 
     check(os.geteuid() != 0, "not running as root", "running as root — do not")
 
+    # Configuration ownership: the policy and the ops directory belong to
+    # root, not to the agent.
+    from .hardening import check_tree
+    agent_uids = None
+    if getattr(args, "agent_user", None):
+        import pwd as _pwd
+        try:
+            agent_uids = {_pwd.getpwnam(args.agent_user).pw_uid}
+        except KeyError:
+            agent_uids = None
+    if OPS.exists():
+        reasons = check_tree(OPS, agent_uids)
+        check(not reasons, f"{OPS} is not writable by the agent",
+              f"{OPS} is writable by the agent — the broker refuses to start: "
+              + (reasons[0] if reasons else ""))
+    for policy_path in (getattr(args, "policy", None) or ()):
+        from .hardening import check_path
+        reasons = check_path(Path(policy_path).expanduser(), agent_uids)
+        check(not reasons, f"{policy_path} is not writable by the agent",
+              f"{policy_path} is writable by the agent — `taper grant` refuses it: "
+              + (reasons[0] if reasons else ""))
+
     # Declared operations: every file compiles, or the broker will not start.
     if OPS.is_dir():
         from .declared import load_dir
@@ -1087,6 +1121,15 @@ def cmd_broker(args) -> int:
                      f"name that exists on this machine")
     allowed = allowed or None
 
+    # verified-by: tests/test_integration.py::TestConfigOwnership::test_an_ops_directory_the_agent_owns_stops_the_broker
+    from .hardening import WritableConfig, require as _require_owned
+    try:
+        _require_owned([OPS], allowed, allow_writable=args.allow_writable_config,
+                       what="the declared-operations directory",
+                       warn=lambda m: print(f"{YELLOW}!{OFF} {m}", file=sys.stderr))
+    except WritableConfig as exc:
+        sys.exit(f"{RED}refused to start:{OFF} {exc}")
+
     secrets = default_provider()
     broker, executor, tower = _broker_and_executor(
         load_root_public(), _adapters(), AUDIT, secrets)
@@ -1196,6 +1239,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_secret_set)
 
     p = sub.add_parser("grant", help="issue a token from a policy file")
+    p.add_argument("--allow-writable-config", action="store_true",
+                   help="warn instead of refusing a policy or ops directory the agent "
+                        "can write (a development checkout)")
     p.add_argument("policy")
     p.add_argument("--ttl", default="1h")
     # Required: the proving key must land somewhere that is not stdout, and
@@ -1283,6 +1329,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="same, by account name; repeatable. Resolved to a uid at "
                         "startup, so it survives nothing — if the account is "
                         "recreated with a new uid, restart the service.")
+    p.add_argument("--allow-writable-config", action="store_true",
+                   help="warn instead of refusing to start on an ops directory the "
+                        "agent can write (a development checkout)")
     p.set_defaults(func=cmd_broker)
 
     p = sub.add_parser("serve", help="run the MCP server on stdio")

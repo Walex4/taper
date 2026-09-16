@@ -38,6 +38,34 @@ operation gets a credential minted for it.
 - Red team: section 11, twenty-five cases, 140 in all. One of them found
   the resource-wildcard gap in the first draft of the `aws` block.
 
+**Three gaps from the readiness register closed.**
+
+- Configuration the agent can write is not configuration
+  (`taper/hardening.py`). `taper grant` refuses a policy file or operations
+  directory that is a symlink or group- or world-writable; `taper broker`
+  refuses to start on an operations directory owned by any uid it accepts
+  connections from; `taper doctor --agent-user` reports both.
+  `--allow-writable-config` turns the refusal into a warning that prints
+  every time, for a laptop checkout, and has no environment form.
+- Signed releases. `release.yml` now attaches, beside the wheel and sdist:
+  a Sigstore keyless signature and certificate per artefact, bound to the
+  workflow's OIDC identity; a CycloneDX SBOM of the installed package,
+  itself signed; and SLSA build provenance attested by GitHub. Only the
+  wheel and sdist go to PyPI. The README's "Verifying a release" gives the
+  `cosign verify-blob` and `gh attestation verify` lines.
+- The constraint algebra, checked exhaustively (`validate/algebra.py`, in
+  CI and `make validate`): intersection is exactly conjunction on what is
+  allowed, `subsumes` is sound everywhere and complete where declared, the
+  lattice laws hold, the chain fold never widens over three thousand random
+  chains, and the wire form is faithful with unknown kinds refused. A
+  finite check, not a proof assistant; the universe is written down in the
+  file. Its first run found three things: `OneOf.allows` raised on an
+  unhashable value; `True` passed as `1` through `OneOf` and `Range`; and
+  `OneOf ∩ Range` was `Never` rather than the members in range — narrower
+  than the truth, the safe direction, and still wrong. All fixed, with
+  regression tests, and `Range` now subsumes a finite set of numbers
+  inside it.
+
 - `docs/readiness.md`: could a company run this? What the field says the
   problem is (IDSA on PocketOS, OWASP ASI02/ASI03, NIST's agent standards
   initiative, GitGuardian and Akeyless numbers, the vendor moves), the

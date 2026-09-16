@@ -35,6 +35,8 @@ jobs:
       # script exits non-zero if any of them succeeds.
       - name: Adversarial validation
         run: python validate/redteam.py
+      - name: The constraint algebra, checked exhaustively
+        run: python validate/algebra.py
 
   preflight:
     runs-on: ubuntu-latest

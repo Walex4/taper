@@ -20,6 +20,9 @@ test:
 redteam:
 	python validate/redteam.py
 
+algebra:
+	python validate/algebra.py
+
 preflight:
 	bash scripts/preflight.sh
 
@@ -30,7 +33,7 @@ doctor:
 	python -m taper.cli doctor
 
 # The gate. If this is red, nothing ships.
-validate: preflight test redteam
+validate: preflight test redteam algebra
 	@echo ""
 	@echo "  Local validation passed."
 	@echo "  Still required before trusting this with real credentials:"

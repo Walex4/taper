@@ -101,6 +101,33 @@ class TestAlgebra:
 
 # ----------------------------------------------------------- THE CENTRAL PROPERTY
 
+class TestAlgebraFindings:
+    def test_an_unhashable_value_is_not_a_member(self):
+        """validate/algebra.py found that OneOf.allows raised on a list. A
+        raise inside allows() is neither an allow nor a refusal; now it is a
+        refusal."""
+        c = OneOf(["a", 1])
+        assert not c.allows([]) and not c.allows({}) and not c.allows(["a"])
+        assert c.allows("a") and c.allows(1)
+
+    def test_a_boolean_is_not_the_number_one(self):
+        """True == 1 in Python. validate/algebra.py found Range(0, 10) and
+        OneOf([1]) both admitting True; neither does now, unless a boolean
+        was listed."""
+        assert not Range(0, 10).allows(True) and not OneOf([1]).allows(True)
+        assert OneOf([True]).allows(True) and not OneOf([True]).allows(1)
+
+    def test_one_of_meets_range_at_the_members_in_range(self):
+        """OneOf ∩ Range was Never - narrower than the conjunction, the safe
+        direction, and wrong. Now it is exactly the members in range, and
+        Range subsumes a finite set of numbers inside it."""
+        assert OneOf([1, 5, 50]).intersect(Range(0, 10)) == OneOf([1, 5])
+        assert Range(0, 10).intersect(OneOf([1, 5, 50])) == OneOf([1, 5])
+        assert isinstance(OneOf([50]).intersect(Range(0, 10)), Never)
+        assert Range(0, 10).subsumes(OneOf([1, 5])) and not Range(0, 10).subsumes(OneOf([1, 50]))
+        assert Range(0, 10).subsumes(OneOf([]))          # the empty set is inside every range
+
+
 class TestCannotWiden:
     """If any test in this class fails, the design is broken. Not the code."""
 

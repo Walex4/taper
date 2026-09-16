@@ -91,7 +91,21 @@ class OneOf(Constraint):
         object.__setattr__(self, "kind", "one_of")
 
     def allows(self, value: Any) -> bool:
-        return value in self.values
+        # An unhashable value - a list or a dict where a scalar was expected -
+        # is not a member. Found by validate/algebra.py: `in` on a frozenset
+        # raises TypeError for such a value, and a raise inside allows() is
+        # neither an allow nor a refusal.
+        # verified-by: tests/test_taper.py::TestAlgebraFindings::test_an_unhashable_value_is_not_a_member
+        try:
+            if value not in self.values:
+                return False
+        except TypeError:
+            return False
+        # True == 1 and hashes like it, so `True in {1}` and `1 in {True}` are
+        # both True in Python. A boolean matches only a boolean member and a
+        # number only a number. Found by validate/algebra.py.
+        return any(v == value and isinstance(v, bool) == isinstance(value, bool)
+                   for v in self.values)
 
     def subsumes(self, other: Constraint) -> bool:
         if isinstance(other, Never):
@@ -109,10 +123,15 @@ class OneOf(Constraint):
         if isinstance(other, Never):
             return other
         if isinstance(other, OneOf):
-            common = self.values & other.values
+            common = {v for v in self.values if other.allows(v)}
             return OneOf(common) if common else Never()
-        if isinstance(other, Prefix):
-            kept = {v for v in self.values if isinstance(v, str) and v.startswith(other.prefix)}
+        if isinstance(other, (Prefix, Range)):
+            # Keep the members the other constraint allows: exactly the
+            # conjunction, which validate/algebra.py checks. Before it did,
+            # OneOf ∩ Range was Never - narrower than the truth, which is the
+            # safe direction, and still wrong.
+            # verified-by: tests/test_taper.py::TestAlgebraFindings::test_one_of_meets_range_at_the_members_in_range
+            kept = {v for v in self.values if other.allows(v)}
             return OneOf(kept) if kept else Never()
         return Never()
 
@@ -179,6 +198,9 @@ class Range(Constraint):
         object.__setattr__(self, "kind", "range")
 
     def allows(self, value: Any) -> bool:
+        # bool is an int in Python; a range is for numbers, not for True.
+        if isinstance(value, bool):
+            return False
         return isinstance(value, (int, float)) and self.lo <= value <= self.hi
 
     def subsumes(self, other: Constraint) -> bool:
@@ -186,6 +208,9 @@ class Range(Constraint):
             return True
         if isinstance(other, Range):
             return self.lo <= other.lo and other.hi <= self.hi
+        if isinstance(other, OneOf):
+            # A finite set of numbers inside the range is narrower than it.
+            return all(self.allows(v) for v in other.values)
         return False
 
     def intersect(self, other: Constraint) -> Constraint:
@@ -196,6 +221,8 @@ class Range(Constraint):
         if isinstance(other, Range):
             lo, hi = max(self.lo, other.lo), min(self.hi, other.hi)
             return Range(lo, hi) if lo <= hi else Never()
+        if isinstance(other, OneOf):
+            return other.intersect(self)
         return Never()
 
     def to_json(self) -> dict:

@@ -311,9 +311,9 @@ Operations name classes, not object handles
 
 The policy file is agent-writable
 
-\[deployment\]
+\[deployment — closed 16 Sept 2026\]
 
-Currently in the repository, owned by the agent's user. Inert while minting requires the broker's root key, but it belongs at `/etc/taper/`, root-owned, alongside the shim allowlist that is already there for exactly this reason.
+It was in the repository, owned by the agent's user. `taper grant` now refuses a policy file or an operations directory that is a symlink or group- or world-writable, `taper broker` refuses to start on an operations directory owned by any uid it was told to accept connections from, and `taper doctor --agent-user` reports both. `--allow-writable-config` turns the refusal into a warning for a laptop checkout and prints every time; there is no environment variable for it. `/etc/taper`, root-owned, is the home (`taper/hardening.py`).
 
 Revocation requires online state
 
@@ -321,11 +321,11 @@ Revocation requires online state
 
 Revocation identifiers are only meaningful against a list the verifier can read. Offline verification and immediate revocation are in tension; the current answer is short TTLs, which is the same answer macaroons gave in 2014.
 
-No formal audit, no formal verification
+No formal audit; the algebra checked, not proved
 
-\[maturity\]
+\[maturity — half closed 16 Sept 2026\]
 
-The constraint algebra is small enough to be a good candidate for machine-checked proof that intersection is monotone and that `subsumes` agrees with it. That has not been done. Neither has an external security review. Biscuit, for what it is worth, is in the same position by its own admission.
+`validate/algebra.py` checks the constraint algebra exhaustively over a finite universe built to reach every branch of every kind: intersection is exactly conjunction on what is allowed (the security property), `subsumes` never claims a narrowing that intersection refutes and is complete for the kind pairs it is declared complete for, intersection is commutative, associative and idempotent with `Any_` as identity and `Never` as zero, the chain fold never widens over three thousand random chains, and the wire form is faithful with unknown kinds refused. It runs in CI beside the red team. It is a finite check and not a proof in a proof assistant; for total functions over these kinds the universe is the argument, and it is written down in the file. Its first run found three things the tests had not: `OneOf.allows` raised on an unhashable value, `True` passed as `1` through both `OneOf` and `Range`, and `OneOf ∩ Range` was `Never` rather than the members in range — narrower than the truth, the safe direction, and still wrong. All three are fixed and regression-tested. No external security review has been done.
 
 Single-machine, single-operator
 

@@ -128,7 +128,7 @@ means the design accepts it and says so; *open* means work not yet done;
 
 | # | Risk | State | What is true today |
 |---|------|-------|--------------------|
-| 1 | The broker's code has never been externally reviewed | **open** | About four and a half thousand lines of Python (seven thousand with the comments) across `taper/` and `tower/`, one author, a red team of 115 cases and a lint that ties every claim to a test. No external audit. No formal proof that intersection is monotone, though the algebra is small enough for one. |
+| 1 | The broker's code has never been externally reviewed | **open** | About four and a half thousand lines of Python (seven thousand with the comments) across `taper/` and `tower/`, one author, a red team of 115 cases and a lint that ties every claim to a test. No external audit. The algebra is checked exhaustively over a finite universe in CI (`validate/algebra.py`) — conjunction, subsumption, lattice laws, the fold never widening — which found and fixed three edge cases on its first run; that is a check, not a proof in a proof assistant. |
 | 2 | The broker holds credentials at rest | **inherent, narrowing** | Under Tower: for Postgres the CA key only, and the agent role has no password; for SSH an SSH CA only, and every operation gets a sixty-second certificate pinned to its one request; for AWS a seed that can only assume one role, and every operation gets a 900-second session scoped to its own values. For HTTP the vault still holds the bearer token. |
 | 3 | A broker compromise yields what it holds | **built** | Layer 2. A total policy bypass yields what the target itself permits — a read on granted tables, the shim's allowlist. Verified with the broker removed. |
 | 4 | Side channels: the agent reads a secret from somewhere else | **inherent** | Taper is not a sandbox and says so in DESIGN.md §1. It bounds what a credential can *do*; a credential the agent finds elsewhere is the operator's problem. The PocketOS rig puts the password in the README on purpose to keep this honest. |
@@ -136,10 +136,10 @@ means the design accepts it and says so; *open* means work not yet done;
 | 6 | Root key management | **open** | No rotation procedure. No HSM integration. The key that mints flight plans is a file. |
 | 7 | Single host, single operator | **open** | No multi-host story, no HA, no fleet management of policies or catalogs. A reference deployment for more than one host does not exist. |
 | 8 | Workload attestation: who may hold a root token at all | **open** | SPIFFE solves this and Taper does not integrate with it. Today, possession of the proving key file is the answer. |
-| 9 | The policy file and the catalog are agent-writable in the repository | **open, deployment** | Inert while minting needs the root key; the correct home is `/etc/taper`, root-owned. Documented, not enforced. |
+| 9 | The policy file and the catalog are agent-writable in the repository | **built** | `taper grant` refuses a symlinked, group- or world-writable policy or ops directory; `taper broker` refuses to start on an ops directory owned by a uid it accepts connections from; `taper doctor --agent-user` reports both. `--allow-writable-config` warns instead, loudly, and has no environment form. |
 | 10 | Typed surface fails to cover real tasks | **open, measured** | The falsification test. Declared operations and `taper coverage` are the relief and the measurement; a week of real use has not happened. |
 | 11 | Tower's independence is a code path, not a uid | **open** | Stage 1, now for Postgres, SSH and AWS. The interface was written for stage 2 (own uid, split key, holds), which is not built. |
-| 12 | Supply chain: is the package what the repository says | **partly built** | PyPI trusted publishing (OIDC, no token anywhere). No signed releases, no SBOM, no SLSA provenance, no reproducible build. |
+| 12 | Supply chain: is the package what the repository says | **built** | PyPI trusted publishing (OIDC, no token anywhere). From v0.4.0: Sigstore keyless signatures on every artefact bound to the workflow's identity, a CycloneDX SBOM (signed), and SLSA build provenance attested by GitHub; the README says how to verify. Not reproducible-build. |
 | 13 | SaaS targets | **out of scope** | GitHub, Slack, Salesforce need someone to hold a token. The design says: do not be the thing that stores it. A proxy is the right tool there. |
 | 14 | Prompt injection | **inherent, bounded** | Not prevented — Taper is not a model-layer control. Bounded: an injected instruction can only name an operation inside the grant, and the injected-run experiment showed exactly that. |
 | 15 | Bus factor | **open** | One maintainer. No second reviewer, no disclosure SLA beyond SECURITY.md's private reporting. |
@@ -179,12 +179,11 @@ reaches it. Each item is one deliverable; none is started unless listed.
    cryptographic reviews is the alternative. Scope: `caps.py`, `chain.py`,
    `pop.py`, `broker.py`, `declared.py`, `tower/`. Publish the report and
    the fixes, unedited.
-2. **A machine-checked proof that intersection is monotone and `subsumes`
-   agrees with it.** The algebra is six kinds; this is days, not months,
-   and it turns "deliberately tiny" from an aesthetic into a theorem.
-3. **Policy and catalog at `/etc/taper`, root-owned, enforced.** The broker
-   refuses to start on a policy directory writable by the agent's uid.
-   Small, and it closes risk 9.
+2. ~~A machine-checked proof of the algebra~~ — done 16 September as an
+   exhaustive check in CI (`validate/algebra.py`); a proof-assistant
+   version remains open and is what a reviewer would ask for next.
+3. ~~Policy and catalog at `/etc/taper`, enforced~~ — done 16 September
+   (`taper/hardening.py`).
 4. **Root key in hardware, with a rotation runbook.** PKCS#11 or a TPM for
    the root; a documented procedure for rotating it with overlapping
    validity; `taper doctor` checks the key is not a plain file on a
@@ -196,9 +195,8 @@ reaches it. Each item is one deliverable; none is started unless listed.
 6. **IdP-driven mint.** An OIDC login yields a root grant for that person,
    with policy from their group, subject from the token. Makes the subject
    an organization's fact rather than an operator's typing.
-7. **Signed releases, SBOM, SLSA provenance.** Sigstore on the tag, a
-   CycloneDX SBOM in the release, provenance from the workflow that already
-   uses OIDC. A morning's work; a review asks for it in the first hour.
+7. ~~Signed releases, SBOM, SLSA provenance~~ — done 16 September in
+   `release.yml`; first release to carry them is v0.4.0.
 8. **Audit forwarding.** A forwarder that ships the log to a SIEM over
    syslog or HTTP with the chain hash on every record, and a documented
    alert set: chain break, invariant refusal, clearance, wildcard mint.
@@ -219,7 +217,7 @@ reaches it. Each item is one deliverable; none is started unless listed.
     property. A named second reviewer for every change to the six files in
     item 1, and a response time in SECURITY.md.
 
-Items 3, 7 and 2 are days. Items 4, 5, 6, 8 are a week or two each. Items
+Items 2, 3 and 7 are done. Items 4, 5, 6, 8 are a week or two each. Items
 1, 9, 10, 12 need other people — a reviewer, an organization willing to
 pilot, a real workload — and are the ones that turn a project into a thing
 a company can adopt. The eight-week install window in PLAN.md is the clock

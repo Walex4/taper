@@ -631,7 +631,7 @@ refuses anyone else before a token is even parsed. Set the socket's group to the
 ## Tests and validation
 
 ```bash
-make validate    # preflight + the test suite + 140 attacks. The release gate.
+make validate    # preflight + the test suite + 140 attacks + the algebra check. The release gate.
 ```
 
 Four layers, and they check different things:
@@ -683,6 +683,32 @@ table, and `/v1/../../admin` satisfying a `/v1/` prefix. All four are fixed and
 pinned by regression tests. Expect it to find more when you extend the adapters.
 [`docs/redteam.md`](docs/redteam.md) walks through the cases (fifty-nine at v0.1.1, eighty-one at v0.2.1, one hundred and forty now), the
 four bypasses with their fixes, and what the harness does not prove.
+
+## Verifying a release
+
+Every release from v0.4.0 carries, beside the wheel and the sdist on the
+GitHub release page: a Sigstore signature and certificate for each file
+(`*.sig`, `*.pem`), a CycloneDX SBOM (`*.cdx.json`, itself signed), and a
+SLSA build-provenance attestation registered with GitHub. There is no
+signing key anyone holds; the signature is bound to the identity of the
+workflow that ran, so what you verify is "built by `release.yml` in
+`Walex4/taper` from tag vX".
+
+```
+v=0.4.0
+gh release download "v$v" --repo Walex4/taper --dir rel
+cosign verify-blob "rel/taper_broker-$v-py3-none-any.whl" \
+  --signature   "rel/taper_broker-$v-py3-none-any.whl.sig" \
+  --certificate "rel/taper_broker-$v-py3-none-any.whl.pem" \
+  --certificate-identity-regexp '^https://github.com/Walex4/taper/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+gh attestation verify "rel/taper_broker-$v-py3-none-any.whl" --repo Walex4/taper
+sha256sum "rel/taper_broker-$v-py3-none-any.whl"   # compare with pip's download
+```
+
+The same wheel is what PyPI serves; compare the hash. A release whose
+signature does not verify against that identity was not built by this
+repository's workflow, whatever its name says.
 
 ## Production notes
 

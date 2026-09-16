@@ -52,16 +52,59 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write      # OIDC for trusted publishing
+      id-token: write      # OIDC: trusted publishing, Sigstore, and provenance
       contents: write      # attach the artefacts to the GitHub release
+      attestations: write  # SLSA provenance
     steps:
       - uses: actions/checkout@v5     # for CHANGELOG.md
       - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist/
+
+      # An SBOM of what is in the wheel: CycloneDX, from the installed
+      # package, so it lists the one runtime dependency and its version.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: SBOM
+        run: |
+          python -m venv /tmp/sbom && /tmp/sbom/bin/pip install -q dist/*.whl
+          pip install -q cyclonedx-bom
+          cyclonedx-py environment --of JSON \
+            -o "dist/taper-broker-${GITHUB_REF_NAME#v}.cdx.json" /tmp/sbom/bin/python
+
+      # Sigstore: keyless signatures on every artefact, bound to this
+      # workflow's OIDC identity. `cosign verify-blob` checks them against
+      # the certificate's issuer and identity, so the thing to verify is
+      # "built by release.yml in Walex4/taper", not a key someone holds.
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign every artefact
+        run: |
+          for f in dist/*; do
+            cosign sign-blob --yes "$f" \
+              --output-signature "$f.sig" \
+              --output-certificate "$f.pem"
+          done
+
+      # SLSA provenance, attested by GitHub: which workflow, which commit,
+      # which runner produced these bytes.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+
+      # Only the wheel and the sdist go to PyPI; the signatures, certificates
+      # and SBOM go on the GitHub release beside them. pypi-publish uploads
+      # everything in the directory it is given, so it is given a copy that
+      # holds just those two.
+      - name: Stage the two files PyPI takes
+        run: mkdir -p pypi && cp dist/*.whl dist/*.tar.gz pypi/
       - uses: pypa/gh-action-pypi-publish@release/v1
-      - name: GitHub release with the built artefacts
+        with:
+          packages-dir: pypi/
+      - name: GitHub release with the built artefacts, signatures, SBOM
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

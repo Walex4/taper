@@ -2100,3 +2100,77 @@ class TestDeclaredCLI:
         assert "ssh.exec" in lines[2]
         assert "terraform" in lines[3] and lines[3].lstrip().startswith(("-", "\x1b"))
         assert "2 of 4" in err
+
+
+class TestConfigOwnership:
+    """Configuration the agent can write is not configuration."""
+
+    def _home(self, tmp_path, monkeypatch, capsys):
+        home = tmp_path / "home"
+        for name, value in [("HOME", home), ("ROOT_KEY", home / "root.key"),
+                            ("ROOT_PUB", home / "root.pub"), ("SECRETS", home / "secrets"),
+                            ("AUDIT", home / "audit.jsonl"), ("OPS", home / "ops")]:
+            monkeypatch.setattr(cli, name, value)
+        assert cli.main(["init"]) == 0
+        capsys.readouterr()
+        (home / "ops").mkdir()
+        return home
+
+    def test_a_world_writable_policy_is_refused_at_mint(self, tmp_path, monkeypatch, capsys):
+        home = self._home(tmp_path, monkeypatch, capsys)
+        policy = tmp_path / "policy.json"
+        policy.write_text(json.dumps(WIDE_POLICY))
+        policy.chmod(0o666)
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["grant", str(policy), "--key-file", str(tmp_path / "k")])
+        assert "world-writable" in str(exc.value) and "/etc/taper" in str(exc.value)
+        # the escape hatch warns and mints
+        assert cli.main(["grant", str(policy), "--key-file", str(tmp_path / "k"),
+                         "--allow-writable-config"]) == 0
+        out, err = capsys.readouterr()
+        assert "writable by the agent" in err and Token.deserialize(out.strip().splitlines()[0])
+        # a symlinked policy is refused outright
+        link = tmp_path / "policy-link.json"
+        policy.chmod(0o644)
+        link.symlink_to(policy)
+        with pytest.raises(SystemExit, match="symlink"):
+            cli.main(["grant", str(link), "--key-file", str(tmp_path / "k2")])
+
+    def test_an_ops_directory_the_agent_owns_stops_the_broker(self, tmp_path, monkeypatch, capsys):
+        """With the agent's uid named, a declaration that uid owns is refused
+        before the socket opens - which on this machine means the caller's
+        own uid, so the check is exercised without a second account."""
+        home = self._home(tmp_path, monkeypatch, capsys)
+        (home / "ops" / "kubectl.get.json").write_text(json.dumps(cli.EXAMPLE_DECLARATION))
+        me = os.getuid()
+        if me == 0:
+            pytest.skip("root owns everything here; the ownership branch needs a non-root uid")
+        from taper.hardening import WritableConfig, check_tree, require
+        reasons = check_tree(home / "ops", {me})
+        assert reasons and "owned by the agent's uid" in reasons[0]
+        with pytest.raises(WritableConfig, match="grant the agent wrote"):
+            require([home / "ops"], {me}, allow_writable=False, what="ops", warn=print)
+        # the broker's own entry point refuses the same way
+        with pytest.raises(SystemExit, match="refused to start"):
+            cli.main(["broker", "--socket", str(tmp_path / "s.sock"), "--allow-uid", str(me)])
+
+    def test_root_owned_read_only_configuration_passes(self, tmp_path, monkeypatch, capsys):
+        """The shape /etc/taper has: 0755 directory, 0644 files, group-writable
+        only when the group is root. Nothing to refuse."""
+        from taper.hardening import check_path, check_tree
+        home = self._home(tmp_path, monkeypatch, capsys)
+        (home / "ops" / "kubectl.get.json").write_text(json.dumps(cli.EXAMPLE_DECLARATION))
+        (home / "ops").chmod(0o755)
+        (home / "ops" / "kubectl.get.json").chmod(0o644)
+        assert check_tree(home / "ops", {99999}) == []
+        policy = tmp_path / "policy.json"
+        policy.write_text(json.dumps(WIDE_POLICY))
+        policy.chmod(0o640)
+        assert check_path(policy, {99999}) == []
+        policy.chmod(0o660)
+        assert any("group-writable" in r for r in check_path(policy, {99999})) or os.stat(policy).st_gid == 0
+        # doctor reports the state of both
+        policy.chmod(0o644)
+        assert cli.main(["doctor", "--policy", str(policy)]) in (0, 1)
+        out, _ = capsys.readouterr()
+        assert "not writable by the agent" in out
