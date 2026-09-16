@@ -38,6 +38,33 @@ operation gets a credential minted for it.
 - Red team: section 11, twenty-five cases, 140 in all. One of them found
   the resource-wildcard gap in the first draft of the `aws` block.
 
+**SPIFFE: a grant may name the workload that holds it.** The root block
+gains `wl` — a SPIFFE ID, or a pattern ending in `/*` matching whole path
+segments — signed by the root, inherited by every child, nameable by none
+of them. `taper grant --workload spiffe://example.org/agent/build` mints
+it. The broker then refuses the request unless the caller presents an SVID
+that chains to the trust domain's bundle inside its validity window, names
+an ID the pattern matches, and carries a signature over *this exact
+request* made with the SVID's private key, checked against the same nonce
+cache the token's own proof uses — so a copied certificate proves nothing
+and an attestation cannot be replayed. The check runs before proof of
+possession and before any policy arithmetic: a caller that is not the
+workload learns nothing about what the token permits. A broker with no
+trust bundle refuses such a grant outright rather than ignoring the claim.
+Three identities now sit on every audit record and mean three different
+things: the subject (the human), the peer (the uid `SO_PEERCRED`
+reported), and the workload (what the platform attested).
+
+`taper/spiffe.py` verifies the SVID chain itself against the bundle — no
+name is trusted, only the anchors — and does *not* speak the gRPC Workload
+API: a hand-rolled HTTP/2 and protobuf client on the credential path is a
+worse risk than the one it removes, and `spiffe-helper` or `spire-agent api
+fetch x509 -write` writing `svid.pem`, `svid_key.pem` and `bundle.pem` is
+the standard path for a workload that does not link an SDK.
+`TAPER_SVID_DIR` and `TAPER_SPIFFE_BUNDLE` point at them; `taper doctor`
+reports both; the socket client attaches an attestation automatically when
+`TAPER_SVID_DIR` is set. Red team section 13, twenty cases; 167 in all.
+
 **The root of trust: a set, rotation, and a key that is not a file.**
 `root.pub` may hold several public keys and every root block names its
 signer by `kid` (sixteen hex of SHA-256 over the raw key), so a verifier

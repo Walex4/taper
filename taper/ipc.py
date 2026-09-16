@@ -143,7 +143,8 @@ class BrokerServer:
                 self._send(conn, {"allowed": False, "reason": "request must be an object"})
                 return
 
-            unknown = set(message) - {"token", "operation", "request", "proof"}
+            unknown = set(message) - {"token", "operation", "request", "proof",
+                                      "attestation"}
             if unknown:
                 self._send(conn, {"allowed": False, "reason": f"unknown fields: {sorted(unknown)}"})
                 return
@@ -163,7 +164,8 @@ class BrokerServer:
                 # that carries the token chain and the redacted plan.
                 decision = self.broker.decide(token, operation, request,
                                               peer=peer.as_dict(),
-                                              proof=message.get("proof"))
+                                              proof=message.get("proof"),
+                                              attestation=message.get("attestation"))
                 if not decision.allowed:
                     self.log(f"DENY  {peer} {operation}: {decision.reason}")
                     self._send(conn, {"allowed": False, "reason": decision.reason})
@@ -281,6 +283,22 @@ class BrokerClient:
                 except PopError as exc:
                     # Say what is wrong with the key file, never what is in it.
                     return {"allowed": False, "reason": f"cannot prove possession: {exc}"}
+            # A grant may name the workload that may hold it. When an SVID is
+            # available - TAPER_SVID_DIR, written by spiffe-helper or
+            # `spire-agent api fetch x509 -write` - attach it and a signature
+            # over this request. Absent, the broker refuses any grant that
+            # names one, and says so.
+            if os.environ.get("TAPER_SVID_DIR", "").strip():
+                try:
+                    from .spiffe import SpiffeError, load_files
+                    from .spiffe import prove as prove_workload
+                    files = load_files()
+                    message["attestation"] = prove_workload(
+                        files.key, files.chain_pem, token, operation, request,
+                        files.spiffe_id)
+                except SpiffeError as exc:
+                    return {"allowed": False,
+                            "reason": f"cannot attest this workload: {exc}"}
             conn.sendall((json.dumps(message) + "\n").encode())
             chunks = []
             while True:

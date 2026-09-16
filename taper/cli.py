@@ -284,6 +284,9 @@ def cmd_grant(args) -> int:
     # with no subject is recorded as acting for nobody in particular, and
     # inspect says so, because that is the honest description of it.
     subject = args.subject if args.subject is not None else policy.get("subject", "")
+    # Which workload may hold this authority. The flag wins over the policy
+    # file, as --subject does, so one policy can be minted for several.
+    workload = args.workload if args.workload is not None else policy.get("workload", "")
     # Condition 4 of DESIGN.md §7: the grant commits to the definition of every
     # declared operation it names. An operation nobody serves is minted anyway
     # - the broker refuses it, fail closed - but the operator is told now.
@@ -301,7 +304,8 @@ def cmd_grant(args) -> int:
     try:
         token = Token.issue(None, caps, ttl_seconds=ttl,
                             note=policy.get("note", ""), subject=subject,
-                            definitions=definitions, signer=signer, root_pub=root_pub)
+                            definitions=definitions, signer=signer, root_pub=root_pub,
+                            workload=workload)
     except ChainError as exc:
         sys.exit(str(exc))
     from .rootkey import AgentError
@@ -334,6 +338,17 @@ def cmd_grant(args) -> int:
     if definitions:
         print(f"{DIM}# commits to the definition of {', '.join(sorted(definitions))}; "
               f"an edited file is refused until re-minted{OFF}", file=sys.stderr)
+    if workload:
+        print(f"{DIM}# may be held only by {workload}, attested by SPIFFE; the broker "
+              f"needs TAPER_SPIFFE_BUNDLE to check{OFF}", file=sys.stderr)
+        if workload.count("/") <= 2 or workload == workload.split("//")[0] + "//" + \
+                workload.split("//")[1].split("/")[0] + "/*":
+            print(f"{YELLOW}!{OFF} {workload} matches every workload in the trust "
+                  f"domain; name the path the agent runs as.", file=sys.stderr)
+    else:
+        print(f"{DIM}# no workload named: any process holding the token and its key "
+              f"may use it. --workload spiffe://… binds it to an attested one{OFF}",
+              file=sys.stderr)
     _warn_layer1_only(caps, catalog)
     _warn_policy_pressure(caps)
     return 0
@@ -371,6 +386,9 @@ def cmd_inspect(args) -> int:
     remaining = int(token.expires_at() - time.time())
     colour = GREEN if remaining > 0 else RED
     print(f"\n{BOLD}expires{OFF} in {colour}{remaining}s{OFF}")
+    if token.workload():
+        print(f"{BOLD}held by{OFF} {token.workload()}  {DIM}(root-signed; the broker "
+              f"refuses any caller SPIFFE does not attest as this){OFF}")
     if token.subject():
         print(f"{BOLD}acts for{OFF} {token.subject()}  {DIM}(root-signed; "
               f"inherited by every block){OFF}")
@@ -1111,6 +1129,23 @@ def cmd_doctor(args) -> int:
               f"{policy_path} is writable by the agent — `taper grant` refuses it: "
               + (reasons[0] if reasons else ""))
 
+    # SPIFFE: is there a bundle, and does this host hold an SVID?
+    from .spiffe import SpiffeError, bundle_path, load_bundle, load_files
+    bp = bundle_path()
+    if bp is not None:
+        try:
+            anchors = load_bundle(bp)
+            check(True, f"SPIFFE trust bundle at {bp} ({len(anchors)} anchor"
+                        f"{'s' if len(anchors) != 1 else ''})", "")
+        except SpiffeError as exc:
+            check(False, "", str(exc))
+    if os.environ.get("TAPER_SVID_DIR", "").strip():
+        try:
+            files = load_files()
+            check(True, f"SVID present: {files.spiffe_id}", "")
+        except SpiffeError as exc:
+            check(False, "", f"TAPER_SVID_DIR is set but: {exc}")
+
     # Declared operations: every file compiles, or the broker will not start.
     if OPS.is_dir():
         from .declared import load_dir
@@ -1247,20 +1282,37 @@ def _username(uid: int) -> str:
         return "?"
 
 
+def _spiffe_bundle():
+    """The trust domain's CA certificates, when the operator gave them.
+    None means a grant that names a workload is refused - "I cannot check"
+    is not "it is fine"."""
+    from .spiffe import SpiffeError, bundle_path, load_bundle
+    path = bundle_path()
+    if path is None:
+        return None
+    try:
+        return load_bundle(path)
+    except SpiffeError as exc:
+        sys.exit(f"{RED}refused to start:{OFF} {exc}")
+
+
 def _broker_and_executor(root_pub, adapters, audit_path, secrets, require_proof=False):
     """A plain Broker and Executor - or, when TAPER_TOWER is set and the
     tower package is installed, cleared ones. Tower is a separate track and
     an optional import; Taper without it is unchanged."""
     from .broker import Broker
     from .execute import Executor
+    bundle = _spiffe_bundle()
     if os.environ.get("TAPER_TOWER", "").strip():
         try:
             from tower.attach import attach
         except ImportError:
             sys.exit("TAPER_TOWER is set but the tower package is not installed")
-        return attach(root_pub, adapters, audit_path, secrets, require_proof=require_proof)
+        return attach(root_pub, adapters, audit_path, secrets, require_proof=require_proof,
+                      spiffe_bundle=bundle)
     broker = Broker(root_pub=root_pub, adapters=adapters, audit_path=audit_path,
-                    secrets=secrets.get, require_proof=require_proof)
+                    secrets=secrets.get, require_proof=require_proof,
+                    spiffe_bundle=bundle)
     return broker, Executor(secrets), None
 
 
@@ -1315,6 +1367,14 @@ def cmd_broker(args) -> int:
     else:
         who = ", ".join(f"{_username(uid)}({uid})" for uid in sorted(allowed))
         print(f"{DIM}accepting: {who}{OFF}", file=sys.stderr)
+    if broker.spiffe_bundle:
+        from .spiffe import bundle_path
+        print(f"{GREEN}SPIFFE bundle loaded{OFF} ({len(broker.spiffe_bundle)} anchor"
+              f"{'s' if len(broker.spiffe_bundle) != 1 else ''} from {bundle_path()}) — "
+              f"a grant naming a workload is checked against it", file=sys.stderr)
+    else:
+        print(f"{DIM}# no SPIFFE trust bundle: a grant that names a workload is "
+              f"refused outright. TAPER_SPIFFE_BUNDLE points at one{OFF}", file=sys.stderr)
     if tower is not None:
         print(f"{GREEN}tower attached{OFF} — Postgres decisions carry a clearance; "
               f"the DSN must carry no password", file=sys.stderr)
@@ -1410,6 +1470,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-writable-config", action="store_true",
                    help="warn instead of refusing a policy or ops directory the agent "
                         "can write (a development checkout)")
+    p.add_argument("--workload", default=None, metavar="SPIFFE_ID",
+                   help="bind this grant to an attested workload: spiffe://domain/path, "
+                        "or a /* pattern. The broker refuses any caller SPIFFE does "
+                        "not attest as it.")
     p.add_argument("policy")
     p.add_argument("--ttl", default="1h")
     # Required: the proving key must land somewhere that is not stdout, and

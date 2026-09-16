@@ -109,6 +109,14 @@ class Block:
     # one named rather than all of them, and a chain says which root it is.
     # verified-by: tests/test_taper.py::TestRootKey::test_a_chain_verifies_against_any_key_in_the_trust_set_by_kid
     kid: str = ""
+    # The workload this authority may be held by: a SPIFFE ID, or a pattern
+    # ending in /*. Root block only, under the root signature, like the
+    # subject. The subject says who the authority is FOR; this says what may
+    # hold it, and the platform - not this code - decides whether a process
+    # is that workload (taper/spiffe.py).
+    # verified-by: tests/test_taper.py::TestSpiffe::test_a_grant_for_another_workload_is_refused
+    # verified-by: tests/test_taper.py::TestSpiffe::test_a_child_block_may_not_name_a_workload
+    workload: str = ""
 
     def payload(self) -> bytes:
         """Exact bytes covered by the signature.
@@ -134,6 +142,8 @@ class Block:
             body["defs"] = dict(sorted(self.definitions.items()))
         if self.kid:
             body["kid"] = self.kid
+        if self.workload:
+            body["wl"] = self.workload
         return b"\x00taper-block\x00" + json.dumps(
             body, sort_keys=True, separators=(",", ":")
         ).encode()
@@ -157,6 +167,8 @@ class Block:
             d["defs"] = dict(sorted(self.definitions.items()))
         if self.kid:
             d["kid"] = self.kid
+        if self.workload:
+            d["wl"] = self.workload
         return d
 
     @staticmethod
@@ -172,6 +184,7 @@ class Block:
             subject=str(d.get("sub", "")),
             definitions=_definitions_from_json(d.get("defs")),
             kid=str(d.get("kid", "")),
+            workload=str(d.get("wl", "")),
         )
 
 
@@ -217,7 +230,8 @@ class Token:
               subject: str = "",
               definitions: Optional[dict] = None,
               signer=None,
-              root_pub: Optional[Ed25519PublicKey] = None) -> "Token":
+              root_pub: Optional[Ed25519PublicKey] = None,
+              workload: str = "") -> "Token":
         """Mint a root token. `subject` is the human this authority is issued
         for - whatever the operator's identity provider calls them. It is
         signed by the root and cannot be changed by anything downstream.
@@ -229,9 +243,12 @@ class Token:
         agent holding a key this process never sees (taper/rootkey.py).
         Either way the block records the signer's kid."""
         from .rootkey import kid_of
+        from .spiffe import valid_pattern
         now = time.time() if now is None else now
         if "\n" in subject or len(subject) > 256:
             raise ChainError("subject must be one line of at most 256 characters")
+        if workload and not valid_pattern(workload):
+            raise ChainError(f"{workload!r} is not a SPIFFE ID or a /* pattern")
         if signer is None:
             signer, root_pub = root_priv.sign, root_priv.public_key()
         elif root_pub is None:
@@ -248,6 +265,7 @@ class Token:
             subject=subject,
             definitions=defs,
             kid=kid_of(root_pub),
+            workload=workload,
         )
         block.signature = signer(block.payload())
         # A signer that lied - an agent answering for another key - is caught
@@ -341,6 +359,11 @@ class Token:
         minted against. Root block only; empty if none were declared."""
         return dict(self.blocks[0].definitions) if self.blocks else {}
 
+    def workload(self) -> str:
+        """The SPIFFE ID or pattern this authority may be held by. Root
+        block only; empty when the issuer named no workload."""
+        return self.blocks[0].workload if self.blocks else ""
+
     def revocation_ids(self) -> list[str]:
         """One id per block. Revoking a parent id must revoke every derived token,
         which is why each block contributes an id and the checker matches ANY.
@@ -427,6 +450,8 @@ def verify(token: Token,
             raise ChainError(f"block {position} carries definitions; only the root may")
         if position > 0 and block.kid:
             raise ChainError(f"block {position} names a root key; only the root may")
+        if position > 0 and block.workload:
+            raise ChainError(f"block {position} names a workload; only the root may")
         try:
             expected_signer.verify(block.signature, block.payload())
         except InvalidSignature:

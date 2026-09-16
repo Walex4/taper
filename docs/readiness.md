@@ -84,13 +84,16 @@ secrets its agents need; there is no central broker, and that is deliberate
 — a central one is the concentrated target every review objects to.
 
 **Identity.** The root signing key is the root of trust; it belongs
-offline or in hardware, and `taper grant` is run from wherever it lives.
-The *subject* is the human, in whatever form the identity provider names
-them (`alice@example.com`, an employee id); it is put in the root block at
-mint and cannot be changed downstream. Today, that mapping is manual — an
-operator mints for a person. The organization-scale version is an IdP-driven
-mint: an OIDC login yields a root grant for that person with a policy from
-their group, and SPIFFE attests which workload may hold it. Neither is built.
+offline or in hardware — `TAPER_ROOT_AGENT=1` signs through an agent, so a
+YubiKey or a Secure Enclave can be it — and rotates with `taper root
+rotate`. The *subject* is the human, in whatever form the identity provider
+names them (`alice@example.com`, an employee id); it is put in the root
+block at mint and cannot be changed downstream. The *workload* is what may
+hold the grant: `--workload spiffe://example.org/agent/build`, checked
+against the trust domain's bundle on every request. What is still manual is
+the mapping from a person to a mint: an IdP-driven `taper grant` — an OIDC
+login yielding a root grant for that person with a policy from their group —
+is the last open piece.
 
 **Policy.** Policy files under `/etc/taper`, root-owned, in configuration
 management; declared operations under `ops/` in the same place, reviewed
@@ -141,7 +144,7 @@ means the design accepts it and says so; *open* means work not yet done;
 | 5 | Revocation needs online state | **inherent** | Short TTLs are the answer, as for macaroons since 2014. One revocation list is shared by broker and tower, so a revoked token stops the next clearance. An issued clearance lives out its sixty seconds. |
 | 6 | Root key management | **built** | `root.pub` is a trust set; every root block names its signer by kid. `taper root rotate` adds a signing key and keeps the old one trusted; `taper root retire <kid>` drops it and every chain it signed stops verifying. `TAPER_ROOT_AGENT=1` signs through an SSH agent, so the root can live in a YubiKey or a Secure Enclave and never be a file this code reads. Seven red-team cases. |
 | 7 | Single host, single operator | **open** | No multi-host story, no HA, no fleet management of policies or catalogs. A reference deployment for more than one host does not exist. Audit forwarding (row 17) is the first piece of a fleet answer. |
-| 8 | Workload attestation: who may hold a root token at all | **open** | SPIFFE solves this and Taper does not integrate with it. Today, possession of the proving key file is the answer. |
+| 8 | Workload attestation: who may hold a root token at all | **built** | A grant may name a SPIFFE ID or `/*` pattern in the root block; the broker refuses any caller whose SVID does not chain to the trust bundle, match the pattern, and prove possession of its key for that exact request. A broker with no bundle refuses such a grant rather than ignoring it. The attestation itself is SPIRE's; the Workload API is read through the files `spiffe-helper` writes, not by a hand-rolled gRPC client. Twenty red-team cases. |
 | 9 | The policy file and the catalog are agent-writable in the repository | **built** | `taper grant` refuses a symlinked, group- or world-writable policy or ops directory; `taper broker` refuses to start on an ops directory owned by a uid it accepts connections from; `taper doctor --agent-user` reports both. `--allow-writable-config` warns instead, loudly, and has no environment form. |
 | 10 | Typed surface fails to cover real tasks | **open, measured** | The falsification test. Declared operations and `taper coverage` are the relief and the measurement; a week of real use has not happened. |
 | 11 | Tower's independence is a code path, not a uid | **open** | Stage 1, now for Postgres, SSH and AWS. The interface was written for stage 2 (own uid, split key, holds), which is not built. |
@@ -196,10 +199,11 @@ reaches it. Each item is one deliverable; none is started unless listed.
    for an agent-held key. A PKCS#11 path that does not go through an agent
    remains open, and `taper doctor` does not yet object to a root key that
    is a plain file on a production host.
-5. **SPIFFE for the workload.** A root grant is minted only to a workload
-   whose SVID matches the policy's `workload` field. This is the item NIST
-   names and the one that makes "which process may hold this" an attested
-   fact rather than a file permission. Closes risk 8.
+5. ~~SPIFFE for the workload~~ — done 16 September: `taper grant
+   --workload spiffe://…`, checked by the broker against the trust bundle
+   with possession proved per request (`taper/spiffe.py`). What remains is
+   speaking the Workload API directly rather than reading the files
+   `spiffe-helper` writes, which is a convenience, not a control.
 6. **IdP-driven mint.** An OIDC login yields a root grant for that person,
    with policy from their group, subject from the token. Makes the subject
    an organization's fact rather than an operator's typing.
@@ -223,7 +227,7 @@ reaches it. Each item is one deliverable; none is started unless listed.
     property. A named second reviewer for every change to the six files in
     item 1, and a response time in SECURITY.md.
 
-Items 2, 3, 4, 7 and 8 are done. Items 5 (SPIFFE) and 6 (IdP-driven mint) are a week or two each. Items
+Items 2, 3, 4, 5, 7 and 8 are done. Item 6 (an IdP-driven mint) is a week or two. Items
 1, 9, 10, 12 need other people — a reviewer, an organization willing to
 pilot, a real workload — and are the ones that turn a project into a thing
 a company can adopt. The eight-week install window in PLAN.md is the clock

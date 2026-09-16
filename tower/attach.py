@@ -23,13 +23,14 @@ from taper.execute import Executor
 
 
 def attach(root_pub, adapters, audit_path, secrets, *, require_proof: bool = False,
-           env: Optional[dict] = None, role: str = "taper_agent"):
+           env: Optional[dict] = None, role: str = "taper_agent", spiffe_bundle=None):
     """Return (broker, executor). Cleared if TAPER_TOWER is set, plain if not."""
     env = os.environ if env is None else env
     where = env.get("TAPER_TOWER", "").strip()
     if not where:
         broker = Broker(root_pub=root_pub, adapters=adapters, audit_path=audit_path,
-                        secrets=secrets.get, require_proof=require_proof)
+                        secrets=secrets.get, require_proof=require_proof,
+                        spiffe_bundle=spiffe_bundle)
         return broker, Executor(secrets), None
 
     from .broker import ClearedBroker
@@ -74,5 +75,6 @@ def attach(root_pub, adapters, audit_path, secrets, *, require_proof: bool = Fal
     broker = ClearedBroker(root_pub=root_pub, adapters=adapters, audit_path=audit_path,
                            secrets=secrets.get, require_proof=require_proof,
                            tower=tower, role=env.get("TAPER_TOWER_ROLE", role),
-                           ssh_user=env.get("TAPER_TOWER_SSH_USER", "taper-agent"))
+                           ssh_user=env.get("TAPER_TOWER_SSH_USER", "taper-agent"),
+                           spiffe_bundle=spiffe_bundle)
     return broker, ClearedExecutor(secrets, tower), tower

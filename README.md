@@ -492,6 +492,7 @@ taper/caps.py         constraint algebra: subsumes + intersect
 taper/chain.py        signed attenuation chain
 taper/ops.py          typed operation schemas (rule 1)
 taper/rootkey.py      the trust set, rotation, and signing through an ssh-agent
+taper/spiffe.py       which workload may hold a grant, attested by SPIRE
 taper/forward.py      ship the tape to syslog or a collector, with alerts
 taper/hardening.py    configuration the agent can write is not configuration
 taper/declared.py     an operation as a JSON file, compiled to the same thing
@@ -634,7 +635,7 @@ refuses anyone else before a token is even parsed. Set the socket's group to the
 ## Tests and validation
 
 ```bash
-make validate    # preflight + the test suite + 147 attacks + the algebra check. The release gate.
+make validate    # preflight + the test suite + 167 attacks + the algebra check. The release gate.
 ```
 
 Four layers, and they check different things:
@@ -642,7 +643,7 @@ Four layers, and they check different things:
 | Command | Checks | Needs |
 |---|---|---|
 | `pytest` | the code does what you meant — 273 tests | nothing |
-| `python validate/redteam.py` | the system refuses what someone *else* meant — 147 attacks | nothing |
+| `python validate/redteam.py` | the system refuses what someone *else* meant — 167 attacks | nothing |
 | `bash scripts/preflight.sh` | this machine can host a broker safely | nothing |
 | `python validate/check_postgres.py <dsn>` | **the database refuses on its own** | a real Postgres |
 | `bash validate/check_ssh.sh <host> <key>` | **sshd refuses on its own** | a real target host |
@@ -684,8 +685,39 @@ stacked statements classifying as `SELECT`, the real pgAdmin backslash payload
 getting through, `pg_read_file` passing as a plain select because it touched no
 table, and `/v1/../../admin` satisfying a `/v1/` prefix. All four are fixed and
 pinned by regression tests. Expect it to find more when you extend the adapters.
-[`docs/redteam.md`](docs/redteam.md) walks through the cases (fifty-nine at v0.1.1, eighty-one at v0.2.1, one hundred and forty-seven now), the
+[`docs/redteam.md`](docs/redteam.md) walks through the cases (fifty-nine at v0.1.1, eighty-one at v0.2.1, one hundred and sixty-seven now), the
 four bypasses with their fixes, and what the harness does not prove.
+
+## Binding a grant to a workload
+
+The subject says who the authority is for; proof of possession says the
+caller holds the key. Neither says *what* the caller is. A grant can name
+that too:
+
+```
+taper grant policy.json --key-file k --subject alice@example.com \
+  --workload spiffe://example.org/agent/build
+```
+
+The broker then refuses any request whose SVID does not chain to the trust
+domain's bundle, match that ID, and prove possession of its private key for
+that exact request. The attestation is SPIRE's job — it decides whether a
+process is that workload from the platform's own evidence; Taper checks a
+certificate and a signature, and a broker with no trust bundle refuses such
+a grant rather than assuming the best.
+
+Point both sides at the files `spiffe-helper` (or `spire-agent api fetch
+x509 -write <dir>`) writes and keeps rotated:
+
+```
+# the agent
+export TAPER_SVID_DIR=/run/spire/agent      # svid.pem, svid_key.pem
+# the broker
+export TAPER_SPIFFE_BUNDLE=/run/spire/bundle.pem
+```
+
+`taper doctor` reports both. The gRPC Workload API is deliberately not
+spoken here — see DESIGN.md §5, "The workload".
 
 ## The root key, and the tape
 

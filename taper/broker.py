@@ -59,6 +59,10 @@ class Decision:
     # when the chain failed before it could be read - in which case the reason
     # says so and nothing about a subject is claimed.
     subject: str = ""
+    # What the platform attested the caller to be, when the grant named a
+    # workload and the SVID verified. "" when the grant named none - not
+    # "unknown", and never a claim this broker did not check.
+    workload: str = ""
 
 
 class Broker:
@@ -69,7 +73,8 @@ class Broker:
                  secrets: Optional[Callable[[str], str]] = None,
                  revoked: Optional[set[str]] = None,
                  clock: Callable[[], float] = time.time,
-                 require_proof: bool = True):
+                 require_proof: bool = True,
+                 spiffe_bundle=None):
         self.root_pub = root_pub
         self.adapters = adapters
         self.audit = AuditLog(Path(str(audit_path)).expanduser())
@@ -80,12 +85,18 @@ class Broker:
         # bearer token with extra steps, and every caller that forgot to turn it
         # on looks exactly like one that did.
         self.require_proof = require_proof
+        # The trust domain's CA certificates, when the operator gave them.
+        # A grant that names a workload is refused outright without them:
+        # "I cannot check" is not "it is fine".
+        # verified-by: tests/test_taper.py::TestSpiffe::test_a_broker_with_no_bundle_refuses_a_workload_grant
+        self.spiffe_bundle = spiffe_bundle
         self.nonces = NonceCache()
 
     # ------------------------------------------------------------------ deciding
 
     def decide(self, token_text: str, operation: str, request: dict,
-               peer: Optional[dict] = None, proof: Optional[dict] = None) -> Decision:
+               peer: Optional[dict] = None, proof: Optional[dict] = None,
+               attestation: Optional[dict] = None) -> Decision:
         """`peer` is the calling process's identity as reported by the kernel
         (see ipc.peer_of), or None when the caller is in-process. It is passed
         down to the audit record so the log names who asked, not who claimed to.
@@ -107,6 +118,38 @@ class Broker:
 
         subject = token.subject()
 
+        # 0a. The workload, when the grant names one. Before possession and
+        # before any policy arithmetic: "this process is not the workload
+        # this authority was written for" is a fact about the caller, and a
+        # caller who is not it learns nothing about what the token permits.
+        # The platform decided this - a SPIRE agent attested the workload and
+        # issued the SVID; the broker only checks the chain, the pattern and
+        # possession of the SVID key for this exact request.
+        # verified-by: tests/test_taper.py::TestSpiffe::test_a_grant_for_another_workload_is_refused
+        # verified-by: tests/test_taper.py::TestSpiffe::test_a_copied_svid_without_its_key_proves_nothing
+        workload = ""
+        wanted = token.workload()
+        if wanted:
+            from .spiffe import SpiffeError, verify as verify_workload
+            if self.spiffe_bundle is None:
+                decision = Decision(
+                    False,
+                    f"this grant is for workload {wanted} and this broker has no "
+                    f"SPIFFE trust bundle; set TAPER_SPIFFE_BUNDLE (or put "
+                    f"bundle.pem in TAPER_SVID_DIR) so it can check",
+                    operation, {}, token_ids=token.revocation_ids(), subject=subject, workload=workload)
+                self._record(decision, peer)
+                return decision
+            try:
+                workload = verify_workload(attestation, self.spiffe_bundle, wanted,
+                                           token_text, operation, request,
+                                           self.nonces, now=now)
+            except SpiffeError as exc:
+                decision = Decision(False, str(exc), operation, {},
+                                    token_ids=token.revocation_ids(), subject=subject, workload=workload)
+                self._record(decision, peer)
+                return decision
+
         # 0. Possession, before any policy arithmetic. The chain had to be
         # parsed first to learn which key to check against — but nothing about
         # what the token PERMITS has been consulted yet, and nothing will be if
@@ -119,7 +162,8 @@ class Broker:
                              request, proof, self.nonces, now=now)
             except PopError as exc:
                 decision = Decision(False, str(exc), operation, {},
-                                    token_ids=token.revocation_ids(), subject=subject)
+                                    token_ids=token.revocation_ids(), subject=subject,
+                                    workload=workload)
                 self._record(decision, peer)
                 return decision
 
@@ -131,14 +175,14 @@ class Broker:
             clean = op.validate(request)
         except ops.OperationError as exc:
             decision = Decision(False, str(exc), operation, {}, token_ids=token_ids,
-                                subject=subject)
+                                subject=subject, workload=workload)
             self._record(decision, peer)
             return decision
 
         adapter = self.adapters.get(operation)
         if adapter is None:
             decision = Decision(False, f"no adapter for {operation}", operation, {},
-                                token_ids=token_ids, subject=subject)
+                                token_ids=token_ids, subject=subject, workload=workload)
             self._record(decision, peer)
             return decision
 
@@ -159,7 +203,7 @@ class Broker:
                     f"{operation} is a declared operation and this grant does not "
                     f"commit to its definition; mint it with the operation's file "
                     f"present so the grant carries the definition hash",
-                    operation, {}, token_ids=token_ids, subject=subject)
+                    operation, {}, token_ids=token_ids, subject=subject, workload=workload)
                 self._record(decision, peer)
                 return decision
             if committed != loaded:
@@ -169,7 +213,7 @@ class Broker:
                     f"one this grant was minted against ({loaded[:12]} vs "
                     f"{committed[:12]}); the file changed since the grant was "
                     f"issued. Re-mint, or restore the file",
-                    operation, {}, token_ids=token_ids, subject=subject)
+                    operation, {}, token_ids=token_ids, subject=subject, workload=workload)
                 self._record(decision, peer)
                 return decision
 
@@ -179,7 +223,7 @@ class Broker:
         if granted is None:
             decision = Decision(False, f"token does not grant {operation}",
                                 operation, attributes, token_ids=token_ids,
-                                subject=subject)
+                                subject=subject, workload=workload)
             self._record(decision, peer)
             return decision
 
@@ -192,7 +236,7 @@ class Broker:
                     False,
                     f"{operation}.{name} is unconstrained in this token; "
                     f"grants must name every attribute",
-                    operation, attributes, token_ids=token_ids, subject=subject)
+                    operation, attributes, token_ids=token_ids, subject=subject, workload=workload)
                 self._record(decision, peer)
                 return decision
             if not constraint.allows(value):
@@ -200,14 +244,14 @@ class Broker:
                     False,
                     f"{operation}.{name}={value!r} not permitted by "
                     f"{constraint.to_json()}",
-                    operation, attributes, token_ids=token_ids, subject=subject)
+                    operation, attributes, token_ids=token_ids, subject=subject, workload=workload)
                 self._record(decision, peer)
                 return decision
 
         # 5. Plan.
         plan = adapter.plan(clean, granted)
         decision = Decision(True, "ok", operation, attributes, plan=plan,
-                            token_ids=token_ids, subject=subject)
+                            token_ids=token_ids, subject=subject, workload=workload)
         self._record(decision, peer)
         return decision
 
@@ -237,6 +281,10 @@ class Broker:
             "record": "decision",
             "peer": peer,
             "subject": decision.subject,
+            # Three identities, three meanings: the human the authority is
+            # for, the uid the kernel reported, the workload the platform
+            # attested. None substitutes for another.
+            "workload": decision.workload,
             "allowed": decision.allowed,
             "reason": decision.reason,
             "operation": decision.operation,
@@ -261,6 +309,7 @@ class Broker:
             "record": "result",
             "peer": peer,
             "subject": decision.subject,
+            "workload": decision.workload,
             "operation": decision.operation,
             "token": decision.token_ids[-1] if decision.token_ids else None,
             "ok": bool(getattr(result, "ok", False)),

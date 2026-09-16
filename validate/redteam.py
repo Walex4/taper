@@ -770,6 +770,117 @@ def run(report: Report, tmp: Path) -> None:
         report.check("root: an unnamed root against a set of several", True, str(exc))
 
     # ---------------------------------------------------------------------
+    section("13. SPIFFE — the workload a grant was written for, and no other")
+    import datetime as _dt
+    from cryptography import x509 as _x509
+    from cryptography.hazmat.primitives import hashes as _hashes, serialization as _ser
+    from cryptography.hazmat.primitives.asymmetric import ec as _ec
+    from cryptography.x509.oid import NameOID as _NameOID
+    from taper import spiffe as _spiffe
+
+    def _ca(name):
+        k = _ec.generate_private_key(_ec.SECP256R1())
+        sub = _x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, name)])
+        at = _dt.datetime.fromtimestamp(NOW, _dt.timezone.utc)
+        c = (_x509.CertificateBuilder().subject_name(sub).issuer_name(sub)
+             .public_key(k.public_key()).serial_number(_x509.random_serial_number())
+             .not_valid_before(at - _dt.timedelta(hours=1))
+             .not_valid_after(at + _dt.timedelta(days=1))
+             .add_extension(_x509.BasicConstraints(ca=True, path_length=None), critical=True)
+             .sign(k, _hashes.SHA256()))
+        return k, c
+
+    def _issue(cak, cac, sid, minutes=60):
+        k = _ec.generate_private_key(_ec.SECP256R1())
+        at = _dt.datetime.fromtimestamp(NOW, _dt.timezone.utc)
+        c = (_x509.CertificateBuilder().subject_name(_x509.Name([])).issuer_name(cac.subject)
+             .public_key(k.public_key()).serial_number(_x509.random_serial_number())
+             .not_valid_before(at - _dt.timedelta(minutes=1))
+             .not_valid_after(at + _dt.timedelta(minutes=minutes))
+             .add_extension(_x509.BasicConstraints(ca=False, path_length=None), critical=True)
+             .add_extension(_x509.SubjectAlternativeName(
+                 [_x509.UniformResourceIdentifier(sid)]), critical=True)
+             .sign(cak, _hashes.SHA256()))
+        return k, c.public_bytes(_ser.Encoding.PEM) + cac.public_bytes(_ser.Encoding.PEM)
+
+    spi_ca_key, spi_ca = _ca("spire-ca")
+    rogue_key, rogue_ca = _ca("rogue-ca")
+    WL = "spiffe://example.org/agent/build"
+    svid_key, svid_chain = _issue(spi_ca_key, spi_ca, WL)
+    sbroker = Broker(root_pub=root.public_key(), adapters={"ssh.exec": SSHAdapter()},
+                     audit_path=tmp / "spiffe-audit.jsonl", clock=lambda: NOW,
+                     spiffe_bundle=[spi_ca])
+    wtok = Token.issue(root, FULL, ttl_seconds=3600, now=NOW, subject="alice@example.com",
+                       workload="spiffe://example.org/agent/*")
+    ww = wtok.serialize()
+    sreq2 = {"host": "build-1.internal", "program": "git", "args": ["status"]}
+
+    def ask_workload(label, attestation, expect_allowed=False, wire=ww, tok=wtok):
+        d = sbroker.decide(wire, "ssh.exec", sreq2,
+                           proof=prove(tok.proving_key(), wire, "ssh.exec", sreq2, now=NOW),
+                           attestation=attestation)
+        if expect_allowed:
+            report.check(f"spiffe: {label}", d.allowed, d.reason if not d.allowed else d.workload)
+        else:
+            report.check(f"spiffe: {label}", not d.allowed,
+                         d.reason if not d.allowed else "ALLOWED")
+        return d
+
+    ask_workload("the attested workload is allowed",
+                 _spiffe.prove(svid_key, svid_chain, ww, "ssh.exec", sreq2, now=NOW),
+                 expect_allowed=True)
+    ask_workload("no SVID at all", None)
+    rogue_svid_key, rogue_svid_chain = _issue(rogue_key, rogue_ca, WL)
+    ask_workload("an SVID from a CA the bundle does not hold",
+                 _spiffe.prove(rogue_svid_key, rogue_svid_chain, ww, "ssh.exec",
+                               sreq2, now=NOW))
+    other_key, other_chain = _issue(spi_ca_key, spi_ca, "spiffe://example.org/other/svc")
+    ask_workload("a genuine SVID for a workload outside the pattern",
+                 _spiffe.prove(other_key, other_chain, ww, "ssh.exec", sreq2, now=NOW))
+    thief_key, _ = _issue(spi_ca_key, spi_ca, "spiffe://example.org/agent/thief")
+    ask_workload("the right certificate, signed by a key that is not its own",
+                 _spiffe.prove(thief_key, svid_chain, ww, "ssh.exec", sreq2, now=NOW,
+                               spiffe_id=WL))
+    ask_workload("an attestation made for a different request",
+                 _spiffe.prove(svid_key, svid_chain, ww, "ssh.exec",
+                               {**sreq2, "args": []}, now=NOW))
+    replayed = _spiffe.prove(svid_key, svid_chain, ww, "ssh.exec", sreq2, now=NOW)
+    ask_workload("a fresh attestation", replayed, expect_allowed=True)
+    ask_workload("the same attestation twice", replayed)
+    ask_workload("an attestation whose timestamp is an hour old",
+                 _spiffe.prove(svid_key, svid_chain, ww, "ssh.exec", sreq2, now=NOW - 3600))
+    expired_key, expired_chain = _issue(spi_ca_key, spi_ca, WL, minutes=-1)
+    ask_workload("an expired SVID",
+                 _spiffe.prove(expired_key, expired_chain, ww, "ssh.exec", sreq2, now=NOW))
+    # a child block that names its own workload, and a rewritten root
+    wchild = wtok.attenuate(FULL, now=NOW)
+    cdata2 = json.loads(_unb64(wchild.serialize()))
+    cdata2["b"][1]["wl"] = "spiffe://example.org/anything/*"
+    forged_child = _b64(json.dumps(cdata2).encode())
+    d = sbroker.decide(forged_child, "ssh.exec", sreq2, proof=None, attestation=None)
+    report.check("spiffe: a child block naming its own workload",
+                 not d.allowed and "names a workload" in d.reason, d.reason)
+    rdata = json.loads(_unb64(ww)); rdata["b"][0]["wl"] = "spiffe://example.org/anything/*"
+    d = sbroker.decide(_b64(json.dumps(rdata).encode()), "ssh.exec", sreq2,
+                       proof=None, attestation=None)
+    report.check("spiffe: the root's workload rewritten",
+                 not d.allowed and "bad signature" in d.reason, d.reason)
+    # a broker with no bundle refuses a workload grant rather than ignoring it
+    nobundle = Broker(root_pub=root.public_key(), adapters={"ssh.exec": SSHAdapter()},
+                      audit_path=tmp / "spiffe-audit.jsonl", clock=lambda: NOW)
+    d = nobundle.decide(ww, "ssh.exec", sreq2,
+                        proof=prove(wtok.proving_key(), ww, "ssh.exec", sreq2, now=NOW),
+                        attestation=_spiffe.prove(svid_key, svid_chain, ww, "ssh.exec",
+                                                  sreq2, now=NOW))
+    report.check("spiffe: a broker with no trust bundle refuses rather than ignores",
+                 not d.allowed and "no SPIFFE trust bundle" in d.reason, d.reason)
+    for bad in ("spiffe://example.org/a b", "https://example.org/x", "spiffe:///x",
+                "spiffe://example.org//x", "", "spiffe://EXAMPLE.org/x"):
+        report.check(f"spiffe: {bad!r} is not a SPIFFE ID", not _spiffe.valid_id(bad))
+    intact, _ = sbroker.audit.verify()
+    report.check("spiffe: every refusal is on an intact tape", intact)
+
+    # ---------------------------------------------------------------------
     section("8. Audit integrity")
     intact, _ = broker.audit.verify()
     report.check("audit chain intact after the whole run", intact)

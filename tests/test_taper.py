@@ -2226,3 +2226,221 @@ class TestRootKey:
         with pytest.raises(ChainError, match="did not sign with the root key"):
             Token.issue(None, broad_caps, ttl_seconds=3600, now=NOW,
                         signer=other.sign, root_pub=pub)
+
+
+# ------------------------------------------------------------------- SPIFFE
+
+def _spiffe_ca(name="spiffe-ca"):
+    import datetime as _dt
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+    key = ec.generate_private_key(ec.SECP256R1())
+    sub = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+    at = _dt.datetime.fromtimestamp(NOW, _dt.timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(sub).issuer_name(sub)
+            .public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(at - _dt.timedelta(hours=1))
+            .not_valid_after(at + _dt.timedelta(days=1))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(key, hashes.SHA256()))
+    return key, cert
+
+
+def _svid(ca_key, ca_cert, spiffe_id, minutes=60, uris=None):
+    import datetime as _dt
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    key = ec.generate_private_key(ec.SECP256R1())
+    at = _dt.datetime.fromtimestamp(NOW, _dt.timezone.utc)
+    names = [x509.UniformResourceIdentifier(u) for u in (uris or [spiffe_id])]
+    cert = (x509.CertificateBuilder().subject_name(x509.Name([]))
+            .issuer_name(ca_cert.subject)
+            .public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(at - _dt.timedelta(minutes=1))
+            .not_valid_after(at + _dt.timedelta(minutes=minutes))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(x509.SubjectAlternativeName(names), critical=True)
+            .sign(ca_key, hashes.SHA256()))
+    return key, cert.public_bytes(serialization.Encoding.PEM) + \
+        ca_cert.public_bytes(serialization.Encoding.PEM)
+
+
+class TestSpiffe:
+    """Which workload may hold this token, as an attested fact.
+
+    The platform decides: a SPIRE agent attests the workload and issues the
+    SVID. The broker checks three things and nothing else - the SVID chains
+    to the trust bundle, its id matches the pattern the grant names, and the
+    caller holds its private key for this exact request.
+    """
+
+    ID = "spiffe://example.org/agent/build"
+    CAPS = {"ssh.exec": {"host": OneOf(["b"]), "program": OneOf(["git"]),
+                         "args": Subset(["status"])}}
+    REQ = {"host": "b", "program": "git", "args": ["status"]}
+
+    def _broker(self, root, tmp_path, bundle):
+        return Broker(root_pub=root.public_key(), adapters={"ssh.exec": SSHAdapter()},
+                      audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW,
+                      spiffe_bundle=bundle)
+
+    def _ask(self, broker, token, key, chain, **kw):
+        from taper import spiffe
+        wire = token.serialize()
+        att = spiffe.prove(key, chain, wire, "ssh.exec", self.REQ, now=NOW, **kw) \
+            if key is not None else None
+        return broker.decide(wire, "ssh.exec", self.REQ,
+                             proof=prove(token.proving_key(), wire, "ssh.exec",
+                                         self.REQ, now=NOW),
+                             attestation=att)
+
+    def test_an_svid_that_chains_to_the_bundle_names_its_workload(self, root, tmp_path):
+        from taper import spiffe
+        ca_key, ca_cert = _spiffe_ca()
+        key, chain = _svid(ca_key, ca_cert, self.ID)
+        assert spiffe.verify_svid(chain, [ca_cert], now=NOW)[0] == self.ID
+        token = Token.issue(root, self.CAPS, ttl_seconds=3600, now=NOW,
+                            subject="alice@example.com", workload="spiffe://example.org/agent/*")
+        assert token.workload() == "spiffe://example.org/agent/*"
+        d = self._ask(self._broker(root, tmp_path, [ca_cert]), token, key, chain)
+        assert d.allowed, d.reason
+        assert d.workload == self.ID and d.subject == "alice@example.com"
+        # and it is on the record, beside the subject and the peer
+        body = [json.loads(l)["body"] for l in (tmp_path / "audit.jsonl").read_text().splitlines()][-1]
+        assert body["workload"] == self.ID and body["subject"] == "alice@example.com"
+        # a grant that names no workload does not ask for one
+        plain = Token.issue(root, self.CAPS, ttl_seconds=3600, now=NOW)
+        d = self._ask(self._broker(root, tmp_path, [ca_cert]), plain, None, None)
+        assert d.allowed and d.workload == ""
+
+    def test_a_grant_for_another_workload_is_refused(self, root, tmp_path):
+        ca_key, ca_cert = _spiffe_ca()
+        key, chain = _svid(ca_key, ca_cert, self.ID)
+        broker = self._broker(root, tmp_path, [ca_cert])
+        for pattern in ("spiffe://example.org/agent/deploy",
+                        "spiffe://example.org/other/*",
+                        "spiffe://other.org/agent/*"):
+            token = Token.issue(root, self.CAPS, ttl_seconds=3600, now=NOW, workload=pattern)
+            d = self._ask(broker, token, key, chain)
+            assert not d.allowed and "attested as" in d.reason
+        # the wildcard covers whole segments, never part of one
+        from taper.spiffe import matches
+        assert matches("spiffe://example.org/agent/*", self.ID)
+        assert matches("spiffe://example.org/agent/*", self.ID + "/1")
+        assert not matches("spiffe://example.org/agent/*", "spiffe://example.org/agentx")
+        assert not matches("spiffe://example.org/agent/*", "spiffe://example.org/agent")
+        # an SVID from another trust domain's CA does not chain here
+        other_key, other_cert = _spiffe_ca("other-ca")
+        k2, c2 = _svid(other_key, other_cert, self.ID)
+        token = Token.issue(root, self.CAPS, ttl_seconds=3600, now=NOW,
+                            workload="spiffe://example.org/agent/*")
+        d = self._ask(broker, token, k2, c2)
+        assert not d.allowed and "does not chain to the trust bundle" in d.reason
+
+    def test_a_copied_svid_without_its_key_proves_nothing(self, root, tmp_path):
+        from taper import spiffe
+        ca_key, ca_cert = _spiffe_ca()
+        key, chain = _svid(ca_key, ca_cert, self.ID)
+        broker = self._broker(root, tmp_path, [ca_cert])
+        token = Token.issue(root, self.CAPS, ttl_seconds=3600, now=NOW,
+                            workload="spiffe://example.org/agent/*")
+        wire = token.serialize()
+        # the certificate, with a signature made by a key that is not its own
+        thief, _ = _svid(ca_key, ca_cert, "spiffe://example.org/agent/thief")
+        att = spiffe.prove(thief, chain, wire, "ssh.exec", self.REQ, now=NOW,
+                           spiffe_id=self.ID)
+        d = broker.decide(wire, "ssh.exec", self.REQ,
+                          proof=prove(token.proving_key(), wire, "ssh.exec", self.REQ, now=NOW),
+                          attestation=att)
+        assert not d.allowed and "does not hold the SVID's private key" in d.reason
+        # no attestation at all
+        d = self._ask(broker, token, None, None)
+        assert not d.allowed and "carried no SVID" in d.reason
+        # a genuine attestation replayed
+        good = spiffe.prove(key, chain, wire, "ssh.exec", self.REQ, now=NOW)
+        assert broker.decide(wire, "ssh.exec", self.REQ,
+                             proof=prove(token.proving_key(), wire, "ssh.exec", self.REQ, now=NOW),
+                             attestation=good).allowed
+        d = broker.decide(wire, "ssh.exec", self.REQ,
+                          proof=prove(token.proving_key(), wire, "ssh.exec", self.REQ, now=NOW),
+                          attestation=good)
+        assert not d.allowed and "used before" in d.reason
+        # an attestation for a different request
+        other = spiffe.prove(key, chain, wire, "ssh.exec", {**self.REQ, "args": []}, now=NOW)
+        d = broker.decide(wire, "ssh.exec", self.REQ,
+                          proof=prove(token.proving_key(), wire, "ssh.exec", self.REQ, now=NOW),
+                          attestation=other)
+        assert not d.allowed and "does not hold the SVID's private key" in d.reason
+
+    def test_an_expired_svid_is_refused(self, root, tmp_path):
+        ca_key, ca_cert = _spiffe_ca()
+        key, chain = _svid(ca_key, ca_cert, self.ID, minutes=1)
+        broker = self._broker(root, tmp_path, [ca_cert])
+        token = Token.issue(root, self.CAPS, ttl_seconds=3600, now=NOW,
+                            workload="spiffe://example.org/agent/*")
+        wire = token.serialize()
+        from taper import spiffe
+        later = NOW + 3600
+        att = spiffe.prove(key, chain, wire, "ssh.exec", self.REQ, now=later)
+        with pytest.raises(spiffe.SpiffeError, match="validity window"):
+            spiffe.verify(att, [ca_cert], "spiffe://example.org/agent/*", wire,
+                          "ssh.exec", self.REQ, NonceCache(), now=later)
+
+    def test_a_broker_with_no_bundle_refuses_a_workload_grant(self, root, tmp_path):
+        ca_key, ca_cert = _spiffe_ca()
+        key, chain = _svid(ca_key, ca_cert, self.ID)
+        broker = self._broker(root, tmp_path, None)
+        token = Token.issue(root, self.CAPS, ttl_seconds=3600, now=NOW,
+                            workload="spiffe://example.org/agent/*")
+        d = self._ask(broker, token, key, chain)
+        assert not d.allowed and "no SPIFFE trust bundle" in d.reason
+        # a grant with no workload is unaffected
+        plain = Token.issue(root, self.CAPS, ttl_seconds=3600, now=NOW)
+        assert self._ask(broker, plain, None, None).allowed
+
+    def test_a_child_block_may_not_name_a_workload(self, root):
+        token = Token.issue(root, self.CAPS, ttl_seconds=3600, now=NOW,
+                            workload="spiffe://example.org/agent/*")
+        child = token.attenuate(self.CAPS, now=NOW)
+        assert child.workload() == "spiffe://example.org/agent/*"     # inherited
+        data = json.loads(_unb64(child.serialize()))
+        data["b"][1]["wl"] = "spiffe://example.org/anything/*"
+        with pytest.raises(ChainError, match="names a workload"):
+            verify(Token.deserialize(_b64(json.dumps(data).encode())), root.public_key(), now=NOW)
+        # and rewriting the root's breaks the signature
+        data = json.loads(_unb64(token.serialize()))
+        data["b"][0]["wl"] = "spiffe://example.org/anything/*"
+        with pytest.raises(ChainError, match="bad signature"):
+            verify(Token.deserialize(_b64(json.dumps(data).encode())), root.public_key(), now=NOW)
+
+    def test_a_malformed_svid_is_refused_before_anything_else(self, root, tmp_path):
+        from taper import spiffe
+        ca_key, ca_cert = _spiffe_ca()
+        # two SPIFFE ids in one certificate
+        key, chain = _svid(ca_key, ca_cert, self.ID,
+                           uris=[self.ID, "spiffe://example.org/agent/other"])
+        with pytest.raises(spiffe.SpiffeError, match="exactly one SPIFFE ID"):
+            spiffe.verify_svid(chain, [ca_cert], now=NOW)
+        # a certificate with no URI SAN at all
+        import datetime as _dt
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        k = ec.generate_private_key(ec.SECP256R1())
+        at = _dt.datetime.fromtimestamp(NOW, _dt.timezone.utc)
+        bare = (x509.CertificateBuilder().subject_name(x509.Name([]))
+                .issuer_name(ca_cert.subject).public_key(k.public_key())
+                .serial_number(x509.random_serial_number())
+                .not_valid_before(at - _dt.timedelta(minutes=1))
+                .not_valid_after(at + _dt.timedelta(minutes=10))
+                .sign(ca_key, hashes.SHA256()))
+        pem = bare.public_bytes(serialization.Encoding.PEM) + \
+            ca_cert.public_bytes(serialization.Encoding.PEM)
+        with pytest.raises(spiffe.SpiffeError, match="no subjectAltName"):
+            spiffe.verify_svid(pem, [ca_cert], now=NOW)
+        for bad in ("spiffe://example.org/a b", "https://example.org/x", "spiffe:///x",
+                    "spiffe://example.org//x"):
+            assert not spiffe.valid_id(bad), bad
