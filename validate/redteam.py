@@ -881,6 +881,171 @@ def run(report: Report, tmp: Path) -> None:
     report.check("spiffe: every refusal is on an intact tape", intact)
 
     # ---------------------------------------------------------------------
+    section("14. The identity provider — a login is not a wider grant")
+    import base64 as _b64mod
+    import hmac as _hmac
+    import hashlib as _hashlib
+    from cryptography.hazmat.primitives.asymmetric import padding as _padding, rsa as _rsa
+    from cryptography.hazmat.primitives import hashes as _h2
+    from taper import idp as _idp
+
+    _iss, _aud = "https://login.example.com/", "taper"
+    _idp_key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    _other_key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+    def _b64u(raw: bytes) -> str:
+        return _b64mod.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    def _jwk(key, kid):
+        n = key.public_key().public_numbers()
+        def enc(i):
+            return _b64u(i.to_bytes((i.bit_length() + 7) // 8, "big"))
+        return {"kty": "RSA", "kid": kid, "use": "sig", "alg": "RS256",
+                "n": enc(n.n), "e": enc(n.e)}
+
+    def _mint_jwt(key, kid, claims, alg="RS256", sig=None):
+        head = _b64u(json.dumps({"alg": alg, "kid": kid, "typ": "JWT"},
+                                separators=(",", ":")).encode())
+        body = _b64u(json.dumps(claims, separators=(",", ":")).encode())
+        si = f"{head}.{body}".encode()
+        if sig is not None:
+            signature = sig
+        elif alg == "none":
+            signature = b""
+        elif alg.startswith("HS"):
+            pub = key.public_key().public_bytes(_ser.Encoding.PEM,
+                                                _ser.PublicFormat.SubjectPublicKeyInfo)
+            signature = _hmac.new(pub, si, _hashlib.sha256).digest()
+        else:
+            signature = key.sign(si, _padding.PKCS1v15(), _h2.SHA256())
+        return f"{head}.{body}.{_b64u(signature)}"
+
+    def _claims(**kw):
+        c = {"iss": _iss, "aud": _aud, "exp": NOW + 300, "iat": NOW - 5,
+             "email": "alice@example.com", "groups": ["dev"], "jti": "rt-1"}
+        c.update(kw)
+        return c
+
+    _idir = tmp / "idp"
+    _idir.mkdir(exist_ok=True)
+    (_idir / "dev.json").write_text(json.dumps({"capabilities": {}, "note": "dev"}))
+    (_idir / "sre.json").write_text(json.dumps({"capabilities": {}, "note": "sre"}))
+    _jwks_path = _idir / "idp.jwks.json"
+    _jwks_path.write_text(json.dumps({"keys": [_jwk(_idp_key, "k1")]}))
+    _map_path = _idir / "idp.json"
+    _map_path.write_text(json.dumps({
+        "issuer": _iss, "audience": _aud, "subject_claim": "email",
+        "groups_claim": "groups", "max_age_days": 7,
+        "rules": [{"group": "sre", "policy": str(_idir / "sre.json"), "max_ttl": "8h"},
+                  {"group": "dev", "policy": str(_idir / "dev.json"), "max_ttl": "1h"}]}))
+    _mapping = _idp.Mapping.load(_map_path)
+    _keys = _idp.load_jwks(_jwks_path)
+    _seen = _idir / "seen.json"
+
+    def _refused(name, token, seen=None, mapping=None):
+        try:
+            _idp.authorize(token, mapping or _mapping, _keys, seen or _seen, now=NOW)
+            report.check(name, False, "the token was accepted")
+        except _idp.IdPError as exc:
+            report.check(name, True, str(exc)[:70])
+
+    # the two classic JWT breaks
+    _refused("idp: alg=none mints nothing",
+             _mint_jwt(_idp_key, "k1", _claims(), alg="none"))
+    _refused("idp: HS256 signed with the provider's public key is refused",
+             _mint_jwt(_idp_key, "k1", _claims(), alg="HS256"))
+    _refused("idp: a token signed by another RSA key is refused",
+             _mint_jwt(_other_key, "k1", _claims()))
+    _refused("idp: an empty signature on a real algorithm is refused",
+             _mint_jwt(_idp_key, "k1", _claims(), sig=b""))
+    _refused("idp: a kid not in the pinned set is not tried against every key",
+             _mint_jwt(_idp_key, "k9", _claims()))
+
+    # claims that would widen or misdirect
+    _refused("idp: another issuer's token is refused",
+             _mint_jwt(_idp_key, "k1", _claims(iss="https://evil.example/")))
+    _refused("idp: a token minted for another audience is refused",
+             _mint_jwt(_idp_key, "k1", _claims(aud="grafana")))
+    _refused("idp: an expired token is refused",
+             _mint_jwt(_idp_key, "k1", _claims(exp=NOW - 600)))
+    _refused("idp: a token dated in the future is refused",
+             _mint_jwt(_idp_key, "k1", _claims(iat=NOW + 7200, nbf=NOW + 7200)))
+    _refused("idp: a group nobody mapped mints nothing",
+             _mint_jwt(_idp_key, "k1", _claims(groups=["wheel", "admin"])))
+    _refused("idp: no subject claim is refused rather than minting for nobody",
+             _mint_jwt(_idp_key, "k1", _claims(email=None)))
+    _refused("idp: a subject with a newline cannot forge a second record line",
+             _mint_jwt(_idp_key, "k1", _claims(email="a@b\nrecord: mint")))
+
+    # the group decides the policy, and only the group
+    _dev = _idp.authorize(_mint_jwt(_idp_key, "k1", _claims()), _mapping, _keys,
+                          _seen, now=NOW)
+    report.check("idp: a dev's token maps to the dev policy, not the sre one",
+                 _dev.rule.group == "dev" and _dev.rule.policy.name == "dev.json",
+                 str(_dev.rule.policy))
+    report.check("idp: the ceiling comes with it", _dev.rule.max_ttl == 3600)
+    _both = _idp.authorize(_mint_jwt(_idp_key, "k1", _claims(groups=["dev", "sre"],
+                                                             jti="rt-2")),
+                           _mapping, _keys, _seen, now=NOW)
+    report.check("idp: membership in two groups takes the first rule in file order, "
+                 "not the widest", _both.rule.group == "sre")
+
+    # one token, one mint
+    _once = _mint_jwt(_idp_key, "k1", _claims(jti="rt-3"))
+    _idp.authorize(_once, _mapping, _keys, _seen, now=NOW)
+    _refused("idp: the same ID token cannot mint twice", _once)
+    _nojti = _mint_jwt(_idp_key, "k1", {k: v for k, v in _claims().items() if k != "jti"})
+    _idp.authorize(_nojti, _mapping, _keys, _seen, now=NOW)
+    _refused("idp: a token with no jti is still spent once, by its hash", _nojti)
+    report.check("idp: the seen-file holds no token and no jti",
+                 _once not in _seen.read_text() and "rt-3" not in _seen.read_text())
+    report.check("idp: the seen-file is 0600",
+                 oct(_seen.stat().st_mode & 0o777) == "0o600")
+
+    # the record, and what must not be on it
+    _rec = _dev.as_record("deadbeef")
+    report.check("idp: the mint record names the issuer, the person and the rule",
+                 _rec["record"] == "mint" and _rec["via"] == "oidc"
+                 and _rec["issuer"] == _iss and _rec["subject"] == "alice@example.com"
+                 and _rec["group"] == "dev")
+    report.check("idp: no ID token, and no claim beyond the subject, is on the record",
+                 "eyJ" not in json.dumps(_rec) and "groups" not in _rec)
+
+    # the mapping file itself
+    for _bad, _why in [
+            ({"issuer": "http://login.example.com/", "audience": "taper",
+              "rules": [{"group": "d", "policy": "/x"}]}, "an http issuer"),
+            ({"issuer": _iss, "audience": "taper", "rules": []}, "an empty rule set"),
+            ({"issuer": _iss, "audience": "taper",
+              "rules": [{"group": "d", "policy": "/x", "workload": "not-a-spiffe-id"}]},
+             "a workload that is not a SPIFFE id"),
+            ({"issuer": _iss, "audience": "taper", "admin": True,
+              "rules": [{"group": "d", "policy": "/x"}]}, "an unknown key"),
+            ({"issuer": _iss, "audience": "taper",
+              "rules": [{"group": "d", "policy": "/x", "grant_all": True}]},
+             "an unknown key in a rule")]:
+        _p = _idir / "bad.json"
+        _p.write_text(json.dumps(_bad))
+        try:
+            _idp.Mapping.load(_p)
+            report.check(f"idp: {_why} is refused at load", False, "it loaded")
+        except _idp.IdPError as exc:
+            report.check(f"idp: {_why} is refused at load", True, str(exc)[:70])
+
+    # a key set that is not one
+    _p = _idir / "empty.jwks.json"
+    _p.write_text(json.dumps({"keys": [{"kty": "oct", "kid": "k1", "k": "AAAA"}]}))
+    try:
+        _idp.load_jwks(_p)
+        report.check("idp: a symmetric key in the key set is not a signing key", False)
+    except _idp.IdPError as exc:
+        report.check("idp: a symmetric key in the key set is not a signing key", True,
+                     str(exc)[:70])
+    report.check("idp: no HMAC or `none` algorithm exists to be selected",
+                 "none" not in _idp.ALGORITHMS
+                 and not any(a.startswith("HS") for a in _idp.ALGORITHMS))
+
+    # ---------------------------------------------------------------------
     section("8. Audit integrity")
     intact, _ = broker.audit.verify()
     report.check("audit chain intact after the whole run", intact)

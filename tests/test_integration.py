@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -2289,3 +2290,194 @@ class TestForward:
         out, err = capsys.readouterr()
         lines = [json.loads(l) for l in out.splitlines()]
         assert len(lines) == 10 and "shipped 6 records, 4 alerts" in err
+
+
+# ------------------------------------------------------- identity provider CLI
+
+class TestIdPCLI:
+    """`taper grant --id-token`: the last manual step at scale, removed.
+
+    The unit tests in TestIdP cover the token. These cover the seam: that the
+    command line cannot talk over the provider, that the mint lands on the
+    audit log, and that the two operator commands say what an operator needs
+    before trusting any of it.
+    """
+
+    ISSUER = "https://login.example.com/"
+
+    @staticmethod
+    def _plain(text: str) -> str:
+        return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+    def _setup(self, tmp_path, monkeypatch, capsys):
+        from tests.test_taper import _jwk_rsa
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        home = tmp_path / "home"
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        for name, value in [("HOME", home), ("ROOT_KEY", home / "root.key"),
+                            ("ROOT_PUB", home / "root.pub"),
+                            ("SECRETS", home / "secrets"),
+                            ("AUDIT", home / "audit.jsonl"), ("OPS", home / "ops"),
+                            ("IDP_MAP", home / "idp.json"),
+                            ("IDP_JWKS", home / "idp.jwks.json"),
+                            ("IDP_SEEN", home / "idp.seen.json")]:
+            monkeypatch.setattr(cli, name, value)
+        assert cli.main(["init"]) == 0
+        capsys.readouterr()
+        (home / "ops").mkdir(exist_ok=True)
+        policy = tmp_path / "sre.json"
+        policy.write_text(json.dumps(WIDE_POLICY))
+        (home / "idp.json").write_text(json.dumps({
+            "issuer": self.ISSUER, "audience": "taper", "subject_claim": "email",
+            "groups_claim": "groups", "max_age_days": 7,
+            "rules": [{"group": "sre", "policy": str(policy), "max_ttl": "8h"}],
+        }))
+        (home / "idp.jwks.json").write_text(json.dumps({"keys": [_jwk_rsa(key, "k1")]}))
+        return types.SimpleNamespace(home=home, key=key, policy=policy)
+
+    def _token(self, key, tmp_path, name="t.jwt", **kw):
+        from tests.test_taper import _jwt
+        claims = {"iss": self.ISSUER, "aud": "taper", "exp": time.time() + 300,
+                  "iat": time.time() - 5, "email": "alice@example.com",
+                  "groups": ["sre"], "jti": name}
+        claims.update(kw)
+        path = tmp_path / name
+        path.write_text(_jwt(key, "k1", claims))
+        return path
+
+    def test_an_idp_mint_is_recorded_on_the_audit_log(self, tmp_path, monkeypatch, capsys):
+        """`taper grant` is otherwise silent. A mint an identity provider
+        drove has no operator and no shell history, so it records itself."""
+        s = self._setup(tmp_path, monkeypatch, capsys)
+        token_file = self._token(s.key, tmp_path)
+        assert cli.main(["grant", "--id-token", str(token_file), "--ttl", "30m",
+                         "--key-file", str(tmp_path / "k"),
+                         "--allow-writable-config"]) == 0
+        out, err = capsys.readouterr()
+        minted = Token.deserialize(out.strip().splitlines()[0])
+        assert minted.subject() == "alice@example.com"          # from the token
+        assert "authenticated alice@example.com by " + self.ISSUER in self._plain(err)
+
+        from taper.audit import AuditLog
+        records = [r["body"] for r in AuditLog(cli.AUDIT).read()]
+        mint = [b for b in records if b.get("record") == "mint"]
+        assert len(mint) == 1
+        assert mint[0]["via"] == "oidc" and mint[0]["issuer"] == self.ISSUER
+        assert mint[0]["subject"] == "alice@example.com" and mint[0]["group"] == "sre"
+        assert mint[0]["policy_sha256"] == cli._sha256_file(s.policy)
+        assert mint[0]["revocation_id"] == minted.revocation_ids()[0]
+        assert AuditLog(cli.AUDIT).verify()[0]
+        # the ID token itself is nowhere on the tape
+        assert token_file.read_text().strip() not in cli.AUDIT.read_text()
+
+        # and the same token cannot mint again
+        with pytest.raises(SystemExit, match="already minted"):
+            cli.main(["grant", "--id-token", str(token_file),
+                      "--key-file", str(tmp_path / "k2"), "--allow-writable-config"])
+
+    def test_a_flag_cannot_override_what_the_provider_said(self, tmp_path, monkeypatch, capsys):
+        """A ceiling that can be raised from the command line is not a
+        ceiling, and a subject a flag can rewrite is a string again."""
+        s = self._setup(tmp_path, monkeypatch, capsys)
+        with pytest.raises(SystemExit, match="--subject cannot override"):
+            cli.main(["grant", "--id-token", str(self._token(s.key, tmp_path, "a.jwt")),
+                      "--subject", "root@example.com", "--key-file", str(tmp_path / "k"),
+                      "--allow-writable-config"])
+        with pytest.raises(SystemExit, match="two different"):
+            cli.main(["grant", str(s.policy), "--id-token",
+                      str(self._token(s.key, tmp_path, "b.jwt")),
+                      "--key-file", str(tmp_path / "k"), "--allow-writable-config"])
+        capsys.readouterr()
+        # --ttl beyond the rule's ceiling is capped, loudly, not refused
+        assert cli.main(["grant", "--id-token", str(self._token(s.key, tmp_path, "c.jwt")),
+                         "--ttl", "72h", "--key-file", str(tmp_path / "k"),
+                         "--allow-writable-config"]) == 0
+        out, err = capsys.readouterr()
+        assert "exceeds the ceiling for group sre" in self._plain(err)
+        assert Token.deserialize(out.strip().splitlines()[0]).expires_at() \
+            <= time.time() + 8 * 3600 + 5
+        # neither flag nor token: nothing to mint, and the message says both ways
+        with pytest.raises(SystemExit, match="nothing to mint"):
+            cli.main(["grant", "--key-file", str(tmp_path / "k")])
+        # a stale key set stops every mint, whatever the token says
+        os.utime(cli.IDP_JWKS, (time.time() - 40 * 86400, time.time() - 40 * 86400))
+        with pytest.raises(SystemExit, match="days old"):
+            cli.main(["grant", "--id-token", str(self._token(s.key, tmp_path, "d.jwt")),
+                      "--key-file", str(tmp_path / "k"), "--allow-writable-config"])
+
+    def test_check_names_every_rule_and_the_key_set_age(self, tmp_path, monkeypatch, capsys):
+        s = self._setup(tmp_path, monkeypatch, capsys)
+        assert cli.main(["idp", "check"]) == 0
+        out = self._plain(capsys.readouterr()[0])
+        assert self.ISSUER in out and "k1" in out and "RSA" in out
+        assert "sre" in out and str(s.policy) in out and "first match wins" in out
+
+        # a rule naming a policy that is not there: authenticates, mints nothing
+        doc = json.loads(cli.IDP_MAP.read_text())
+        doc["rules"].append({"group": "dev", "policy": str(tmp_path / "gone.json")})
+        cli.IDP_MAP.write_text(json.dumps(doc))
+        assert cli.main(["idp", "check"]) == 1
+        out = self._plain(capsys.readouterr()[0])
+        assert "no such policy file" in out and "no max_ttl" in out
+
+        # a stale key set is reported as the refusal it will be
+        os.utime(cli.IDP_JWKS, (time.time() - 40 * 86400, time.time() - 40 * 86400))
+        assert cli.main(["idp", "check"]) == 1
+        out = self._plain(capsys.readouterr()[0])
+        assert "stale" in out and "taper idp refresh" in out
+        # and no mapping at all is a first-run message, not a traceback
+        cli.IDP_MAP.unlink()
+        assert cli.main(["idp", "check"]) == 1
+        assert "taper idp example" in self._plain(capsys.readouterr()[0])
+
+    def test_refresh_pins_the_key_set_and_refuses_to_drop_a_key(
+            self, tmp_path, monkeypatch, capsys):
+        """The mint never fetches. Refresh does, and a refresh that would
+        break every token signed by a key the provider has stopped
+        publishing stops to be told that is what was meant."""
+        from tests.test_taper import _jwk_rsa
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        s = self._setup(tmp_path, monkeypatch, capsys)
+        second = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+        served = {"config": {"issuer": self.ISSUER,
+                             "jwks_uri": "https://login.example.com/keys"},
+                  "keys": {"keys": [_jwk_rsa(s.key, "k1"), _jwk_rsa(second, "k2")]}}
+
+        class _Response(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def opener(url, timeout=None):
+            body = served["config"] if url.endswith("openid-configuration") \
+                else served["keys"]
+            return _Response(json.dumps(body).encode())
+
+        import taper.idp as idp_mod
+        real_fetch = idp_mod.fetch_jwks
+        monkeypatch.setattr(idp_mod, "fetch_jwks",
+                            lambda issuer, o=None: real_fetch(issuer, opener))
+        assert cli.main(["idp", "refresh"]) == 0
+        out = self._plain(capsys.readouterr()[0])
+        assert "pinned 2 key(s)" in out
+        assert {k["kid"] for k in json.loads(cli.IDP_JWKS.read_text())["keys"]} == {"k1", "k2"}
+        assert cli.main(["idp", "check"]) == 0
+        capsys.readouterr()
+
+        # the provider drops k1: refused, then written with --force
+        served["keys"] = {"keys": [_jwk_rsa(second, "k2")]}
+        assert cli.main(["idp", "refresh"]) == 1
+        assert "no longer publishes k1" in self._plain(capsys.readouterr()[1])
+        assert cli.main(["idp", "refresh", "--force"]) == 0
+        capsys.readouterr()
+        assert {k["kid"] for k in json.loads(cli.IDP_JWKS.read_text())["keys"]} == {"k2"}
+        # and a token signed by the dropped key no longer mints
+        with pytest.raises(SystemExit, match="not in the pinned key set"):
+            cli.main(["grant", "--id-token", str(self._token(s.key, tmp_path, "e.jwt")),
+                      "--key-file", str(tmp_path / "k"), "--allow-writable-config"])
+        # an issuer the discovery document disagrees with is refused
+        served["config"] = {"issuer": "https://elsewhere.example/",
+                            "jwks_uri": "https://login.example.com/keys"}
+        with pytest.raises(SystemExit, match="discovery document names issuer"):
+            cli.main(["idp", "refresh"])

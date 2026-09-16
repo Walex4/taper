@@ -90,10 +90,15 @@ rotate`. The *subject* is the human, in whatever form the identity provider
 names them (`alice@example.com`, an employee id); it is put in the root
 block at mint and cannot be changed downstream. The *workload* is what may
 hold the grant: `--workload spiffe://example.org/agent/build`, checked
-against the trust domain's bundle on every request. What is still manual is
-the mapping from a person to a mint: an IdP-driven `taper grant` — an OIDC
-login yielding a root grant for that person with a policy from their group —
-is the last open piece.
+against the trust domain's bundle on every request. The mapping from a
+person to a mint is no longer manual: `taper grant --id-token ./token.jwt`
+verifies an OIDC ID token against a pinned key set and takes the subject
+from a claim, the policy from the person's group, and the TTL ceiling and
+workload from the same rule — so what someone may mint is a property of
+their directory group, reviewed where groups are reviewed. The key set is
+pinned rather than fetched while signing, only asymmetric algorithms exist
+to be selected, a token mints exactly once, and every such mint is on the
+audit log naming the issuer, the person, the group and the policy hash.
 
 **Policy.** Policy files under `/etc/taper`, root-owned, in configuration
 management; declared operations under `ops/` in the same place, reviewed
@@ -137,7 +142,7 @@ means the design accepts it and says so; *open* means work not yet done;
 
 | # | Risk | State | What is true today |
 |---|------|-------|--------------------|
-| 1 | The broker's code has never been externally reviewed | **open** | About four and a half thousand lines of Python (seven thousand with the comments) across `taper/` and `tower/`, one author, a red team of 115 cases and a lint that ties every claim to a test. No external audit. The algebra is checked exhaustively over a finite universe in CI (`validate/algebra.py`) — conjunction, subsumption, lattice laws, the fold never widening — which found and fixed three edge cases on its first run; that is a check, not a proof in a proof assistant. |
+| 1 | The broker's code has never been externally reviewed | **open** | About four and a half thousand lines of Python (seven thousand with the comments) across `taper/` and `tower/`, one author, a red team of 195 cases and a lint that ties every claim to a test. No external audit. The algebra is checked exhaustively over a finite universe in CI (`validate/algebra.py`) — conjunction, subsumption, lattice laws, the fold never widening — which found and fixed three edge cases on its first run; that is a check, not a proof in a proof assistant. |
 | 2 | The broker holds credentials at rest | **inherent, narrowing** | Under Tower: for Postgres the CA key only, and the agent role has no password; for SSH an SSH CA only, and every operation gets a sixty-second certificate pinned to its one request; for AWS a seed that can only assume one role, and every operation gets a 900-second session scoped to its own values. For HTTP the vault still holds the bearer token. |
 | 3 | A broker compromise yields what it holds | **built** | Layer 2. A total policy bypass yields what the target itself permits — a read on granted tables, the shim's allowlist. Verified with the broker removed. |
 | 4 | Side channels: the agent reads a secret from somewhere else | **inherent** | Taper is not a sandbox and says so in DESIGN.md §1. It bounds what a credential can *do*; a credential the agent finds elsewhere is the operator's problem. The PocketOS rig puts the password in the README on purpose to keep this honest. |
@@ -151,6 +156,7 @@ means the design accepts it and says so; *open* means work not yet done;
 | 12 | Supply chain: is the package what the repository says | **built** | PyPI trusted publishing (OIDC, no token anywhere). From v0.4.0: Sigstore keyless signatures on every artefact bound to the workflow's identity, a CycloneDX SBOM (signed), and SLSA build provenance attested by GitHub; the README says how to verify. Not reproducible-build. |
 | 13 | SaaS targets | **out of scope** | GitHub, Slack, Salesforce need someone to hold a token. The design says: do not be the thing that stores it. A proxy is the right tool there. |
 | 14 | Prompt injection | **inherent, bounded** | Not prevented — Taper is not a model-layer control. Bounded: an injected instruction can only name an operation inside the grant, and the injected-run experiment showed exactly that. |
+| 18 | Who may mint, and on whose authority | **built** | `taper grant --id-token`: an OIDC login decides the subject, the policy and the ceiling, from a root-owned mapping of group to policy. The JWKS is pinned (stale ⇒ every mint refused), `alg: none` and HMAC do not exist in the algorithm table, a token is spent once in a 0600 seen-file, `--subject` is refused alongside `--id-token`, and the mint is recorded. Twenty-eight red-team cases. What is not closed: Taper still trusts whoever pinned the JWKS and wrote the mapping. |
 | 15 | Bus factor | **open** | One maintainer. No second reviewer, no disclosure SLA beyond SECURITY.md's private reporting. |
 | 17 | The log is per host and nobody reads it | **built** | `taper audit --forward` ships records with their hashes to syslog or an HTTPS collector from a durable cursor, with a seven-item alert set; the collector can re-verify the chain independently. A compromised host can still stop forwarding — the gap that closes is "nobody was watching", not "a host cannot lie by silence". |
 | 16 | History-blind decisions | **open** | Nothing reads the sequence of an agent's actions at decision time; ACP names this. The target's `another_agent_active` is the only history signal. A stage-2 hold could carry "escalate after N". |
@@ -204,9 +210,12 @@ reaches it. Each item is one deliverable; none is started unless listed.
    with possession proved per request (`taper/spiffe.py`). What remains is
    speaking the Workload API directly rather than reading the files
    `spiffe-helper` writes, which is a convenience, not a control.
-6. **IdP-driven mint.** An OIDC login yields a root grant for that person,
-   with policy from their group, subject from the token. Makes the subject
-   an organization's fact rather than an operator's typing.
+6. ~~IdP-driven mint~~ — done 16 September: `taper grant --id-token`
+   yields the grant the person's group maps to, with the subject from a
+   verified claim and the ceiling from the same rule (`taper/idp.py`,
+   `taper idp check|refresh`). The subject is an organization's fact rather
+   than an operator's typing. What remains is an ID-JAG or token-exchange
+   flow so the agent, not the operator, holds the login.
 7. ~~Signed releases, SBOM, SLSA provenance~~ — done 16 September in
    `release.yml`; first release to carry them is v0.4.0.
 8. ~~Audit forwarding~~ — done 16 September (`taper/forward.py`).
@@ -227,8 +236,9 @@ reaches it. Each item is one deliverable; none is started unless listed.
     property. A named second reviewer for every change to the six files in
     item 1, and a response time in SECURITY.md.
 
-Items 2, 3, 4, 5, 7 and 8 are done. Item 6 (an IdP-driven mint) is a week or two. Items
-1, 9, 10, 12 need other people — a reviewer, an organization willing to
+Items 2, 3, 4, 5, 6, 7 and 8 are done — every item on this list that one
+person could build. What is left is item 11 (Tower stage 2) and items
+1, 9, 10, 12, which need other people — a reviewer, an organization willing to
 pilot, a real workload — and are the ones that turn a project into a thing
 a company can adopt. The eight-week install window in PLAN.md is the clock
 on item 12.

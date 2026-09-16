@@ -2444,3 +2444,190 @@ class TestSpiffe:
         for bad in ("spiffe://example.org/a b", "https://example.org/x", "spiffe:///x",
                     "spiffe://example.org//x"):
             assert not spiffe.valid_id(bad), bad
+
+
+# ----------------------------------------------------------- identity provider
+
+def _jwk_rsa(key, kid: str) -> dict:
+    import base64
+    n = key.public_key().public_numbers()
+
+    def b64(i: int) -> str:
+        raw = i.to_bytes((i.bit_length() + 7) // 8, "big")
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    return {"kty": "RSA", "kid": kid, "use": "sig", "alg": "RS256",
+            "n": b64(n.n), "e": b64(n.e)}
+
+
+def _jwt(key, kid: str, claims: dict, alg: str = "RS256") -> str:
+    """A signed JWT, built here rather than with a library, so the tests
+    can produce the malformed ones a library would refuse to make."""
+    import base64
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    def seg(obj) -> str:
+        raw = json.dumps(obj, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    header = {"alg": alg, "kid": kid, "typ": "JWT"}
+    signing_input = f"{seg(header)}.{seg(claims)}".encode()
+    if alg == "none":
+        signature = b""
+    elif alg.startswith("HS"):
+        import hmac as _hmac
+        import hashlib as _hashlib
+        # signed with the RSA public key as if it were a shared secret:
+        # the classic confusion this verifier must not fall for
+        from cryptography.hazmat.primitives import serialization
+        pub = key.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+        signature = _hmac.new(pub, signing_input, _hashlib.sha256).digest()
+    else:
+        signature = key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+    return (signing_input.decode() + "."
+            + base64.urlsafe_b64encode(signature).decode().rstrip("="))
+
+
+class TestIdP:
+    """An OIDC login yields the grant its group allows - and nothing wider.
+
+    The subject stops being a string an operator types and becomes a claim
+    the provider signed; what a person may mint becomes a property of their
+    directory group. Everything here is about the three ways that could be
+    weaker than typing: a token nobody signed, a token signed with the wrong
+    kind of key, and a token used twice.
+    """
+
+    ISSUER = "https://login.example.com/"
+    AUD = "taper"
+
+    @pytest.fixture
+    def idp(self, tmp_path):
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        jwks = tmp_path / "idp.jwks.json"
+        jwks.write_text(json.dumps({"keys": [_jwk_rsa(key, "k1")]}))
+        sre = tmp_path / "sre.json"
+        sre.write_text(json.dumps({"capabilities": {}, "note": "sre"}))
+        dev = tmp_path / "dev.json"
+        dev.write_text(json.dumps({"capabilities": {}, "note": "dev"}))
+        mapping = tmp_path / "idp.json"
+        mapping.write_text(json.dumps({
+            "issuer": self.ISSUER, "audience": self.AUD,
+            "subject_claim": "email", "groups_claim": "groups", "max_age_days": 7,
+            "rules": [{"group": "sre", "policy": str(sre), "max_ttl": "8h",
+                       "workload": "spiffe://example.org/agent/deploy"},
+                      {"group": "dev", "policy": str(dev), "max_ttl": "1h"}],
+        }))
+        import types
+        return types.SimpleNamespace(key=key, jwks=jwks, mapping=mapping, sre=sre,
+                                     dev=dev, seen=tmp_path / "seen.json")
+
+    def _claims(self, **kw):
+        claims = {"iss": self.ISSUER, "aud": self.AUD, "exp": NOW + 300,
+                  "iat": NOW - 10, "email": "alice@example.com",
+                  "groups": ["dev", "sre"], "jti": "t-1"}
+        claims.update(kw)
+        return claims
+
+    def test_a_token_mints_the_policy_its_group_maps_to(self, idp):
+        """The whole point: subject, policy and ceiling all come from the
+        token and the mapping, not from the command line."""
+        from taper import idp as m
+        token = _jwt(idp.key, "k1", self._claims())
+        mapping = m.Mapping.load(idp.mapping)
+        keys = m.load_jwks(idp.jwks)
+        authorized = m.authorize(token, mapping, keys, idp.seen, now=NOW)
+        assert authorized.subject == "alice@example.com"
+        assert authorized.issuer == self.ISSUER
+        # first matching rule wins, in file order: sre before dev
+        assert authorized.rule.group == "sre"
+        assert authorized.rule.policy == idp.sre
+        assert authorized.rule.max_ttl == 8 * 3600
+        assert authorized.rule.workload == "spiffe://example.org/agent/deploy"
+        record = authorized.as_record("abc123")
+        assert record["record"] == "mint" and record["via"] == "oidc"
+        assert record["policy_sha256"] == "abc123" and record["group"] == "sre"
+        # and the token itself is never on the record
+        assert token not in json.dumps(record)
+
+        # someone in no named group authenticates and still mints nothing
+        other = _jwt(idp.key, "k1", self._claims(groups=["interns"], jti="t-2"))
+        with pytest.raises(m.IdPError, match="no rule matches"):
+            m.authorize(other, mapping, keys, idp.seen, now=NOW)
+        # a token with no subject claim is refused rather than minting for ""
+        anon = _jwt(idp.key, "k1", self._claims(email=None, jti="t-3"))
+        with pytest.raises(m.IdPError, match="no usable 'email' claim"):
+            m.authorize(anon, mapping, keys, idp.seen, now=NOW)
+
+    def test_an_unsigned_or_hmac_token_is_refused(self, idp):
+        """`alg: none` and HS256-against-the-public-key are the two classic
+        JWT breaks. Both are refused by absence, before key selection."""
+        from taper import idp as m
+        keys = m.load_jwks(idp.jwks)
+        mapping = m.Mapping.load(idp.mapping)
+        for alg in ("none", "HS256"):
+            bad = _jwt(idp.key, "k1", self._claims(), alg=alg)
+            with pytest.raises(m.IdPError, match="never `none`, never HMAC"):
+                m.verify_id_token(bad, keys, self.ISSUER, self.AUD, now=NOW)
+        assert "none" not in m.ALGORITHMS
+        assert not any(a.startswith("HS") for a in m.ALGORITHMS)
+
+        # a token signed by a different key of the right kind
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        forged = _jwt(other, "k1", self._claims())
+        with pytest.raises(m.IdPError, match="signature does not verify"):
+            m.verify_id_token(forged, keys, self.ISSUER, self.AUD, now=NOW)
+        # an unknown kid is refused, not tried against every key
+        with pytest.raises(m.IdPError, match="not in the pinned key set"):
+            m.verify_id_token(_jwt(idp.key, "k9", self._claims()), keys,
+                              self.ISSUER, self.AUD, now=NOW)
+        # issuer, audience and expiry
+        for claims, pattern in [
+                (self._claims(iss="https://evil.example/"), "was issued by"),
+                (self._claims(aud="grafana"), "issued for something else"),
+                (self._claims(exp=NOW - 3600), "expired"),
+                (self._claims(iat=NOW + 3600), "iat.*in the future")]:
+            with pytest.raises(m.IdPError, match=pattern):
+                m.verify_id_token(_jwt(idp.key, "k1", claims), keys,
+                                  self.ISSUER, self.AUD, now=NOW)
+        # and a token that is not a token
+        for junk in ("", "a.b", "a.b.c.d", "not-a-jwt"):
+            with pytest.raises(m.IdPError):
+                m.verify_id_token(junk, keys, self.ISSUER, self.AUD, now=NOW)
+        # the mapping itself refuses an http issuer and an empty rule set
+        bad_map = idp.mapping.parent / "bad.json"
+        bad_map.write_text(json.dumps({"issuer": "http://login.example.com/",
+                                       "audience": "taper", "rules": []}))
+        with pytest.raises(m.IdPError, match="must be an https URL"):
+            m.Mapping.load(bad_map)
+        assert mapping.issuer == self.ISSUER
+
+    def test_an_id_token_mints_once(self, idp):
+        """An ID token is a bearer credential with minutes of life. Capturing
+        one must not be capturing every grant the person's group allows."""
+        from taper import idp as m
+        mapping = m.Mapping.load(idp.mapping)
+        keys = m.load_jwks(idp.jwks)
+        token = _jwt(idp.key, "k1", self._claims())
+        assert m.authorize(token, mapping, keys, idp.seen, now=NOW).subject
+        with pytest.raises(m.IdPError, match="already minted"):
+            m.authorize(token, mapping, keys, idp.seen, now=NOW)
+        # the seen-file holds a hash, never the token, and is 0600
+        text = idp.seen.read_text()
+        assert token not in text and "t-1" not in text
+        assert oct(idp.seen.stat().st_mode & 0o777) == "0o600"
+        # a provider that sets no jti is still spent once, by token hash
+        no_jti = _jwt(idp.key, "k1", self._claims(jti=None))
+        assert m.token_id(no_jti, {}).startswith("tok:")
+        assert m.authorize(no_jti, mapping, keys, idp.seen, now=NOW).subject
+        with pytest.raises(m.IdPError, match="already minted"):
+            m.authorize(no_jti, mapping, keys, idp.seen, now=NOW)
+        # entries expire out, so the file does not grow without bound
+        m.check_and_remember(idp.seen, "x.y.z", {"jti": "old", "exp": NOW - 10}, now=NOW)
+        later = json.loads(idp.seen.read_text())
+        m.check_and_remember(idp.seen, "x.y.z", {"jti": "old", "exp": NOW + 10},
+                             now=NOW + 3600)
+        assert len(json.loads(idp.seen.read_text())) < len(later) + 1

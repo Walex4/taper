@@ -90,11 +90,14 @@ flowchart TB
     tower[&quot;&lt;b&gt;Tower&lt;/b&gt; · stage 1&lt;br/&gt;[Software System]&lt;br/&gt;&lt;i&gt;Co-signer. Re-verifies the decision with its own state and mints a credential that exists for one operation and sixty seconds.&lt;/i&gt;&quot;]
   end
 
+  idp[&quot;&lt;b&gt;Identity provider&lt;/b&gt;&lt;br/&gt;[Software System, external]&lt;br/&gt;&lt;i&gt;OIDC. Its ID token decides the subject, the policy the person&#x27;s group maps to, and the TTL ceiling. Its key set is pinned, never fetched while signing.&lt;/i&gt;&quot;]
   pg[&quot;&lt;b&gt;PostgreSQL&lt;/b&gt;&lt;br/&gt;[Software System, external]&lt;br/&gt;&lt;i&gt;Authenticates the broker by client certificate; the role has no password. Reports its own objections through taper.invariants().&lt;/i&gt;&quot;]
   ssh[&quot;&lt;b&gt;SSH hosts&lt;/b&gt;&lt;br/&gt;[Software System, external]&lt;br/&gt;&lt;i&gt;CA-signed certificates. The broker runs argv, never a shell.&lt;/i&gt;&quot;]
   http[&quot;&lt;b&gt;HTTP services&lt;/b&gt;&lt;br/&gt;[Software System, external]&lt;br/&gt;&lt;i&gt;Bearer credential still held by the broker. Tower stage 1 not yet applied.&lt;/i&gt;&quot;]
 
   subject -- &quot;delegates a task&quot; --&gt; agent
+  subject -- &quot;signs in&quot; --&gt; idp
+  idp -- &quot;ID token: subject · group&lt;br/&gt;[OIDC, pinned JWKS]&quot; --&gt; operator
   operator -- &quot;grant · revoke · audit&lt;br/&gt;[taper CLI, local]&quot; --&gt; broker
   agent -- &quot;one typed operation + proof&lt;br/&gt;[AF_UNIX socket or MCP]&quot; --&gt; broker
   broker -- &quot;clear(decision, chain, proof)&quot; --&gt; tower
@@ -102,6 +105,7 @@ flowchart TB
   broker -- &quot;clearance · invariants · statement&lt;br/&gt;[TLS, client certificate]&quot; --&gt; pg
   broker -- &quot;argv&lt;br/&gt;[ssh, certificate]&quot; --&gt; ssh
   broker -- &quot;one request&lt;br/&gt;[HTTPS]&quot; --&gt; http
+  idp ~~~ pg
   tower ~~~ pg
   tower ~~~ ssh
   tower ~~~ http
@@ -111,7 +115,7 @@ flowchart TB
   classDef ext fill:#8a8a8a,stroke:#5f5f5f,color:#fff
   class operator,subject person
   class broker,tower system
-  class agent,pg,ssh,http ext
+  class agent,idp,pg,ssh,http ext
   style taper_sys fill:none,stroke:#666,stroke-dasharray:6 4
     </pre>
     <div class="legend"><span><i style="background:#08427b"></i>Person</span><span><i style="background:#1168bd"></i>Software system</span><span><i style="background:#438dd5"></i>Container</span><span><i style="background:#8a8a8a"></i>External</span><span><i style="border:1px dashed #666;background:none"></i>Boundary</span></div>

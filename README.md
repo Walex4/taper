@@ -493,6 +493,7 @@ taper/chain.py        signed attenuation chain
 taper/ops.py          typed operation schemas (rule 1)
 taper/rootkey.py      the trust set, rotation, and signing through an ssh-agent
 taper/spiffe.py       which workload may hold a grant, attested by SPIRE
+taper/idp.py          an OIDC login decides the subject, the policy and the ceiling
 taper/forward.py      ship the tape to syslog or a collector, with alerts
 taper/hardening.py    configuration the agent can write is not configuration
 taper/declared.py     an operation as a JSON file, compiled to the same thing
@@ -635,7 +636,7 @@ refuses anyone else before a token is even parsed. Set the socket's group to the
 ## Tests and validation
 
 ```bash
-make validate    # preflight + the test suite + 167 attacks + the algebra check. The release gate.
+make validate    # preflight + the test suite + 195 attacks + the algebra check. The release gate.
 ```
 
 Four layers, and they check different things:
@@ -643,7 +644,7 @@ Four layers, and they check different things:
 | Command | Checks | Needs |
 |---|---|---|
 | `pytest` | the code does what you meant — 273 tests | nothing |
-| `python validate/redteam.py` | the system refuses what someone *else* meant — 167 attacks | nothing |
+| `python validate/redteam.py` | the system refuses what someone *else* meant — 195 attacks | nothing |
 | `bash scripts/preflight.sh` | this machine can host a broker safely | nothing |
 | `python validate/check_postgres.py <dsn>` | **the database refuses on its own** | a real Postgres |
 | `bash validate/check_ssh.sh <host> <key>` | **sshd refuses on its own** | a real target host |
@@ -685,7 +686,7 @@ stacked statements classifying as `SELECT`, the real pgAdmin backslash payload
 getting through, `pg_read_file` passing as a plain select because it touched no
 table, and `/v1/../../admin` satisfying a `/v1/` prefix. All four are fixed and
 pinned by regression tests. Expect it to find more when you extend the adapters.
-[`docs/redteam.md`](docs/redteam.md) walks through the cases (fifty-nine at v0.1.1, eighty-one at v0.2.1, one hundred and sixty-seven now), the
+[`docs/redteam.md`](docs/redteam.md) walks through the cases (fifty-nine at v0.1.1, eighty-one at v0.2.1, one hundred and ninety-five now), the
 four bypasses with their fixes, and what the harness does not prove.
 
 ## Binding a grant to a workload
@@ -718,6 +719,57 @@ export TAPER_SPIFFE_BUNDLE=/run/spire/bundle.pem
 
 `taper doctor` reports both. The gRPC Workload API is deliberately not
 spoken here — see DESIGN.md §5, "The workload".
+
+## Minting from a login instead of a flag
+
+`--subject alice@example.com` is a string an operator types, and a string an
+operator can mistype. A mint can be driven by the identity provider instead:
+
+```
+taper grant --id-token ./token.jwt --key-file k
+```
+
+Three things then come from the token and the mapping rather than the command
+line — the **subject** is a claim you named, the **policy** is whichever file
+the person's group maps to, and the **ceiling** (TTL cap, and the workload the
+grant is bound to) comes from the same rule. What a person may mint becomes a
+property of their directory group, reviewed where groups are reviewed.
+
+```json
+{
+  "issuer": "https://login.example.com/",
+  "audience": "taper",
+  "subject_claim": "email",
+  "groups_claim": "groups",
+  "max_age_days": 7,
+  "rules": [
+    {"group": "sre", "policy": "/etc/taper/sre.json", "max_ttl": "8h",
+     "workload": "spiffe://example.org/agent/deploy"},
+    {"group": "dev", "policy": "/etc/taper/dev.json", "max_ttl": "1h"}
+  ]
+}
+```
+
+That goes in `/etc/taper/idp.json`, root-owned beside the policies it names —
+`taper grant` refuses it otherwise, for the same reason it refuses a writable
+policy. Then:
+
+```
+taper idp example      # print the mapping above
+taper idp refresh      # fetch the provider's keys once and pin them
+taper idp check        # every rule, the key set and its age, what would stop a mint
+```
+
+The key set is **pinned, not fetched at mint**: the host holding the root key
+makes no outbound request while signing, and a set older than `max_age_days`
+refuses every mint rather than letting an unreachable provider quietly become
+a skipped one. Only asymmetric algorithms exist in the table, so `alg: none`
+and HMAC are refused by absence rather than by a check. An ID token mints
+**once** — it is a bearer credential with minutes of life, and capturing one
+must not be capturing every grant its holder's group allows. `--subject` is
+refused alongside `--id-token`, and a `--ttl` above the rule's ceiling is
+capped, loudly. Every IdP mint is recorded on the audit log with the issuer,
+the person, the group and the policy hash; the token itself never is.
 
 ## The root key, and the tape
 

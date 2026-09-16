@@ -5,6 +5,48 @@ is written to be read on its own.
 
 ## Unreleased
 
+**A login mints, instead of an operator typing.** `taper grant --id-token
+./token.jwt --key-file k` verifies an OIDC ID token and takes three things
+from it rather than from the command line: the **subject** is a claim the
+operator named (`email`, `sub`, `preferred_username`), the **policy** is
+whichever file the person's group maps to, and the **ceiling** — the TTL cap
+and the workload the grant is bound to — comes from the same rule. What a
+person may mint becomes a property of their directory group, reviewed where
+groups are reviewed (`taper/idp.py`).
+
+- The key set is **pinned, not fetched at mint**: `taper idp refresh` writes
+  `idp.jwks.json` beside the mapping, and the mint reads that file, so the
+  host holding the root key makes no outbound request while signing. A set
+  older than `max_age_days` refuses every mint rather than letting an
+  unreachable provider become a skipped one. `taper idp refresh` stops
+  rather than drop a key the provider no longer publishes, since that is
+  what a rotation looks like halfway through; `--force` when it is meant.
+- **Only asymmetric algorithms exist in the table.** `alg: none` and every
+  HMAC variant are refused by absence, not by a check that could be got
+  wrong — HS256 signed with the provider's own public key as the shared
+  secret is the classic break, and it is in the red team. The key is chosen
+  by `kid`; an unknown `kid` is refused rather than tried against all of them.
+- **An ID token mints once.** Its `jti`, or a hash of the token, is spent in
+  a 0600 seen-file with its expiry, and entries expire out. An ID token is a
+  bearer credential with minutes of life; without this, capturing one is
+  capturing every grant the person's group allows, repeatedly.
+- **Every IdP mint is on the tape.** `taper grant` is otherwise silent — right
+  for an operator act with a shell history behind it, wrong for an automated
+  one. The record names the issuer, the person, the group, the policy and its
+  hash, the TTL and the revocation id; it never carries the token or any claim
+  beyond the subject.
+- `--subject` is refused alongside `--id-token` (a subject a flag can rewrite
+  is a string again), naming a policy file as well is refused (they are two
+  different authorities), and a `--ttl` above the rule's ceiling is capped
+  rather than honoured. `taper/hardening.py` guards `idp.json` and its key set
+  exactly as it guards a policy file.
+- `taper idp check` reads the same two files the mint reads and reports every
+  rule in match order, the key set and its age, a rule whose policy file is
+  missing, and a rule with no ceiling. `taper idp example` prints a mapping.
+  `taper doctor` reports all of it.
+- Red team: section 14, twenty-eight cases, 195 in all. Tests:
+  `TestIdP` (3) and `TestIdPCLI` (4).
+
 **Tower stage 1 for SSH and AWS.** The vault stops holding an SSH identity
 and an AWS access key; it holds an SSH CA and an STS seed, and every
 operation gets a credential minted for it.

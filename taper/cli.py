@@ -61,6 +61,14 @@ SOCKET = Path(os.environ.get("TAPER_SOCKET", str(HOME / "broker.sock"))).expandu
 # and inspect all read the same directory, so a grant is minted against the
 # definitions the broker will serve.
 OPS = Path(os.environ.get("TAPER_OPS", str(HOME / "ops"))).expanduser()
+# The identity provider: which groups may mint what. Three files, beside the
+# policies they name, root-owned - `taper/hardening.py` refuses them otherwise.
+# The mapping and the key set are configuration; the seen-file is state the
+# mint writes, and is deliberately not in the same place as the mapping when
+# TAPER_IDP names one.
+IDP_MAP = Path(os.environ.get("TAPER_IDP", str(HOME / "idp.json"))).expanduser()
+IDP_JWKS = IDP_MAP.with_name(IDP_MAP.stem + ".jwks.json")
+IDP_SEEN = HOME / "idp.seen.json"
 
 
 def _catalog(fatal: bool = True):
@@ -160,6 +168,65 @@ def root_signer():
                  f"{ROOT_PUB}. `taper root status --agent` lists both sides.")
     key = load_root_private()
     return key.sign, key.public_key(), f"root.key ({kid_of(key.public_key())})"
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _idp_authorize(args):
+    """Turn an OIDC ID token into the rule it entitles the holder to.
+
+    Everything that could be got wrong here is got wrong loudly: the mapping
+    and the pinned key set must be root-owned like any other configuration,
+    the key set must not be stale, the token must verify, and the token is
+    spent whether or not the mint that follows succeeds - a token that can be
+    retried is a bearer credential with a second life.
+
+    verified-by: tests/test_taper.py::TestIdP::test_a_token_mints_the_policy_its_group_maps_to
+    verified-by: tests/test_integration.py::TestIdPCLI::test_a_flag_cannot_override_what_the_provider_said
+    """
+    from .hardening import WritableConfig, require as _require_owned
+    from .idp import IdPError, Mapping, authorize, jwks_age_days, load_jwks
+
+    if args.policy is not None:
+        sys.exit(f"{RED}refused:{OFF} --id-token and a policy file name two different "
+                 f"authorities. The mapping in {IDP_MAP} decides which policy this "
+                 f"person's group may mint.")
+    if args.subject is not None:
+        sys.exit(f"{RED}refused:{OFF} --subject cannot override an identity provider. "
+                 f"The subject is the claim {IDP_MAP} names.")
+    try:
+        _require_owned([IDP_MAP, IDP_JWKS], None,
+                       allow_writable=args.allow_writable_config,
+                       what="the IdP mapping or its key set",
+                       warn=lambda m: print(f"{YELLOW}!{OFF} {m}", file=sys.stderr))
+    except WritableConfig as exc:
+        sys.exit(f"{RED}refused:{OFF} {exc}")
+
+    source = Path(args.id_token).expanduser()
+    try:
+        token = source.read_text().strip() if source.is_file() else args.id_token.strip()
+    except OSError as exc:
+        sys.exit(f"{RED}cannot read the ID token:{OFF} {exc}")
+    if not token:
+        sys.exit(f"{RED}refused:{OFF} the ID token is empty")
+
+    try:
+        mapping = Mapping.load(IDP_MAP)
+        keys = load_jwks(IDP_JWKS)
+        age = jwks_age_days(IDP_JWKS)
+        if age > mapping.max_age_days:
+            sys.exit(f"{RED}refused:{OFF} the pinned key set is {age:.1f} days old and "
+                     f"{IDP_MAP} allows {mapping.max_age_days:g}. Run `taper idp refresh`.")
+        authorized = authorize(token, mapping, keys, IDP_SEEN)
+    except IdPError as exc:
+        sys.exit(f"{RED}refused:{OFF} {exc}")
+    print(f"{GREEN}authenticated{OFF} {authorized.subject} by {authorized.issuer} "
+          f"{DIM}(group {authorized.rule.group} → {authorized.rule.policy}){OFF}",
+          file=sys.stderr)
+    return authorized
 
 
 def parse_duration(text: str) -> float:
@@ -263,6 +330,16 @@ def cmd_grant(args) -> int:
     """
     from .pop import PopError, write_proving_key
 
+    # An OIDC login decides three things the command line otherwise asserts:
+    # which policy, for whom, and how long at most. Done before anything
+    # else, so a refused token never reaches the minting code.
+    authorized = _idp_authorize(args) if getattr(args, "id_token", None) else None
+    if authorized is not None:
+        args.policy = str(authorized.rule.policy)
+    elif args.policy is None:
+        sys.exit(f"{RED}nothing to mint:{OFF} name a policy file, or --id-token FILE "
+                 f"to let {IDP_MAP} decide which policy this person's group allows.")
+
     # Configuration the agent can write is not configuration. Refuse a
     # policy file or an ops directory the agent's uid owns or anyone can
     # write; --allow-writable-config warns instead, for a laptop checkout.
@@ -287,6 +364,21 @@ def cmd_grant(args) -> int:
     # Which workload may hold this authority. The flag wins over the policy
     # file, as --subject does, so one policy can be minted for several.
     workload = args.workload if args.workload is not None else policy.get("workload", "")
+    if authorized is not None:
+        # The provider's answer wins over both. The subject is the claim the
+        # mapping names, never a flag; the TTL is the smaller of what was
+        # asked for and what the rule allows; the workload is the rule's when
+        # it names one. A ceiling that can be raised from the command line is
+        # not a ceiling.
+        # verified-by: tests/test_taper.py::TestIdP::test_a_token_mints_the_policy_its_group_maps_to
+        subject = authorized.subject
+        if authorized.rule.workload:
+            workload = authorized.rule.workload
+        if authorized.rule.max_ttl is not None and ttl > authorized.rule.max_ttl:
+            print(f"{YELLOW}!{OFF} {args.ttl} exceeds the ceiling for group "
+                  f"{authorized.rule.group}; minting for "
+                  f"{int(authorized.rule.max_ttl)}s instead", file=sys.stderr)
+            ttl = authorized.rule.max_ttl
     # Condition 4 of DESIGN.md §7: the grant commits to the definition of every
     # declared operation it names. An operation nobody serves is minted anyway
     # - the broker refuses it, fail closed - but the operator is told now.
@@ -317,6 +409,19 @@ def cmd_grant(args) -> int:
         path = write_proving_key(key, Path(args.key_file).expanduser())
     except PopError as exc:
         sys.exit(str(exc))
+
+    # An IdP-driven mint goes on the tape. `taper grant` is otherwise silent,
+    # and deliberately so - a mint from a policy file is an operator act with
+    # a shell history. A mint from an identity provider is an automated act
+    # whose only account of itself is this record.
+    # verified-by: tests/test_integration.py::TestIdPCLI::test_an_idp_mint_is_recorded_on_the_audit_log
+    if authorized is not None:
+        body = authorized.as_record(_sha256_file(Path(args.policy).expanduser()))
+        body.update({"t": round(time.time(), 3), "ttl": int(ttl),
+                     "revocation_id": token.revocation_ids()[0]})
+        AuditLog(AUDIT).append(body)
+        print(f"{DIM}# recorded on {AUDIT}: {authorized.subject} authenticated by "
+              f"{authorized.issuer}, group {authorized.rule.group}{OFF}", file=sys.stderr)
 
     # stdout: the token, and nothing else. Everything below is stderr, so that
     # `taper grant p.json --key-file k > token.txt` captures only the token.
@@ -612,6 +717,144 @@ EXAMPLE_DECLARATION = {
 
 def cmd_ops_example(args) -> int:
     print(json.dumps(EXAMPLE_DECLARATION, indent=2))
+    return 0
+
+
+# ------------------------------------------------------------ identity provider
+
+EXAMPLE_MAPPING = {
+    "issuer": "https://login.example.com/",
+    "audience": "taper",
+    "subject_claim": "email",
+    "groups_claim": "groups",
+    "max_age_days": 7,
+    "rules": [
+        {"group": "sre", "policy": "/etc/taper/sre.json", "max_ttl": "8h",
+         "workload": "spiffe://example.org/agent/deploy"},
+        {"group": "dev", "policy": "/etc/taper/dev.json", "max_ttl": "1h"},
+    ],
+}
+
+
+def cmd_idp_example(args) -> int:
+    print(json.dumps(EXAMPLE_MAPPING, indent=2))
+    print(f"{DIM}# write it to {IDP_MAP}, root-owned 0644, beside the policies it "
+          f"names; then `taper idp refresh`{OFF}", file=sys.stderr)
+    return 0
+
+
+def cmd_idp_check(args) -> int:
+    """What would mint, and what would stop it - read from the same two files
+    the mint reads, so this answers for the mint and not for a copy of it.
+
+    verified-by: tests/test_integration.py::TestIdPCLI::test_check_names_every_rule_and_the_key_set_age
+    """
+    from .idp import IdPError, Mapping, jwks_age_days, load_jwks
+
+    ok = True
+    try:
+        mapping = Mapping.load(IDP_MAP)
+    except IdPError as exc:
+        print(f"{RED}mapping{OFF}  {exc}")
+        print(f"{DIM}# `taper idp example` prints one{OFF}")
+        return 1
+    print(f"{BOLD}mapping{OFF}   {IDP_MAP}")
+    print(f"{BOLD}issuer{OFF}    {mapping.issuer}")
+    print(f"{BOLD}audience{OFF}  {mapping.audience}")
+    print(f"{BOLD}subject{OFF}   the {mapping.subject_claim!r} claim; groups from "
+          f"{mapping.groups_claim!r}")
+
+    try:
+        keys = load_jwks(IDP_JWKS)
+        age = jwks_age_days(IDP_JWKS)
+        colour = RED if age > mapping.max_age_days else GREEN
+        print(f"{BOLD}key set{OFF}   {len(keys)} key(s), {colour}{age:.1f} days old"
+              f"{OFF} (max {mapping.max_age_days:g})")
+        if age > mapping.max_age_days:
+            print(f"{RED}!{OFF} stale: every mint is refused until `taper idp refresh`")
+            ok = False
+        for kid, (_, jwk) in sorted(keys.items()):
+            print(f"  {DIM}{kid}{OFF}  {jwk.get('kty')} {jwk.get('alg') or jwk.get('crv') or ''}")
+    except IdPError as exc:
+        print(f"{RED}key set{OFF}   {exc}")
+        ok = False
+
+    print(f"\n{BOLD}rules{OFF}  {DIM}(first match wins, in this order){OFF}")
+    for rule in mapping.rules:
+        ttl = f"≤{int(rule.max_ttl)}s" if rule.max_ttl is not None else f"{YELLOW}no ceiling{OFF}"
+        print(f"  {rule.group:<16} {rule.policy}  {DIM}{ttl}{OFF}"
+              + (f"  {DIM}held by {rule.workload}{OFF}" if rule.workload else ""))
+        if not rule.policy.is_file():
+            print(f"    {RED}!{OFF} no such policy file; this group could authenticate "
+                  f"and still not mint")
+            ok = False
+        # Both are worth saying, and a missing file is not a reason to stop
+        # saying the other: a rule can be broken and unbounded at once.
+        if rule.max_ttl is None:
+            print(f"    {YELLOW}!{OFF} no max_ttl: --ttl on the command line is the only "
+                  f"limit, and that is the person's to choose")
+    from .hardening import check_tree
+    reasons = check_tree(IDP_MAP, None) + check_tree(IDP_JWKS, None)
+    if reasons:
+        print(f"\n{RED}writable configuration{OFF}")
+        for reason in reasons:
+            print(f"  {reason}")
+        ok = False
+    if IDP_SEEN.is_file():
+        try:
+            spent = len(json.loads(IDP_SEEN.read_text()))
+            print(f"\n{DIM}# {spent} unexpired ID token(s) already spent, in {IDP_SEEN}{OFF}")
+        except ValueError:
+            pass
+    return 0 if ok else 1
+
+
+def cmd_idp_refresh(args) -> int:
+    """Fetch the discovery document and the key set, and pin them.
+
+    Run by an operator, never by the mint: the host that holds the root key
+    does not make an outbound request while signing. A refresh that would
+    drop a key stops and says so, because that is how a provider's rotation
+    looks halfway through and how an attacker's would look all the way.
+
+    verified-by: tests/test_integration.py::TestIdPCLI::test_refresh_pins_the_key_set_and_refuses_to_drop_a_key
+    """
+    from .idp import IdPError, Mapping, fetch_jwks
+
+    try:
+        mapping = Mapping.load(IDP_MAP)
+    except IdPError as exc:
+        sys.exit(f"{RED}{exc}{OFF}")
+    try:
+        doc = fetch_jwks(mapping.issuer)
+    except IdPError as exc:
+        sys.exit(f"{RED}refused:{OFF} {exc}")
+    except Exception as exc:                                   # noqa: BLE001
+        sys.exit(f"{RED}cannot reach {mapping.issuer}:{OFF} {exc}")
+
+    fresh = {k.get("kid") for k in doc["keys"] if k.get("kid")}
+    if IDP_JWKS.is_file():
+        try:
+            old = {k.get("kid") for k in json.loads(IDP_JWKS.read_text()).get("keys", [])
+                   if k.get("kid")}
+        except ValueError:
+            old = set()
+        dropped = old - fresh
+        if dropped and not args.force:
+            print(f"{RED}refused:{OFF} the provider no longer publishes "
+                  f"{', '.join(sorted(dropped))}.", file=sys.stderr)
+            print(f"{DIM}# Tokens signed by those keys stop verifying the moment this "
+                  f"is written. That is correct after a rotation completes and wrong "
+                  f"in the middle of one. --force when you mean it.{OFF}", file=sys.stderr)
+            return 1
+    IDP_JWKS.parent.mkdir(parents=True, exist_ok=True)
+    tmp = IDP_JWKS.with_suffix(".tmp")
+    tmp.write_text(json.dumps(doc, indent=2, sort_keys=True))
+    os.replace(tmp, IDP_JWKS)
+    os.chmod(IDP_JWKS, 0o644)
+    print(f"{GREEN}pinned{OFF} {len(fresh)} key(s) from {mapping.issuer} to {IDP_JWKS}")
+    print(f"{DIM}# the mint reads this file and never the network; refresh again "
+          f"within {mapping.max_age_days:g} days or mints are refused{OFF}", file=sys.stderr)
     return 0
 
 
@@ -1146,6 +1389,36 @@ def cmd_doctor(args) -> int:
         except SpiffeError as exc:
             check(False, "", f"TAPER_SVID_DIR is set but: {exc}")
 
+    # The identity provider, when one drives the mint. Silent where no
+    # mapping exists: `--id-token` is one way to mint, not the only one.
+    if IDP_MAP.is_file():
+        from .idp import IdPError, Mapping, jwks_age_days, load_jwks
+        try:
+            mapping = Mapping.load(IDP_MAP)
+            check(True, f"IdP mapping at {IDP_MAP}: {len(mapping.rules)} rule"
+                        f"{'s' if len(mapping.rules) != 1 else ''} from {mapping.issuer}", "")
+            unbounded = [r.group for r in mapping.rules if r.max_ttl is None]
+            check(not unbounded, "every IdP rule names a max_ttl",
+                  f"no max_ttl for {', '.join(unbounded)} — a person in that group "
+                  f"chooses their own lifetime with --ttl")
+            try:
+                keys = load_jwks(IDP_JWKS)
+                age = jwks_age_days(IDP_JWKS)
+                check(age <= mapping.max_age_days,
+                      f"pinned key set: {len(keys)} key(s), {age:.1f} days old",
+                      f"the pinned key set is {age:.1f} days old and the mapping allows "
+                      f"{mapping.max_age_days:g} — every IdP mint is refused: "
+                      f"`taper idp refresh`")
+            except IdPError as exc:
+                check(False, "", str(exc))
+            reasons = check_tree(IDP_MAP, agent_uids) + check_tree(IDP_JWKS, agent_uids)
+            check(not reasons, f"{IDP_MAP.name} and its key set are not writable by "
+                               f"the agent",
+                  f"the IdP mapping decides which policy a login mints, and: "
+                  + (reasons[0] if reasons else ""))
+        except IdPError as exc:
+            check(False, "", f"{IDP_MAP}: {exc}")
+
     # Declared operations: every file compiles, or the broker will not start.
     if OPS.is_dir():
         from .declared import load_dir
@@ -1474,7 +1747,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="bind this grant to an attested workload: spiffe://domain/path, "
                         "or a /* pattern. The broker refuses any caller SPIFFE does "
                         "not attest as it.")
-    p.add_argument("policy")
+    # Optional, because --id-token names the policy through the person's group
+    # instead. One of the two must be given; cmd_grant says so.
+    p.add_argument("policy", nargs="?", default=None)
+    p.add_argument("--id-token", default=None, metavar="FILE",
+                   help="mint from an OIDC ID token instead of naming a policy: the "
+                        "subject, the policy and the TTL ceiling come from the "
+                        "person's group in the IdP mapping")
     p.add_argument("--ttl", default="1h")
     # Required: the proving key must land somewhere that is not stdout, and
     # making the caller name it is what keeps the key off the token's channel.
@@ -1553,6 +1832,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_ops_check)
     p = ops_sub.add_parser("example", help="print an example declaration")
     p.set_defaults(func=cmd_ops_example)
+
+    idp_p = sub.add_parser("idp", help="identity-provider mints: check, refresh, example")
+    idp_sub = idp_p.add_subparsers(dest="idp_cmd", required=True)
+    p = idp_sub.add_parser("check", help="read the mapping and the pinned key set, say what would mint")
+    p.set_defaults(func=cmd_idp_check)
+    p = idp_sub.add_parser("refresh", help="fetch the provider's key set and pin it")
+    p.add_argument("--force", action="store_true",
+                   help="write the new set even when it drops a key the old one had")
+    p.set_defaults(func=cmd_idp_refresh)
+    p = idp_sub.add_parser("example", help="print an example mapping")
+    p.set_defaults(func=cmd_idp_example)
 
     p = sub.add_parser("coverage", help="which of an agent's commands an operation covers")
     p.add_argument("file", help="one command per line, or - for stdin")

@@ -1,4 +1,4 @@
-# The red team: one hundred and sixty-seven attacks, and the five that worked
+# The red team: one hundred and ninety-five attacks, and the five that worked
 
 `validate/redteam.py` is a script that attacks Taper. Every case in it is
 something that must be refused, and the script exits non-zero if any of them is
@@ -34,7 +34,7 @@ attacked by people who were not thinking about Taper when they wrote the attack.
 
 ## What it throws
 
-One hundred and sixty-seven cases in fifteen sections (one hundred and fifteen at v0.3.0, eighty-one at v0.2.1, fifty-nine at v0.1.1). The count is the count on this commit; it
+One hundred and ninety-five cases in sixteen sections (one hundred and fifteen at v0.3.0, eighty-one at v0.2.1, fifty-nine at v0.1.1). The count is the count on this commit; it
 goes up when adapters are added, and the number is not the claim.
 
 | section | cases | what is being tested |
@@ -53,6 +53,7 @@ goes up when adapters are added, and the number is not the claim.
 | 11. Tower for SSH and AWS | 25 | SSH: the honest request is cleared; the certificate pins the shim to this request's hash; a different argument list is a different hash; no extensions; this host as a principal; sixty seconds; material taken twice; a certificate with its force-command edited; a certificate from another CA. The shim: the named request runs; three other requests under the same clearance are refused. AWS: cleared with a session; the policy names this bucket and prefix only; another bucket, a prefix outside the grant, a wildcard bucket, and a `../` prefix never reach STS; an action wildcard, a resource wildcard, a placeholder outside the resource part and a user ARN as the role are refused at load; a policy with no resource; both tapes intact |
 | 12. The root of trust | 7 | both keys verify during a rotation; a chain signed by a retired root, and a child of one; a chain wearing a trusted kid but signed by another key; a child block naming a root key; a signer answering for a key it was not named for, caught at mint; an unnamed root against a trust set of several, where the verifier does not guess |
 | 13. SPIFFE | 20 | the attested workload is allowed, and then: no SVID at all; an SVID from a CA the bundle does not hold; a genuine SVID for a workload outside the pattern; the right certificate signed by a key that is not its own; an attestation made for a different request; the same attestation twice; a timestamp an hour old; an expired SVID; a child block naming its own workload; the root's workload rewritten; a broker with no trust bundle refusing rather than ignoring; six malformed SPIFFE IDs; the tape intact |
+| 14. The identity provider | 28 | `alg: none`; HS256 signed with the provider's own public key as the shared secret; a token signed by another RSA key; an empty signature on a real algorithm; a `kid` outside the pinned set, which is refused rather than tried against every key; another issuer; another audience; an expired token; a token dated in the future; a group nobody mapped; no subject claim; a subject with a newline in it. Then the mapping: a dev's token yields the dev policy and its one-hour ceiling; membership in two groups takes the first rule in file order rather than the widest; the same token cannot mint twice; a token with no `jti` is still spent once by its hash; the seen-file holds neither token nor `jti` and is 0600; the record names the issuer, the person and the rule and carries no token and no other claim; an http issuer, an empty rule set, a workload that is not a SPIFFE id and two unknown keys are all refused at load; a symmetric key in the key set is not a signing key; and no HMAC or `none` algorithm exists in the table to be selected |
 | 8. Audit integrity | 3 | the hash chain is intact after the run; every denial above was recorded; deleting a record is detected |
 
 Sections 1 through 4 share one property that matters more than any individual

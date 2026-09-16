@@ -34,11 +34,14 @@ flowchart TB
     tower["<b>Tower</b> · stage 1<br/>[Software System]<br/><i>Co-signer. Re-verifies the decision with its own state and mints a credential that exists for one operation and sixty seconds.</i>"]
   end
 
+  idp["<b>Identity provider</b><br/>[Software System, external]<br/><i>OIDC. Its ID token decides the subject, the policy the person's group maps to, and the TTL ceiling. Its key set is pinned, never fetched while signing.</i>"]
   pg["<b>PostgreSQL</b><br/>[Software System, external]<br/><i>Authenticates the broker by client certificate; the role has no password. Reports its own objections through taper.invariants().</i>"]
   ssh["<b>SSH hosts</b><br/>[Software System, external]<br/><i>CA-signed certificates. The broker runs argv, never a shell.</i>"]
   http["<b>HTTP services</b><br/>[Software System, external]<br/><i>Bearer credential still held by the broker. Tower stage 1 not yet applied.</i>"]
 
   subject -- "delegates a task" --> agent
+  subject -- "signs in" --> idp
+  idp -- "ID token: subject · group<br/>[OIDC, pinned JWKS]" --> operator
   operator -- "grant · revoke · audit<br/>[taper CLI, local]" --> broker
   agent -- "one typed operation + proof<br/>[AF_UNIX socket or MCP]" --> broker
   broker -- "clear(decision, chain, proof)" --> tower
@@ -46,6 +49,7 @@ flowchart TB
   broker -- "clearance · invariants · statement<br/>[TLS, client certificate]" --> pg
   broker -- "argv<br/>[ssh, certificate]" --> ssh
   broker -- "one request<br/>[HTTPS]" --> http
+  idp ~~~ pg
   tower ~~~ pg
   tower ~~~ ssh
   tower ~~~ http
@@ -55,7 +59,7 @@ flowchart TB
   classDef ext fill:#8a8a8a,stroke:#5f5f5f,color:#fff
   class operator,subject person
   class broker,tower system
-  class agent,pg,ssh,http ext
+  class agent,idp,pg,ssh,http ext
   style taper_sys fill:none,stroke:#666,stroke-dasharray:6 4
 ```
 

@@ -42,7 +42,7 @@ The problem it addresses is narrow and specific. An agent needs to run `git stat
 - **Judging intent.** If an operation is within the grant, Taper performs it. An agent authorized to read a table and choosing to read all of it is behaving correctly by this system's definition.
 - **Protecting against a compromised broker.** The broker holds the credentials. If it is owned, they are gone. Layer 2 (§8) limits what that is worth; nothing makes it harmless.
 - **Data-flow control.** Taper does not track provenance or taint. A correctly scoped call with attacker-chosen arguments is still an attack, and the CaMeL line of work is the right answer to that problem, not this one.
-- **Replacing an identity provider.** Taper has no opinion on who the human is. It starts from a root key that someone already decided to trust. The token carries a *subject* — who that root signer says the authority is for — and carries it unalterably down every delegation (§5, "The subject"); it does not check that claim against anyone, and binding the mint to an IdP assertion is the operator's step.
+- **Replacing an identity provider.** Taper has no opinion on who the human is. It starts from a root key that someone already decided to trust. The token carries a *subject* — who that root signer says the authority is for — and carries it unalterably down every delegation (§5, "The subject"); the broker never checks that claim against anyone. The mint may be *driven* by one: `taper grant --id-token` takes the subject, the policy and the ceiling from a verified OIDC ID token and the group it belongs to, so the claim is the provider's rather than an operator's typing. That is consuming an assertion, not issuing identity.
 - **Confining the agent to the broker.** Taper mediates the paths that go through it. It is not a sandbox, and it cannot become one. An agent holding the docker socket has an unmediated route to the same database: `docker compose exec db psql -U pocketos` needs no credential at all, because authentication happens inside the container. A shell on the database host is the same route wearing different clothes, and so is a `.pgpass` file the agent can read. This is not a gap awaiting a later version — it is what a side channel *is*, and no broker can mediate traffic that never reaches it. **Ensuring the broker is the agent's only route to the resource is the operator's responsibility, and discharging it means enumerating the routes**: the container socket, shells on the host, credential files inside the agent's reach, and any tooling that reaches the resource by a path of its own. A grant that constrains the broker path while one of those stays open has not constrained anything; it has only moved where the agent will go. This is the inverse of the rule in §8 that the broker is never the only boundary. The broker is only a boundary for traffic that reaches it.
 
 ## Threat model
@@ -143,10 +143,19 @@ The **final** block's ephemeral private key is the exception: it is not destroye
 
 Workload identity answers "which process is calling." It does not answer "who is it calling *for*," and a broker that decides on workload identity alone cannot express that Alice's agent may do something Bob's may not. Taper carries the answer in the token: the root block has a `subject` — the human this authority was issued for, in whatever form the operator's identity provider names them — under the root signature. Every child inherits it by position. No block after the root may carry one at all; a child that does is refused even when it agrees with the root, so there is never a second copy to disagree with. Rewriting it breaks the root signature; stripping it breaks the root signature; moving a child under a root with a different subject breaks the hash linkage. The subject is the one field in the chain that cannot be narrowed, only preserved, and it is written into every decision and result record beside the kernel's word on the caller's uid — so the log says both which process asked and on whose behalf, three delegations in, with no way for the third delegate to have become someone else.
 
-What Taper does not do is verify the subject against an identity provider. It is a claim the root signer makes at mint, and Taper trusts the root signer by construction (§2, assumptions). Binding the mint to an IdP assertion — an ID-JAG, an OIDC token — is the operator's step and the obvious next one; the field exists so that step has somewhere to land. A token minted without a subject verifies, and `taper inspect` says it acts for nobody in particular, because that is the honest description of it.
+What Taper does not do is verify the subject *at the broker*. It is a claim the root signer makes at mint, and Taper trusts the root signer by construction (§2, assumptions). A token minted without a subject verifies, and `taper inspect` says it acts for nobody in particular, because that is the honest description of it.
+
+Where that claim comes from is now the mint's business rather than the operator's typing. `taper grant --id-token ./token.jwt` verifies an OIDC ID token against a **pinned** key set and takes three things from it: the **subject** is a claim the operator named (`email`, `sub`, `preferred_username`), the **policy** is whichever file the person's group maps to, and the **ceiling** — the TTL cap, and the workload the grant is bound to — comes from the same rule. What a person may mint becomes a property of their directory group, reviewed where groups are reviewed, and `--subject` is refused alongside `--id-token` because a subject a flag can rewrite is a string again.
+
+Four things make that safe to run on the host that holds the root key. The key set is **pinned, not fetched at mint**: `taper idp refresh` writes `idp.jwks.json`, and a set older than `max_age_days` refuses every mint rather than letting an unreachable provider become a skipped one — the signing host makes no outbound request while signing. Only **asymmetric algorithms** exist in the table, so `alg: none` and every HMAC variant are refused by absence rather than by a check that could be got wrong, and the key is selected by `kid` rather than tried against all of them. An ID token **mints once**: its `jti`, or a hash of the token, is spent in a 0600 seen-file, because an ID token is a bearer credential with minutes of life and capturing one must not be capturing every grant its holder's group allows, repeatedly. And **every IdP mint is on the tape** — `taper grant` is otherwise silent, which is right for an operator act with a shell history behind it and wrong for an automated one, so the record names the issuer, the person, the group, the policy and its hash, and never the token (`taper/idp.py`).
+
+This does not make Taper an identity provider, and the non-goal in §1 stands: the trust still begins at a root key someone decided to trust, and now at a JWKS someone decided to pin.
 
 verified-by: tests/test_taper.py::TestSubject::test_the_subject_survives_every_attenuation_unchanged
 verified-by: tests/test_taper.py::TestSubject::test_every_audit_record_names_the_subject
+verified-by: tests/test_taper.py::TestIdP::test_a_token_mints_the_policy_its_group_maps_to
+verified-by: tests/test_taper.py::TestIdP::test_an_unsigned_or_hmac_token_is_refused
+verified-by: tests/test_taper.py::TestIdP::test_an_id_token_mints_once
 
 ### The workload
 
@@ -326,6 +335,18 @@ The policy file is agent-writable
 \[deployment — closed 16 Sept 2026\]
 
 It was in the repository, owned by the agent's user. `taper grant` now refuses a policy file or an operations directory that is a symlink or group- or world-writable, `taper broker` refuses to start on an operations directory owned by any uid it was told to accept connections from, and `taper doctor --agent-user` reports both. `--allow-writable-config` turns the refusal into a warning for a laptop checkout and prints every time; there is no environment variable for it. `/etc/taper`, root-owned, is the home (`taper/hardening.py`).
+
+The login is the operator's, not the agent's
+
+\[architectural\]
+
+`taper grant --id-token` consumes a human's OIDC ID token: a person authenticates, and the grant is minted for them. What it does not do is let the *agent* obtain its own authority from the provider — the token-exchange direction (RFC 8693, and the ID-JAG work in the OAuth working group), where an agent presents its workload identity and receives an assertion naming the human it acts for, without a human at a terminal. That is the shape an organization eventually wants, and the pieces are here to meet it: the subject field it would fill, the workload binding that would be its other half, and a mint that already takes its instructions from a provider rather than a flag. Today the honest description is that the last manual step moved from typing a subject to pasting a token.
+
+Trust begins one step further back, and no further
+
+\[inherent\]
+
+Who may mint is now the identity provider's answer, but *which* provider, and which keys, is still someone's decision written in a file — `idp.json` and the JWKS pinned beside it. Whoever can write those two files can decide who is Alice. `taper/hardening.py` refuses them when the agent can write them, which moves the question to the operator's configuration management and does not dissolve it. This is the same shape as the root key itself, and it is not removable: a trust root that nobody chose is not a trust root.
 
 Revocation requires online state
 
