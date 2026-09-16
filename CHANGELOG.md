@@ -3,7 +3,18 @@
 The first section is what `release.yml` attaches to the GitHub release, so it
 is written to be read on its own.
 
-## Unreleased
+## v0.4.0 — 2026-09-16
+
+v0.3.0 made an operation a file. This release is about who is allowed to say
+so, and about what a second party is prepared to sign. Both halves of the
+answer moved from being a sentence in a document to being a uid: a mint is
+now driven by an identity provider rather than by an operator typing a name,
+and the tower that co-signs every credential runs under its own user with the
+CA key in a directory the broker cannot open. Along the way the root key
+learned to rotate and to live in hardware, the tape learned to leave the host,
+a grant learned which workload may hold it, and the constraint algebra is
+checked exhaustively on every push. Still unaudited — and the two things this
+release does not do are written down rather than left out.
 
 **Tower stage 2: the independence is a uid, not a code path.** Stage 1's
 tower re-verified every decision with its own copy of the root key and then

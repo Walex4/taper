@@ -80,7 +80,7 @@ Note the pattern across all five: none is a cryptographic failure. Every one is 
 
 **The assumption most likely to be wrong**  
 
-"The broker's own code is trusted." It is roughly four and a half thousand lines of Python (v0.3.0; two thousand at revision 1) written by one person and it has never been audited. The mitigation is not confidence — it is §8's second layer, which requires that every target refuse the dangerous operation on its own, with the broker removed from the path entirely. If that layer is intact, a broker bug is a loss of the credentials it holds, not unlimited authority.
+"The broker's own code is trusted." It is roughly seven thousand lines of Python (v0.4.0; eleven thousand with the comments, two thousand at revision 1) against six and a half thousand lines of tests, written by one person, and it has never been audited. The mitigation is not confidence — it is §8's second layer, which requires that every target refuse the dangerous operation on its own, with the broker removed from the path entirely. If that layer is intact, a broker bug is a loss of the credentials it holds, not unlimited authority.
 
 ## Prior art, and what is actually new
 

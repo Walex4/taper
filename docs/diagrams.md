@@ -1,6 +1,6 @@
 # Architecture diagrams
 
-*Taper v0.3.0 and Tower stage 1, 14 September 2026. Seven diagrams in
+*Taper v0.4.0 and Tower stage 2, 16 September 2026. Seven diagrams in
 standard notation: C4 for the system context and containers, UML 2.5 sequence
 diagrams for the two flows, a level-1 data flow diagram with trust boundaries
 in the form threat models use, and UML state machines for the two things that
