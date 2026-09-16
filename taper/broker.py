@@ -267,6 +267,11 @@ class Broker:
             "exit_code": getattr(result, "exit_code", None),
             "enforced_by": confirmed_layers(decision.plan, result),
             "invariants": getattr(result, "invariants", None),
+            # For a declared operation: which one, and what the declaration
+            # says refuses it on the target (None = layer 1 only). The
+            # forwarder alerts on a layer-1-only operation that ran.
+            "declared": (decision.plan.detail.get("declared") if decision.plan else None),
+            "layer2": (decision.plan.detail.get("layer2") if decision.plan else None),
         })
 
     def revoke(self, revocation_id: str) -> None:

@@ -707,6 +707,69 @@ def run(report: Report, tmp: Path) -> None:
     report.check("tower ssh/aws: every clearance and refusal is on an intact tape", intact and intact2)
 
     # ---------------------------------------------------------------------
+    section("12. The root of trust — a rotated key, a retired key, a lying signer")
+    from taper.rootkey import TrustSet as _TS, kid_of as _kid
+    old_root = Ed25519PrivateKey.generate()
+    new_root = Ed25519PrivateKey.generate()
+    during = _TS({_kid(old_root.public_key()): old_root.public_key(),
+                  _kid(new_root.public_key()): new_root.public_key()})
+    t_old = Token.issue(old_root, FULL, ttl_seconds=3600, now=NOW, subject="alice@example.com")
+    t_new = Token.issue(new_root, FULL, ttl_seconds=3600, now=NOW, subject="alice@example.com")
+    try:
+        verify(t_old, during, now=NOW); verify(t_new, during, now=NOW)
+        report.check("root: both keys verify during a rotation", True,
+                     f"kids {t_old.blocks[0].kid}, {t_new.blocks[0].kid}")
+    except ChainError as exc:
+        report.check("root: both keys verify during a rotation", False, str(exc))
+
+    after = _TS({_kid(new_root.public_key()): new_root.public_key()})     # retired the old one
+    for label, tok in (("a chain signed by a retired root", t_old),
+                       ("a child of a chain signed by a retired root",
+                        t_old.attenuate(FULL, now=NOW))):
+        try:
+            verify(tok, after, now=NOW)
+            report.check(f"root: {label}", False, "VERIFIED AFTER RETIREMENT")
+        except ChainError as exc:
+            report.check(f"root: {label}", True, str(exc))
+
+    # a chain that names a trusted kid but was signed by someone else
+    forged_root = Ed25519PrivateKey.generate()
+    f = Token.issue(forged_root, FULL, ttl_seconds=3600, now=NOW, subject="alice@example.com")
+    fdata = json.loads(_unb64(f.serialize()))
+    fdata["b"][0]["kid"] = t_new.blocks[0].kid
+    try:
+        verify(Token.deserialize(_b64(json.dumps(fdata).encode())), after, now=NOW)
+        report.check("root: a chain wearing a trusted kid", False, "VERIFIED")
+    except ChainError as exc:
+        report.check("root: a chain wearing a trusted kid", True, str(exc))
+
+    # a child block that claims to name a root
+    c = t_new.attenuate(FULL, now=NOW)
+    cdata = json.loads(_unb64(c.serialize()))
+    cdata["b"][1]["kid"] = t_new.blocks[0].kid
+    try:
+        verify(Token.deserialize(_b64(json.dumps(cdata).encode())), after, now=NOW)
+        report.check("root: a child block naming a root key", False, "VERIFIED")
+    except ChainError as exc:
+        report.check("root: a child block naming a root key", True, str(exc))
+
+    # a signer that answers for a key it does not hold is caught at mint
+    try:
+        Token.issue(None, FULL, ttl_seconds=3600, now=NOW,
+                    signer=forged_root.sign, root_pub=new_root.public_key())
+        report.check("root: a signer answering for another key", False, "MINTED")
+    except ChainError as exc:
+        report.check("root: a signer answering for another key", True, str(exc))
+
+    # an unnamed root against a set of several: no guessing
+    legacy = json.loads(_unb64(t_new.serialize())); del legacy["b"][0]["kid"]
+    try:
+        verify(Token.deserialize(_b64(json.dumps(legacy).encode())), during, now=NOW)
+        report.check("root: an unnamed root against a set of several", False, "GUESSED")
+    except ChainError as exc:
+        report.check("root: an unnamed root against a set of several", True, str(exc))
+
+    # ---------------------------------------------------------------------
     section("8. Audit integrity")
     intact, _ = broker.audit.verify()
     report.check("audit chain intact after the whole run", intact)

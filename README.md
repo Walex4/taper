@@ -491,6 +491,9 @@ failure mode wearing a different hat. Unknown kinds fail closed at parse time.
 taper/caps.py         constraint algebra: subsumes + intersect
 taper/chain.py        signed attenuation chain
 taper/ops.py          typed operation schemas (rule 1)
+taper/rootkey.py      the trust set, rotation, and signing through an ssh-agent
+taper/forward.py      ship the tape to syslog or a collector, with alerts
+taper/hardening.py    configuration the agent can write is not configuration
 taper/declared.py     an operation as a JSON file, compiled to the same thing
 ops/                  the starter catalog: kubectl, git, aws, a fixed query, an internal API
 taper/adapters/       ssh, postgres, http — build argv, never strings
@@ -631,7 +634,7 @@ refuses anyone else before a token is even parsed. Set the socket's group to the
 ## Tests and validation
 
 ```bash
-make validate    # preflight + the test suite + 140 attacks + the algebra check. The release gate.
+make validate    # preflight + the test suite + 147 attacks + the algebra check. The release gate.
 ```
 
 Four layers, and they check different things:
@@ -639,7 +642,7 @@ Four layers, and they check different things:
 | Command | Checks | Needs |
 |---|---|---|
 | `pytest` | the code does what you meant — 273 tests | nothing |
-| `python validate/redteam.py` | the system refuses what someone *else* meant — 140 attacks | nothing |
+| `python validate/redteam.py` | the system refuses what someone *else* meant — 147 attacks | nothing |
 | `bash scripts/preflight.sh` | this machine can host a broker safely | nothing |
 | `python validate/check_postgres.py <dsn>` | **the database refuses on its own** | a real Postgres |
 | `bash validate/check_ssh.sh <host> <key>` | **sshd refuses on its own** | a real target host |
@@ -681,8 +684,55 @@ stacked statements classifying as `SELECT`, the real pgAdmin backslash payload
 getting through, `pg_read_file` passing as a plain select because it touched no
 table, and `/v1/../../admin` satisfying a `/v1/` prefix. All four are fixed and
 pinned by regression tests. Expect it to find more when you extend the adapters.
-[`docs/redteam.md`](docs/redteam.md) walks through the cases (fifty-nine at v0.1.1, eighty-one at v0.2.1, one hundred and forty now), the
+[`docs/redteam.md`](docs/redteam.md) walks through the cases (fifty-nine at v0.1.1, eighty-one at v0.2.1, one hundred and forty-seven now), the
 four bypasses with their fixes, and what the harness does not prove.
+
+## The root key, and the tape
+
+The root key signs every token, so two things matter operationally: being
+able to replace it, and not having to keep it on a disk.
+
+```
+taper root status --agent      # the trust set, the signing key, what the agent holds
+taper root rotate              # a new signing key; the old public key stays trusted
+taper root retire <kid>        # drop it - every chain it signed now fails
+```
+
+`root.pub` is a trust *set*: one or more public keys. Every root block names
+its signer by `kid`, so a verifier tries the key the chain names. During a
+rotation both are trusted and grants keep working; retiring the old kid is
+the deliberate act that kills every grant it ever signed. Restart the broker
+after either — it reads the set at start.
+
+The signing key need not be a file at all:
+
+```
+TAPER_ROOT_AGENT=1 taper grant policy.json --key-file agent.key --subject alice@example.com
+```
+
+signs through the agent at `SSH_AUTH_SOCK` instead of reading `root.key`. An
+Ed25519 key in a YubiKey (PIV), a Secure Enclave (Secretive), or an ordinary
+`ssh-agent` with `ssh-add -c` is then the root of trust, and the private half
+never exists where this code can read it. `taper root rotate --agent-key <kid>`
+rotates *to* such a key. A signer that answers for a key it was not named for
+is caught at mint, not by the first verifier.
+
+The audit log ships:
+
+```
+taper audit --forward syslog://siem.internal:514 --follow
+taper audit --forward https://collector.internal/ingest --follow   # bearer: audit.forward.token
+```
+
+Each record goes with its `prev` and `hash`, so the collector re-verifies the
+chain itself rather than trusting the sender, from a cursor that survives
+restarts. Alerts ride beside the records for the seven things a person should
+see: a chain break, an identity refusal, an attack-shaped refusal, an
+invariant refusal, a tower refusal, a write to a target that declared no
+invariants, and a layer-1-only operation that ran. Policy refusals are *not*
+alerts — they are the weekly pressure metric, and paging on them is how grants
+get wider. `scripts/systemd/taper-audit-forward.service` runs it as the broker
+user.
 
 ## Verifying a release
 

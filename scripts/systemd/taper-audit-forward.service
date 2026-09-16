@@ -1,0 +1,28 @@
+# Ships the broker's audit log to a collector the broker host cannot edit,
+# with the alert set in taper/forward.py. Runs as the broker user, which is
+# the only user that can read the log; the collector URL is the one setting.
+#
+#   systemctl edit taper-audit-forward   ->   Environment=TAPER_FORWARD_TO=https://collector/ingest
+#   taper secret set audit.forward.token  (as the broker user, if the collector wants a bearer)
+
+[Unit]
+Description=taper audit forwarder
+After=network-online.target taper-broker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=taper-broker
+Environment=TAPER_HOME=/home/taper-broker/.taper
+Environment=TAPER_FORWARD_TO=syslog://127.0.0.1:514
+ExecStart=/usr/local/bin/taper audit --forward ${TAPER_FORWARD_TO} --follow
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/taper-broker/.taper
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

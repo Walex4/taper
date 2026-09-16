@@ -104,6 +104,11 @@ class Block:
     # verified-by: tests/test_taper.py::TestDeclared::test_an_edited_definition_no_longer_matches_the_grant
     # verified-by: tests/test_taper.py::TestDeclared::test_a_child_block_may_not_carry_definitions
     definitions: dict = field(default_factory=dict)
+    # Which root signed this. Root block only. Sixteen hex of SHA-256 over
+    # the raw public key, so a verifier with several trusted roots tries the
+    # one named rather than all of them, and a chain says which root it is.
+    # verified-by: tests/test_taper.py::TestRootKey::test_a_chain_verifies_against_any_key_in_the_trust_set_by_kid
+    kid: str = ""
 
     def payload(self) -> bytes:
         """Exact bytes covered by the signature.
@@ -127,6 +132,8 @@ class Block:
             body["sub"] = self.subject
         if self.definitions:
             body["defs"] = dict(sorted(self.definitions.items()))
+        if self.kid:
+            body["kid"] = self.kid
         return b"\x00taper-block\x00" + json.dumps(
             body, sort_keys=True, separators=(",", ":")
         ).encode()
@@ -148,6 +155,8 @@ class Block:
             d["sub"] = self.subject
         if self.definitions:
             d["defs"] = dict(sorted(self.definitions.items()))
+        if self.kid:
+            d["kid"] = self.kid
         return d
 
     @staticmethod
@@ -162,6 +171,7 @@ class Block:
             note=d.get("note", ""),
             subject=str(d.get("sub", "")),
             definitions=_definitions_from_json(d.get("defs")),
+            kid=str(d.get("kid", "")),
         )
 
 
@@ -199,21 +209,33 @@ class Token:
     # ------------------------------------------------------------------ issuing
 
     @staticmethod
-    def issue(root_priv: Ed25519PrivateKey,
+    def issue(root_priv,
               caps: dict[str, dict[str, Constraint]],
               ttl_seconds: float,
               note: str = "",
               now: Optional[float] = None,
               subject: str = "",
-              definitions: Optional[dict] = None) -> "Token":
+              definitions: Optional[dict] = None,
+              signer=None,
+              root_pub: Optional[Ed25519PublicKey] = None) -> "Token":
         """Mint a root token. `subject` is the human this authority is issued
         for - whatever the operator's identity provider calls them. It is
         signed by the root and cannot be changed by anything downstream.
         `definitions` maps each declared operation the grant names to the
-        hash of its definition, and is signed the same way."""
+        hash of its definition, and is signed the same way.
+
+        The root signs through `root_priv` (a key in memory) or, when
+        `signer` and `root_pub` are given, through a callable - an SSH
+        agent holding a key this process never sees (taper/rootkey.py).
+        Either way the block records the signer's kid."""
+        from .rootkey import kid_of
         now = time.time() if now is None else now
         if "\n" in subject or len(subject) > 256:
             raise ChainError("subject must be one line of at most 256 characters")
+        if signer is None:
+            signer, root_pub = root_priv.sign, root_priv.public_key()
+        elif root_pub is None:
+            raise ChainError("a signer needs the public key it signs for")
         defs = _definitions_from_json(definitions)
         eph = Ed25519PrivateKey.generate()
         block = Block(
@@ -225,8 +247,15 @@ class Token:
             note=note,
             subject=subject,
             definitions=defs,
+            kid=kid_of(root_pub),
         )
-        block.signature = root_priv.sign(block.payload())
+        block.signature = signer(block.payload())
+        # A signer that lied - an agent answering for another key - is caught
+        # here, before the token leaves, not by the first verifier.
+        try:
+            root_pub.verify(block.signature, block.payload())
+        except InvalidSignature:
+            raise ChainError("the signer did not sign with the root key it was named for") from None
         return Token(blocks=[block], _next_priv=eph)
 
     def attenuate(self,
@@ -341,7 +370,7 @@ class Token:
 # ----------------------------------------------------------------------- verify
 
 def verify(token: Token,
-           root_pub: Ed25519PublicKey,
+           root_pub,
            revoked: Optional[set[str]] = None,
            now: Optional[float] = None,
            strict: bool = True) -> dict[str, dict[str, Constraint]]:
@@ -361,6 +390,7 @@ def verify(token: Token,
     verified-by: tests/test_taper.py::TestChain::test_expiry
     verified-by: tests/test_taper.py::TestCannotWiden::test_depth_is_bounded
     """
+    from .rootkey import as_trust
     now = time.time() if now is None else now
     revoked = revoked or set()
 
@@ -369,7 +399,15 @@ def verify(token: Token,
     if len(token.blocks) > MAX_DEPTH:
         raise ChainError(f"delegation depth {len(token.blocks)} exceeds {MAX_DEPTH}")
 
-    expected_signer = root_pub
+    # `root_pub` is one key, or a trust set of several during a rotation.
+    # The root block names its signer by kid; a kid the set does not hold
+    # is a retired or unknown root, and that chain is dead.
+    # verified-by: tests/test_taper.py::TestRootKey::test_retiring_a_key_fails_every_chain_it_signed
+    trust = as_trust(root_pub)
+    expected_signer = trust.resolve(token.blocks[0].kid)
+    if expected_signer is None:
+        raise ChainError(f"root key {token.blocks[0].kid or '(unnamed)'} is not trusted"
+                         f"{' - retired?' if token.blocks[0].kid else ''}")
     expected_prev = b"\x00" * 32
 
     for position, block in enumerate(token.blocks):
@@ -387,6 +425,8 @@ def verify(token: Token,
             # issuer, and a child that carries its own definitions is trying
             # to redefine the operation it was permitted.
             raise ChainError(f"block {position} carries definitions; only the root may")
+        if position > 0 and block.kid:
+            raise ChainError(f"block {position} names a root key; only the root may")
         try:
             expected_signer.verify(block.signature, block.payload())
         except InvalidSignature:

@@ -129,10 +129,37 @@ def load_root_private() -> Ed25519PrivateKey:
     return serialization.load_pem_private_key(ROOT_KEY.read_bytes(), password=None)
 
 
-def load_root_public() -> Ed25519PublicKey:
+def load_root_public():
+    """The trust set - one public key, or several during a rotation. Every
+    verifier (broker, tower, inspect) takes it in place of a single key."""
+    from .rootkey import TrustSet
     if not ROOT_PUB.is_file():
         sys.exit(f"no root public key at {ROOT_PUB} — run: taper init")
-    return serialization.load_pem_public_key(ROOT_PUB.read_bytes())
+    try:
+        return TrustSet.load(ROOT_PUB)
+    except ValueError as exc:
+        sys.exit(str(exc))
+
+
+def root_signer():
+    """How `taper grant` signs: the key file, or an SSH agent when
+    TAPER_ROOT_AGENT is set - a key this process never reads, hardware if
+    the agent is. Returns (signer, public_key, description)."""
+    from .rootkey import AgentError, SSHAgent, kid_of
+    if os.environ.get("TAPER_ROOT_AGENT", "").strip():
+        trust = load_root_public()
+        try:
+            agent = SSHAgent()
+            held = agent.keys()
+        except AgentError as exc:
+            sys.exit(f"TAPER_ROOT_AGENT is set but: {exc}")
+        for pub, comment in held:
+            if kid_of(pub) in trust.keys:
+                return agent.signer(pub), pub, f"ssh-agent key {kid_of(pub)} ({comment})"
+        sys.exit(f"TAPER_ROOT_AGENT is set but the agent holds no key in the trust set "
+                 f"{ROOT_PUB}. `taper root status --agent` lists both sides.")
+    key = load_root_private()
+    return key.sign, key.public_key(), f"root.key ({kid_of(key.public_key())})"
 
 
 def parse_duration(text: str) -> float:
@@ -270,12 +297,14 @@ def cmd_grant(args) -> int:
             print(f"{YELLOW}!{OFF} {name}: no built-in or declared operation by that "
                   f"name; the broker will refuse it. Declare it in {OPS}.",
                   file=sys.stderr)
+    signer, root_pub, how = root_signer()
     try:
-        token = Token.issue(load_root_private(), caps, ttl_seconds=ttl,
+        token = Token.issue(None, caps, ttl_seconds=ttl,
                             note=policy.get("note", ""), subject=subject,
-                            definitions=definitions)
+                            definitions=definitions, signer=signer, root_pub=root_pub)
     except ChainError as exc:
         sys.exit(str(exc))
+    from .rootkey import AgentError
 
     key = token.proving_key()
     if key is None:                        # cannot happen for a freshly issued token
@@ -289,7 +318,7 @@ def cmd_grant(args) -> int:
     # `taper grant p.json --key-file k > token.txt` captures only the token.
     print(token.serialize())
     print(f"{DIM}# expires in {args.ttl}, revocation id "
-          f"{token.revocation_ids()[0]}{OFF}", file=sys.stderr)
+          f"{token.revocation_ids()[0]}; signed by {how}{OFF}", file=sys.stderr)
     if subject:
         print(f"{DIM}# acts for {subject}; every narrowing inherits that and "
               f"none can change it{OFF}", file=sys.stderr)
@@ -368,6 +397,118 @@ def cmd_inspect(args) -> int:
     _warn_policy_pressure(caps)
     return 0
 
+
+
+
+# ------------------------------------------------------------------ the root key
+
+def cmd_root_status(args) -> int:
+    """The trust set, the signing key, and what the agent holds."""
+    from .rootkey import SSHAgent, AgentError, kid_of
+    trust = load_root_public()
+    signing = None
+    if ROOT_KEY.is_file():
+        try:
+            signing = kid_of(load_root_private().public_key())
+        except SystemExit:
+            signing = None
+    import datetime as _dt
+    print(f"{BOLD}trusted roots{OFF}  {DIM}({ROOT_PUB}){OFF}")
+    for kid in trust.keys:
+        tag = f"  {GREEN}signing key{OFF}" if kid == signing else ""
+        prev = HOME / f"root.key.{kid}.retired"
+        print(f"  {kid}{tag}")
+    if signing is None:
+        print(f"  {YELLOW}no signing key on disk{OFF} — mint with TAPER_ROOT_AGENT=1, "
+              f"or this host only verifies")
+    if getattr(args, "agent", False):
+        try:
+            held = SSHAgent().keys()
+        except AgentError as exc:
+            print(f"{YELLOW}agent:{OFF} {exc}")
+            return 0
+        print(f"\n{BOLD}ssh-agent{OFF}  {DIM}({os.environ.get('SSH_AUTH_SOCK')}){OFF}")
+        for pub, comment in held:
+            k = kid_of(pub)
+            mark = f"{GREEN}in the trust set{OFF}" if k in trust.keys else f"{DIM}not trusted{OFF}"
+            print(f"  {k}  {comment}  {mark}")
+        if not held:
+            print(f"  {DIM}no Ed25519 keys{OFF}")
+    return 0
+
+
+def cmd_root_rotate(args) -> int:
+    """A new signing key; the old public key stays trusted until retired.
+
+    Grants minted before this keep verifying. Grants minted after are signed
+    by the new key. Restart the broker (and the tower) so they read the new
+    trust set; until they do, new grants fail with "not trusted".
+    """
+    from .rootkey import TrustSet, kid_of
+    trust = load_root_public()
+    if args.agent_key:
+        # Rotate TO a key an agent holds: no private key lands on disk.
+        from .rootkey import SSHAgent, AgentError
+        try:
+            held = {kid_of(p): p for p, _ in SSHAgent().keys()}
+        except AgentError as exc:
+            sys.exit(str(exc))
+        pub = held.get(args.agent_key)
+        if pub is None:
+            sys.exit(f"the agent holds no Ed25519 key with kid {args.agent_key}; "
+                     f"`taper root status --agent` lists them")
+        new_kid = kid_of(pub)
+        if ROOT_KEY.is_file():
+            old_kid = kid_of(load_root_private().public_key())
+            ROOT_KEY.rename(HOME / f"root.key.{old_kid}.previous")
+        print(f"{GREEN}signing key is now the agent's{OFF} {new_kid}; set TAPER_ROOT_AGENT=1 to mint")
+    else:
+        new = Ed25519PrivateKey.generate()
+        pub = new.public_key()
+        new_kid = kid_of(pub)
+        if ROOT_KEY.is_file():
+            old_kid = kid_of(load_root_private().public_key())
+            ROOT_KEY.rename(HOME / f"root.key.{old_kid}.previous")
+            print(f"{DIM}previous signing key moved to root.key.{old_kid}.previous — "
+                  f"delete it once every grant it signed has expired{OFF}")
+        fd = os.open(ROOT_KEY, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(new.private_bytes(serialization.Encoding.PEM,
+                                           serialization.PrivateFormat.PKCS8,
+                                           serialization.NoEncryption()))
+        print(f"{GREEN}new signing key{OFF} {new_kid} at {ROOT_KEY} (0600)")
+    trust.keys[new_kid] = pub
+    trust.save(ROOT_PUB)
+    print(f"trust set now: {', '.join(trust.keys)}")
+    print(f"{YELLOW}restart the broker{OFF} (and the tower) so they read {ROOT_PUB}; "
+          f"grants signed by the old key keep verifying until `taper root retire <kid>`")
+    return 0
+
+
+def cmd_root_retire(args) -> int:
+    """Drop a public key from the trust set. Every chain it signed stops
+    verifying at the next broker start. Deliberate, and the only way to
+    make a stolen root key worthless."""
+    from .rootkey import kid_of
+    trust = load_root_public()
+    if args.kid not in trust.keys:
+        sys.exit(f"{args.kid} is not in the trust set: {', '.join(trust.keys)}")
+    if ROOT_KEY.is_file() and kid_of(load_root_private().public_key()) == args.kid \
+            and not args.force:
+        sys.exit(f"{args.kid} is the current signing key; `taper root rotate` first, "
+                 f"or --force to leave this host unable to mint")
+    if len(trust.keys) == 1 and not args.force:
+        sys.exit("that is the only trusted root; retiring it leaves nothing that "
+                 "verifies. --force if that is what you want")
+    del trust.keys[args.kid]
+    trust.save(ROOT_PUB)
+    prev = HOME / f"root.key.{args.kid}.previous"
+    if prev.is_file():
+        prev.unlink()
+        print(f"{DIM}deleted {prev}{OFF}")
+    print(f"{GREEN}retired{OFF} {args.kid}; trust set now: {', '.join(trust.keys)}")
+    print(f"{YELLOW}restart the broker{OFF} — every chain {args.kid} signed is refused from then on")
+    return 0
 
 
 # ------------------------------------------------------------ declared operations
@@ -745,7 +886,34 @@ def cmd_cert_renew(args) -> int:
     return 0
 
 
+def cmd_audit_forward(args) -> int:
+    """Ship the tape. See taper/forward.py for the targets and the alert set."""
+    from .forward import ALERTS, Forwarder, make_sink
+    from .secrets import default_provider
+    token = default_provider().get("audit.forward.token") if args.forward.startswith("http") else None
+    try:
+        sink = make_sink(args.forward, token)
+    except ValueError as exc:
+        sys.exit(str(exc))
+    cursor = Path(args.cursor) if args.cursor else AUDIT.with_suffix(".jsonl.cursor")
+    fw = Forwarder(AUDIT, cursor, sink, alerts=not args.no_alerts)
+    if args.follow:
+        print(f"{DIM}forwarding {AUDIT} to {args.forward}; alerts: "
+              f"{'off' if args.no_alerts else ', '.join(ALERTS)}{OFF}", file=sys.stderr)
+        try:
+            fw.follow()
+        except KeyboardInterrupt:
+            pass
+    else:
+        n = fw.once()
+        print(f"{DIM}shipped {n} record{'s' if n != 1 else ''}, {fw.alerted} alert"
+              f"{'s' if fw.alerted != 1 else ''}; cursor at {cursor}{OFF}", file=sys.stderr)
+    return 0
+
+
 def cmd_audit(args) -> int:
+    if getattr(args, "forward", None):
+        return cmd_audit_forward(args)
     log = AuditLog(AUDIT)
     if args.verify:
         intact, index = log.verify()
@@ -1289,7 +1457,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--refusals", action="store_true",
                    help="summarize denials by kind; the policy bucket is the "
                         "policy-pressure metric")
+    p.add_argument("--forward", metavar="TARGET",
+                   help="ship records since the cursor to stdout, syslog://host:514, "
+                        "syslog+tcp://host:6514 or https://collector/path")
+    p.add_argument("--follow", action="store_true", help="keep forwarding (a service)")
+    p.add_argument("--no-alerts", action="store_true",
+                   help="ship records only; no alert records beside them")
+    p.add_argument("--cursor", default=None,
+                   help=f"cursor file (default: <audit log>.cursor)")
     p.set_defaults(func=cmd_audit)
+
+    root_p = sub.add_parser("root", help="the root of trust: status, rotate, retire")
+    root_sub = root_p.add_subparsers(dest="root_cmd", required=True)
+    p = root_sub.add_parser("status", help="trusted roots and the signing key")
+    p.add_argument("--agent", action="store_true", help="also list what the ssh-agent holds")
+    p.set_defaults(func=cmd_root_status)
+    p = root_sub.add_parser("rotate", help="new signing key; the old one stays trusted until retired")
+    p.add_argument("--agent-key", metavar="KID",
+                   help="rotate to a key the ssh-agent holds (no private key on disk)")
+    p.set_defaults(func=cmd_root_rotate)
+    p = root_sub.add_parser("retire", help="drop a root from the trust set")
+    p.add_argument("kid"); p.add_argument("--force", action="store_true")
+    p.set_defaults(func=cmd_root_retire)
 
     ops_p = sub.add_parser("ops", help="declared operations: list, check, example")
     ops_sub = ops_p.add_subparsers(dest="ops_cmd", required=True)

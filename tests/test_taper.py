@@ -270,8 +270,16 @@ class TestChain:
     def test_wrong_root_key_is_rejected(self, root, broad_caps):
         token = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
         other = Ed25519PrivateKey.generate()
-        with pytest.raises(ChainError, match="bad signature"):
+        with pytest.raises(ChainError, match="not trusted"):
             verify(token, other.public_key(), now=NOW)
+        # and a chain that names the right kid but was signed by another key
+        # is a bad signature, not an unknown root
+        data = json.loads(_unb64(token.serialize()))
+        forged = Token.issue(other, broad_caps, ttl_seconds=3600, now=NOW)
+        fd = json.loads(_unb64(forged.serialize()))
+        fd["b"][0]["kid"] = data["b"][0]["kid"]
+        with pytest.raises(ChainError, match="bad signature"):
+            verify(Token.deserialize(_b64(json.dumps(fd).encode())), root.public_key(), now=NOW)
 
     def test_blocks_cannot_be_spliced_between_chains(self, root, broad_caps):
         a = Token.issue(root, broad_caps, ttl_seconds=3600, now=NOW)
@@ -2118,3 +2126,103 @@ class TestShippedCatalog:
         for name, decl in catalog.declarations.items():
             if not decl.layer1_only():
                 assert decl.layer2.check and decl.layer2.enforced_by
+
+
+
+class TestRootKey:
+    """The root of trust: a set, rotation with overlap, and a key that is
+    not a file."""
+
+    def test_a_chain_verifies_against_any_key_in_the_trust_set_by_kid(self, broad_caps, tmp_path):
+        from taper.rootkey import TrustSet, kid_of
+        old, new = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
+        trust = TrustSet({kid_of(old.public_key()): old.public_key(),
+                          kid_of(new.public_key()): new.public_key()})
+        a = Token.issue(old, broad_caps, ttl_seconds=3600, now=NOW)
+        b = Token.issue(new, broad_caps, ttl_seconds=3600, now=NOW)
+        assert a.blocks[0].kid == kid_of(old.public_key()) and b.blocks[0].kid == kid_of(new.public_key())
+        for t in (a, b):
+            verify(Token.deserialize(t.serialize()), trust, now=NOW)
+            verify(t.attenuate(broad_caps, now=NOW), trust, now=NOW)
+        # the set survives a file round trip, several PEM blocks in one file
+        trust.save(tmp_path / "root.pub")
+        again = TrustSet.load(tmp_path / "root.pub")
+        assert set(again.keys) == set(trust.keys)
+        verify(a, again, now=NOW)
+        # a child block may not name a root
+        data = json.loads(_unb64(a.attenuate(broad_caps, now=NOW).serialize()))
+        data["b"][1]["kid"] = a.blocks[0].kid
+        with pytest.raises(ChainError, match="names a root key"):
+            verify(Token.deserialize(_b64(json.dumps(data).encode())), trust, now=NOW)
+        # a chain minted before kids existed verifies against a set of one
+        legacy = json.loads(_unb64(a.serialize()))
+        del legacy["b"][0]["kid"]
+        one = TrustSet({kid_of(old.public_key()): old.public_key()})
+        with pytest.raises(ChainError, match="bad signature"):   # kid was in the signed payload
+            verify(Token.deserialize(_b64(json.dumps(legacy).encode())), one, now=NOW)
+
+    def test_retiring_a_key_fails_every_chain_it_signed(self, broad_caps):
+        from taper.rootkey import TrustSet, kid_of
+        old, new = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
+        a = Token.issue(old, broad_caps, ttl_seconds=3600, now=NOW)
+        child = a.attenuate(broad_caps, now=NOW)
+        trust = TrustSet({kid_of(old.public_key()): old.public_key(),
+                          kid_of(new.public_key()): new.public_key()})
+        verify(child, trust, now=NOW)
+        del trust.keys[kid_of(old.public_key())]                  # taper root retire <kid>
+        with pytest.raises(ChainError, match="not trusted - retired"):
+            verify(a, trust, now=NOW)
+        with pytest.raises(ChainError, match="not trusted - retired"):
+            verify(child, trust, now=NOW)
+        # a set of two does not guess for an unnamed root
+        legacy = json.loads(_unb64(a.serialize())); del legacy["b"][0]["kid"]
+        two = TrustSet({kid_of(old.public_key()): old.public_key(),
+                        kid_of(new.public_key()): new.public_key()})
+        with pytest.raises(ChainError, match="not trusted"):
+            verify(Token.deserialize(_b64(json.dumps(legacy).encode())), two, now=NOW)
+
+    def test_an_agent_held_key_signs_a_root_block(self, broad_caps, tmp_path):
+        """A fake ssh-agent on a unix socket that holds one Ed25519 key. The
+        mint never sees the private key; the block carries the agent key's
+        kid and verifies against its public half."""
+        import socket
+        import struct
+        import threading
+        from taper.rootkey import SSHAgent, kid_of
+        held = Ed25519PrivateKey.generate()
+        raw = held.public_key().public_bytes_raw()
+        blob = struct.pack(">I", 11) + b"ssh-ed25519" + struct.pack(">I", 32) + raw
+        path = str(tmp_path / "agent.sock")
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(path); srv.listen(2)
+
+        def s(b): return struct.pack(">I", len(b)) + b
+
+        def serve():
+            for _ in range(2):
+                conn, _ = srv.accept()
+                head = conn.recv(4); (n,) = struct.unpack(">I", head); msg = conn.recv(n)
+                if msg[0] == 11:
+                    reply = bytes([12]) + struct.pack(">I", 1) + s(blob) + s(b"yubikey root")
+                elif msg[0] == 13:
+                    r = msg[1:]
+                    (kl,) = struct.unpack(">I", r[:4]); key = r[4:4 + kl]
+                    (dl,) = struct.unpack(">I", r[4 + kl:8 + kl]); data = r[8 + kl:8 + kl + dl]
+                    assert key == blob
+                    sig = s(b"ssh-ed25519") + s(held.sign(data))
+                    reply = bytes([14]) + s(sig)
+                conn.sendall(s(reply)); conn.close()
+        threading.Thread(target=serve, daemon=True).start()
+
+        agent = SSHAgent(path)
+        [(pub, comment)] = agent.keys()
+        assert comment == "yubikey root" and pub.public_bytes_raw() == raw
+        token = Token.issue(None, broad_caps, ttl_seconds=3600, now=NOW,
+                            signer=agent.signer(pub), root_pub=pub)
+        assert token.blocks[0].kid == kid_of(held.public_key())
+        verify(Token.deserialize(token.serialize()), held.public_key(), now=NOW)
+        # a signer answering for the wrong key is caught at mint
+        other = Ed25519PrivateKey.generate()
+        with pytest.raises(ChainError, match="did not sign with the root key"):
+            Token.issue(None, broad_caps, ttl_seconds=3600, now=NOW,
+                        signer=other.sign, root_pub=pub)

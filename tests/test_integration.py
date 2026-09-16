@@ -2174,3 +2174,118 @@ class TestConfigOwnership:
         assert cli.main(["doctor", "--policy", str(policy)]) in (0, 1)
         out, _ = capsys.readouterr()
         assert "not writable by the agent" in out
+
+
+class TestForward:
+    """The tape, shipped, with its hashes; and the alert set."""
+
+    def _log(self, tmp_path):
+        from taper.audit import AuditLog
+        log = AuditLog(tmp_path / "audit.jsonl")
+        log.append({"t": 1.0, "record": "decision", "allowed": True, "reason": "ok",
+                    "operation": "pg.query", "subject": "alice@example.com"})
+        log.append({"t": 2.0, "record": "decision", "allowed": False,
+                    "reason": "token rejected: bad signature on block 0",
+                    "operation": "pg.query", "subject": ""})
+        log.append({"t": 3.0, "record": "decision", "allowed": False,
+                    "reason": "pg.query.tables={'public.secrets'} not permitted by {'kind': 'subset'}",
+                    "operation": "pg.query", "subject": "alice@example.com"})
+        log.append({"t": 4.0, "record": "result", "ok": False, "operation": "pg.migrate",
+                    "subject": "alice@example.com",
+                    "invariants": {"declared": True, "raised": [], "overridden": [],
+                                   "refused": [{"name": "no_recent_backup", "subject": "production.orders"}]}})
+        log.append({"t": 5.0, "record": "clearance", "clearance": None, "operation": "pg.query",
+                    "refused": "decision names a different subject"})
+        log.append({"t": 6.0, "record": "result", "ok": True, "operation": "docker.logs",
+                    "subject": "alice@example.com", "declared": "docker.logs", "layer2": None,
+                    "invariants": None})
+        return log
+
+    def test_records_ship_with_their_hashes_and_the_cursor_advances(self, tmp_path):
+        from taper.forward import Forwarder
+        log = self._log(tmp_path)
+        got = []
+        fw = Forwarder(log.path, tmp_path / "cursor", got.extend, alerts=False)
+        assert fw.once() == 6
+        assert [r["body"]["t"] for r in got] == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        assert all({"prev", "body", "hash"} <= set(r) for r in got)
+        # the receiver can re-verify the chain from what it got
+        from taper.audit import _digest
+        prev = "0" * 64
+        for r in got:
+            assert r["prev"] == prev and r["hash"] == _digest(prev, r["body"])
+            prev = r["hash"]
+        # nothing new: nothing shipped; something new: only that
+        assert fw.once() == 0
+        log.append({"t": 7.0, "record": "decision", "allowed": True, "reason": "ok",
+                    "operation": "ssh.exec"})
+        got.clear()
+        assert Forwarder(log.path, tmp_path / "cursor", got.extend, alerts=False).once() == 1
+        assert got[0]["body"]["t"] == 7.0
+        cursor = json.loads((tmp_path / "cursor").read_text())
+        assert cursor["offset"] == log.path.stat().st_size and cursor["hash"] == got[0]["hash"]
+
+    def test_alerts_name_what_a_person_should_see(self, tmp_path):
+        from taper.forward import Forwarder
+        log = self._log(tmp_path)
+        got = []
+        Forwarder(log.path, tmp_path / "cursor", got.extend).once()
+        alerts = [(r["alert"], r["for"]) for r in got if "alert" in r]
+        names = [a for a, _ in alerts]
+        assert names == ["refused_identity", "refused_invariant", "clearance_refused",
+                         "layer1_only_executed"]
+        # the policy refusal (t=3) is not an alert - it is the pressure metric
+        # every alert points at the record it is about
+        hashes = {r["hash"] for r in got if "hash" in r}
+        assert all(h in hashes for _, h in alerts)
+        by_alert = {r["alert"]: r for r in got if "alert" in r}
+        assert by_alert["refused_invariant"]["detail"] == "no_recent_backup on production.orders"
+        assert by_alert["layer1_only_executed"]["detail"] == "docker.logs"
+        assert by_alert["refused_identity"]["subject"] == ""
+
+    def test_a_chain_break_is_alerted_and_forwarding_continues(self, tmp_path):
+        from taper.forward import Forwarder
+        log = self._log(tmp_path)
+        lines = log.path.read_text().splitlines()
+        del lines[2]
+        log.path.write_text("\n".join(lines) + "\n")
+        got = []
+        fw = Forwarder(log.path, tmp_path / "cursor", got.extend)
+        assert fw.once() == 5
+        breaks = [r for r in got if r.get("alert") == "audit_chain_break"]
+        assert len(breaks) == 1 and breaks[0]["for"] == got[got.index(breaks[0]) - 1]["hash"]
+        # and a log that shrinks below the cursor is reported, then re-shipped
+        log.path.write_text("\n".join(lines[:2]) + "\n")
+        got.clear()
+        fw.once()
+        assert got[0]["alert"] == "audit_chain_break" and "shorter" in got[0]["detail"]
+        assert [r["body"]["t"] for r in got if "body" in r] == [1.0, 2.0]
+
+    def test_the_https_sink_posts_ndjson_with_a_bearer(self, tmp_path):
+        import io
+        from taper.forward import https_sink
+        seen = {}
+
+        class Resp(io.BytesIO):
+            status = 202
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def opener(req, timeout):
+            seen["url"] = req.full_url; seen["headers"] = dict(req.header_items())
+            seen["body"] = req.data.decode()
+            return Resp(b"")
+        https_sink("https://collector.example/ingest", token="t0k", opener=opener)(
+            [{"a": 1}, {"alert": "x"}])
+        assert seen["url"] == "https://collector.example/ingest"
+        assert seen["headers"]["Authorization"] == "Bearer t0k"
+        assert seen["body"] == '{"a":1}\n{"alert":"x"}\n'
+
+    def test_the_cli_forwards_to_stdout(self, tmp_path, monkeypatch, capsys):
+        log = self._log(tmp_path)
+        monkeypatch.setattr(cli, "AUDIT", log.path)
+        monkeypatch.setattr(cli, "SECRETS", tmp_path / "secrets")
+        assert cli.main(["audit", "--forward", "stdout", "--cursor", str(tmp_path / "c")]) == 0
+        out, err = capsys.readouterr()
+        lines = [json.loads(l) for l in out.splitlines()]
+        assert len(lines) == 10 and "shipped 6 records, 4 alerts" in err

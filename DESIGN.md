@@ -329,9 +329,9 @@ No formal audit; the algebra checked, not proved
 
 Single-machine, single-operator
 
-\[maturity\]
+\[maturity — rotation and forwarding closed 16 Sept 2026\]
 
-One broker, one host, one person's laptop. No multi-host story, no key rotation procedure, no attestation of which workload is entitled to the root token in the first place — SPIFFE solves that last one and Taper does not integrate with it.
+One broker, one host, one person's laptop. No multi-host story; no attestation of which workload is entitled to the root token in the first place — SPIFFE solves that and Taper does not integrate with it. Two of the three are now closed. **Key rotation**: `root.pub` is a trust *set*, every root block names its signer by `kid` (sixteen hex of SHA-256 over the public key), and `taper root rotate` adds a new signing key while the old public key stays trusted, so grants minted before the rotation keep verifying until `taper root retire <kid>` drops it — at which point every chain it signed is refused, which is what retiring a key is for. The root key also need not be a file: with `TAPER_ROOT_AGENT=1` the mint signs through the SSH agent at `SSH_AUTH_SOCK`, so a YubiKey through PIV, a Secure Enclave through Secretive, or an ordinary agent with `ssh-add -c` is the root, and a signer that answers for a key it does not hold is caught at mint rather than by the first verifier (`taper/rootkey.py`). **Audit forwarding**: `taper audit --forward` ships each record with its `prev`/`hash` intact — so the receiver re-verifies the chain independently — to syslog, an HTTPS collector, or stdout, from a cursor, with a seven-item alert set beside the records (`taper/forward.py`, `scripts/systemd/taper-audit-forward.service`).
 
 ## What would falsify this design
 

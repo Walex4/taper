@@ -1,4 +1,4 @@
-# The red team: one hundred and forty attacks, and the five that worked
+# The red team: one hundred and forty-seven attacks, and the five that worked
 
 `validate/redteam.py` is a script that attacks Taper. Every case in it is
 something that must be refused, and the script exits non-zero if any of them is
@@ -34,7 +34,7 @@ attacked by people who were not thinking about Taper when they wrote the attack.
 
 ## What it throws
 
-One hundred and forty cases in thirteen sections (one hundred and fifteen at v0.3.0, eighty-one at v0.2.1, fifty-nine at v0.1.1). The count is the count on this commit; it
+One hundred and forty-seven cases in fourteen sections (one hundred and fifteen at v0.3.0, eighty-one at v0.2.1, fifty-nine at v0.1.1). The count is the count on this commit; it
 goes up when adapters are added, and the number is not the claim.
 
 | section | cases | what is being tested |
@@ -51,6 +51,7 @@ goes up when adapters are added, and the number is not the claim.
 | 9. The tower | 8 | a decision claiming allow for a chain from another root; a good chain with no proof; a proof for a different request; a broker lying about which chain the decision is about; a decision naming a different subject; an expired chain; a clearance's material taken twice; the tape intact through all of it — nothing but a verified decision mints a credential |
 | 10. Declared operations | 34 | at load: a free field after `-c` or `--command`; `bash` or `sudo` as the program; the program from a field; a field inside a literal; two fields in one element; an optional field right after a flag; a literal with `&&` in it; shadowing a built-in; a SQL statement with a field written into it; two statements; a path segment with a slash; an HTTP method from a field; no `layer2` key. At decision: ten values for a name field — `;id`, a space, `$(id)`, backticks, a pipe, a newline, a quote, `{namespace}`, `../`, `--all-namespaces` — each inexpressible; a resource outside the enum; a namespace outside the grant; an unknown field; a wrong type. The definition: the file edited after the grant; a grant that never committed; a child block carrying its own definitions. Plus the honest request, allowed with argv exactly the template, and the tape intact |
 | 11. Tower for SSH and AWS | 25 | SSH: the honest request is cleared; the certificate pins the shim to this request's hash; a different argument list is a different hash; no extensions; this host as a principal; sixty seconds; material taken twice; a certificate with its force-command edited; a certificate from another CA. The shim: the named request runs; three other requests under the same clearance are refused. AWS: cleared with a session; the policy names this bucket and prefix only; another bucket, a prefix outside the grant, a wildcard bucket, and a `../` prefix never reach STS; an action wildcard, a resource wildcard, a placeholder outside the resource part and a user ARN as the role are refused at load; a policy with no resource; both tapes intact |
+| 12. The root of trust | 7 | both keys verify during a rotation; a chain signed by a retired root, and a child of one; a chain wearing a trusted kid but signed by another key; a child block naming a root key; a signer answering for a key it was not named for, caught at mint; an unnamed root against a trust set of several, where the verifier does not guess |
 | 8. Audit integrity | 3 | the hash chain is intact after the run; every denial above was recorded; deleting a record is detected |
 
 Sections 1 through 4 share one property that matters more than any individual

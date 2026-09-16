@@ -38,6 +38,36 @@ operation gets a credential minted for it.
 - Red team: section 11, twenty-five cases, 140 in all. One of them found
   the resource-wildcard gap in the first draft of the `aws` block.
 
+**The root of trust: a set, rotation, and a key that is not a file.**
+`root.pub` may hold several public keys and every root block names its
+signer by `kid` (sixteen hex of SHA-256 over the raw key), so a verifier
+tries the key a chain names rather than all of them. `taper root rotate`
+adds a new signing key and keeps the old public key trusted — grants minted
+before the rotation keep verifying — and `taper root retire <kid>` drops
+it, after which every chain that key signed is refused. `taper root status
+[--agent]` shows the set, the signing key, and what the agent holds. With
+`TAPER_ROOT_AGENT=1`, `taper grant` signs through the SSH agent at
+`SSH_AUTH_SOCK` instead of reading `root.key`: a YubiKey through PIV, a
+Secure Enclave through Secretive, or an ordinary agent with `ssh-add -c`
+becomes the root, and the private half never exists on a disk this code
+reads. A signer that answers for a key it was not named for is caught at
+mint. Seven red-team cases (section 12; 147 in all). `taper/rootkey.py`
+speaks the two agent-protocol messages it needs directly.
+
+**Audit forwarding.** `taper audit --forward TARGET [--follow]` ships every
+record — `prev`, `body`, `hash` intact, so the receiver re-verifies the
+chain rather than trusting the sender — to `syslog://host:514`,
+`syslog+tcp://host:6514`, an HTTPS collector (NDJSON, batched, bearer from
+the vault ref `audit.forward.token`), or stdout, from a cursor file that
+survives restarts and reports a log that shrank underneath it. Alerts ride
+beside the records for the seven things a person should see:
+`audit_chain_break`, `refused_identity`, `refused_attack`,
+`refused_invariant`, `clearance_refused`, `undeclared_target`,
+`layer1_only_executed`. Policy refusals are deliberately not alerts — they
+are the weekly policy-pressure metric, and paging on them pushes grants
+wider. The result record now carries `declared` and `layer2` so the last
+alert is possible. `scripts/systemd/taper-audit-forward.service`.
+
 **Three gaps from the readiness register closed.**
 
 - Configuration the agent can write is not configuration

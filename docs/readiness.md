@@ -110,9 +110,15 @@ vault with a good lock and one point of failure, which is the design this
 repository explicitly refuses to be.
 
 **Audit.** The hash-chained log is per host; `taper audit --verify` proves
-it intact. The organization-scale version ships it to a SIEM and alerts on
-chain breaks, refusals by bucket, and clearances. Export is a `jq` away
-today; a first-class forwarder is not built.
+it intact. `taper audit --forward syslog://… | https://… | stdout` ships
+each record with its `prev` and `hash`, so the collector re-verifies the
+chain rather than trusting the sender, from a cursor that survives
+restarts, with alerts beside the records for the seven things a person
+should see — a chain break, an identity or attack-shaped refusal, an
+invariant refusal, a tower refusal, a write to an undeclared target, and a
+layer-1-only operation that ran. Policy refusals are deliberately not
+alerts: they are the weekly pressure metric, and paging on them pushes
+grants wider. `scripts/systemd/taper-audit-forward.service` runs it.
 
 **Where it sits in the stack.** Okta or Entra own the human's identity;
 SPIFFE owns the workload's; the SaaS proxies own GitHub and Slack. Taper
@@ -133,8 +139,8 @@ means the design accepts it and says so; *open* means work not yet done;
 | 3 | A broker compromise yields what it holds | **built** | Layer 2. A total policy bypass yields what the target itself permits — a read on granted tables, the shim's allowlist. Verified with the broker removed. |
 | 4 | Side channels: the agent reads a secret from somewhere else | **inherent** | Taper is not a sandbox and says so in DESIGN.md §1. It bounds what a credential can *do*; a credential the agent finds elsewhere is the operator's problem. The PocketOS rig puts the password in the README on purpose to keep this honest. |
 | 5 | Revocation needs online state | **inherent** | Short TTLs are the answer, as for macaroons since 2014. One revocation list is shared by broker and tower, so a revoked token stops the next clearance. An issued clearance lives out its sixty seconds. |
-| 6 | Root key management | **open** | No rotation procedure. No HSM integration. The key that mints flight plans is a file. |
-| 7 | Single host, single operator | **open** | No multi-host story, no HA, no fleet management of policies or catalogs. A reference deployment for more than one host does not exist. |
+| 6 | Root key management | **built** | `root.pub` is a trust set; every root block names its signer by kid. `taper root rotate` adds a signing key and keeps the old one trusted; `taper root retire <kid>` drops it and every chain it signed stops verifying. `TAPER_ROOT_AGENT=1` signs through an SSH agent, so the root can live in a YubiKey or a Secure Enclave and never be a file this code reads. Seven red-team cases. |
+| 7 | Single host, single operator | **open** | No multi-host story, no HA, no fleet management of policies or catalogs. A reference deployment for more than one host does not exist. Audit forwarding (row 17) is the first piece of a fleet answer. |
 | 8 | Workload attestation: who may hold a root token at all | **open** | SPIFFE solves this and Taper does not integrate with it. Today, possession of the proving key file is the answer. |
 | 9 | The policy file and the catalog are agent-writable in the repository | **built** | `taper grant` refuses a symlinked, group- or world-writable policy or ops directory; `taper broker` refuses to start on an ops directory owned by a uid it accepts connections from; `taper doctor --agent-user` reports both. `--allow-writable-config` warns instead, loudly, and has no environment form. |
 | 10 | Typed surface fails to cover real tasks | **open, measured** | The falsification test. Declared operations and `taper coverage` are the relief and the measurement; a week of real use has not happened. |
@@ -143,6 +149,7 @@ means the design accepts it and says so; *open* means work not yet done;
 | 13 | SaaS targets | **out of scope** | GitHub, Slack, Salesforce need someone to hold a token. The design says: do not be the thing that stores it. A proxy is the right tool there. |
 | 14 | Prompt injection | **inherent, bounded** | Not prevented — Taper is not a model-layer control. Bounded: an injected instruction can only name an operation inside the grant, and the injected-run experiment showed exactly that. |
 | 15 | Bus factor | **open** | One maintainer. No second reviewer, no disclosure SLA beyond SECURITY.md's private reporting. |
+| 17 | The log is per host and nobody reads it | **built** | `taper audit --forward` ships records with their hashes to syslog or an HTTPS collector from a durable cursor, with a seven-item alert set; the collector can re-verify the chain independently. A compromised host can still stop forwarding — the gap that closes is "nobody was watching", not "a host cannot lie by silence". |
 | 16 | History-blind decisions | **open** | Nothing reads the sequence of an agent's actions at decision time; ACP names this. The target's `another_agent_active` is the only history signal. A stage-2 hold could carry "escalate after N". |
 
 ## 4. What is proven, and how
@@ -184,10 +191,11 @@ reaches it. Each item is one deliverable; none is started unless listed.
    version remains open and is what a reviewer would ask for next.
 3. ~~Policy and catalog at `/etc/taper`, enforced~~ — done 16 September
    (`taper/hardening.py`).
-4. **Root key in hardware, with a rotation runbook.** PKCS#11 or a TPM for
-   the root; a documented procedure for rotating it with overlapping
-   validity; `taper doctor` checks the key is not a plain file on a
-   production host.
+4. ~~Root key in hardware, with a rotation runbook~~ — done 16 September:
+   the trust set, `taper root rotate|retire|status`, and `TAPER_ROOT_AGENT`
+   for an agent-held key. A PKCS#11 path that does not go through an agent
+   remains open, and `taper doctor` does not yet object to a root key that
+   is a plain file on a production host.
 5. **SPIFFE for the workload.** A root grant is minted only to a workload
    whose SVID matches the policy's `workload` field. This is the item NIST
    names and the one that makes "which process may hold this" an attested
@@ -197,9 +205,7 @@ reaches it. Each item is one deliverable; none is started unless listed.
    an organization's fact rather than an operator's typing.
 7. ~~Signed releases, SBOM, SLSA provenance~~ — done 16 September in
    `release.yml`; first release to carry them is v0.4.0.
-8. **Audit forwarding.** A forwarder that ships the log to a SIEM over
-   syslog or HTTP with the chain hash on every record, and a documented
-   alert set: chain break, invariant refusal, clearance, wildcard mint.
+8. ~~Audit forwarding~~ — done 16 September (`taper/forward.py`).
 9. **A reference deployment for a fleet.** Three hosts, config management
    for policy and catalog, one Postgres with Tower, one SSH target with the
    shim, the checks run from a fourth host. Written as a runbook and kept
@@ -217,7 +223,7 @@ reaches it. Each item is one deliverable; none is started unless listed.
     property. A named second reviewer for every change to the six files in
     item 1, and a response time in SECURITY.md.
 
-Items 2, 3 and 7 are done. Items 4, 5, 6, 8 are a week or two each. Items
+Items 2, 3, 4, 7 and 8 are done. Items 5 (SPIFFE) and 6 (IdP-driven mint) are a week or two each. Items
 1, 9, 10, 12 need other people — a reviewer, an organization willing to
 pilot, a real workload — and are the ones that turn a project into a thing
 a company can adopt. The eight-week install window in PLAN.md is the clock
