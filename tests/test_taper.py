@@ -2631,3 +2631,20 @@ class TestIdP:
         m.check_and_remember(idp.seen, "x.y.z", {"jti": "old", "exp": NOW + 10},
                              now=NOW + 3600)
         assert len(json.loads(idp.seen.read_text())) < len(later) + 1
+
+    def test_a_max_ttl_that_is_not_a_duration_is_refused_at_load(self, idp):
+        """parse_duration raises ValueError, not SystemExit. The first draft
+        caught only SystemExit, so `max_ttl: "soon"` escaped this loader as an
+        unhandled ValueError instead of the refusal it promises. Found by the
+        equivalent test for the tower's hold policy, a week later."""
+        from taper import idp as m
+        for bad in ("soon", "", "8x", "-1h", "0s"):
+            doc = json.loads(idp.mapping.read_text())
+            doc["rules"][0]["max_ttl"] = bad
+            path = idp.mapping.parent / "ttl.json"
+            path.write_text(json.dumps(doc))
+            if bad == "":
+                assert m.Mapping.load(path).rules[0].max_ttl is None   # falsy: no cap
+                continue
+            with pytest.raises(m.IdPError, match="max_ttl"):
+                m.Mapping.load(path)

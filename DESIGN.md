@@ -348,6 +348,18 @@ Trust begins one step further back, and no further
 
 Who may mint is now the identity provider's answer, but *which* provider, and which keys, is still someone's decision written in a file — `idp.json` and the JWKS pinned beside it. Whoever can write those two files can decide who is Alice. `taper/hardening.py` refuses them when the agent can write them, which moves the question to the operator's configuration management and does not dissolve it. This is the same shape as the root key itself, and it is not removable: a trust root that nobody chose is not a trust root.
 
+The minting key exists whole, in one place
+
+\[architectural\]
+
+Stage 2 put the tower under its own uid, so the CA key is 0600 in a directory the broker cannot open and "the broker cannot mint" is a permission rather than a sentence about code paths. The key is still one file that one process can read. The design in docs/no-vault.md calls for a two-party threshold signature — FROST, for the Ed25519 keys — so that no single host ever holds a usable one. It is not built, and it is not being hand-rolled: implementing a threshold scheme on the credential path is a larger risk than the one it removes, which is the same judgement that keeps a hand-written gRPC client off the SPIFFE path. What is reachable without inventing cryptography is a PKCS#11 or TPM-backed CA key that refuses to export — the key exists, but nowhere it can be copied from — and the signing call is one seam away from accepting one.
+
+The target's invariants are checked after the signature
+
+\[architectural\]
+
+`taper.invariants()` runs in the executor, which means the tower signs and then the target objects, and the objection is the broker's to report rather than the tower's to act on. The write still stops; what is missing is that the co-signer never heard the target's answer. Moving the probe in front of the signature means the tower holding its own read-only connection to every target it clears for — a network that the stage 2 unit deliberately does not give it (`PrivateNetwork=yes`). This gap and the one above want resolving together, and neither is closed by pretending the other is.
+
 Revocation requires online state
 
 \[inherent\]

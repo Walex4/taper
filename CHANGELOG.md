@@ -5,6 +5,59 @@ is written to be read on its own.
 
 ## Unreleased
 
+**Tower stage 2: the independence is a uid, not a code path.** Stage 1's
+tower re-verified every decision with its own copy of the root key and then
+minted — as a class inside the broker's process, where root reads the CA key
+and mints whatever it likes. `tower serve` makes it a process.
+
+- `tower/serve.py` and `tower/client.py`: the tower behind an AF_UNIX socket
+  with SO_PEERCRED, its CA key 0600 in a directory 0700 to a uid the broker
+  is not, `PrivateNetwork=yes` in the unit so it can reach nothing at all.
+  **`ClearedBroker` and `ClearedExecutor` are unmodified**: they hold a
+  `RemoteTower` in place of a `Tower` and cannot tell. Stage 1's docstring
+  promised that; it is now a test rather than a claim.
+- **The broker's plan is checked, not obeyed.** Moving the key alone would
+  have closed the wrong half — the broker could no longer sign, and could
+  still choose what the certificate it asked for authorised. The tower now
+  revalidates the request against the typed schema, re-derives every
+  attribute, rechecks each against the grant it verified, and builds the plan
+  itself with its own adapters; a plan that differs is refused and the
+  certificate is minted from the tower's either way. Every clearance record
+  carries `plan_checked` and `asked_by`, so the tape distinguishes a tower
+  that checked from one that took the broker's word, and names the uid the
+  kernel reported.
+- **Holds** (`tower/hold.py`): named operations wait for a person. Nothing is
+  minted while a hold waits, because material that exists before the approval
+  can be stolen before the approval. A release authorises one request, once —
+  the key is a hash over the token, the operation and the request, so
+  approving `SELECT … WHERE id = 1` never approves `id = 2`. `tower hold
+  list|release|deny`, authorised by SO_PEERCRED against an approver uid that
+  `tower serve` refuses to start unless it is *different* from the asker's.
+- **Fail closed.** A tower that is unreachable answers "I have an SSH CA" to
+  the broker's capability check, so an ssh or aws plan routes to it and fails
+  with a reason, instead of silently falling back to the long-lived vault
+  identity. Revocation crosses the boundary in the narrowing direction only:
+  the broker can tell the tower to refuse more, and there is no call that
+  makes it refuse less. The tower keeps its own list (`tower revoke`) that the
+  broker cannot write.
+- `scripts/setup-tower-user.sh` and `scripts/systemd/taper-tower.service`. The
+  script creates a **new** CA rather than copying the broker's: a key the
+  broker's uid has held is a key it may still hold a copy of, and migrating it
+  would carry that forward silently. It says what has to be re-trusted.
+- Red team: section 15, thirty-six cases, 231 in all.
+- Two pieces of the original stage 2 description are **not** built and are now
+  their own entries in DESIGN.md §9 and the readiness register: the **split
+  key** (FROST), which is not being hand-rolled on the credential path, and
+  moving the **invariants probe before the signature**, which needs the tower
+  to hold connections the hardened unit deliberately denies it.
+
+**Fixed: a malformed `max_ttl` in the IdP mapping escaped as a `ValueError`.**
+`taper/idp.py` caught `SystemExit` around `parse_duration`, which raises
+`ValueError` — so `max_ttl: "soon"` crashed the mint instead of being refused
+at load with the message the loader promises. Found by writing the equivalent
+test for the tower's hold policy. A zero or negative ceiling is now refused
+too, in both loaders.
+
 **A login mints, instead of an operator typing.** `taper grant --id-token
 ./token.jwt --key-file k` verifies an OIDC ID token and takes three things
 from it rather than from the command line: the **subject** is a claim the

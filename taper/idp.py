@@ -311,8 +311,16 @@ class Mapping:
             if raw.get("max_ttl"):
                 try:
                     ttl = parse_duration(str(raw["max_ttl"]))
-                except SystemExit:
-                    raise IdPError(f"{where}: max_ttl {raw['max_ttl']!r} is not a duration") from None
+                except (ValueError, SystemExit):
+                    # parse_duration raises ValueError, not SystemExit. Catching
+                    # only the latter let a mapping with max_ttl: "soon" escape
+                    # as an unhandled ValueError instead of the refusal this
+                    # loader promises - found by the equivalent test for holds.
+                    raise IdPError(f"{where}: max_ttl {raw['max_ttl']!r} is not a "
+                                   f"duration") from None
+                if ttl <= 0:
+                    raise IdPError(f"{where}: max_ttl {raw['max_ttl']!r} is not a "
+                                   f"lifetime")
             workload = raw.get("workload") or ""
             if workload:
                 from .spiffe import valid_pattern

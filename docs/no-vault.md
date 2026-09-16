@@ -114,18 +114,43 @@ What it removes: assumption 3, and most of the value of stealing the vault. A
 stolen vault yields the ability to mint, not a credential. What it does not
 remove: the minting key exists at rest, in one place.
 
-### Stage 2 — Split the seed
+### Stage 2 — A uid, a checked plan, and a person where one is wanted
 
-The minting key is never whole. For Ed25519 (SSH CAs, Taper's own root) a
-two-party threshold scheme — FROST — gives two shares that jointly sign and
-never combine. For keys that cannot be split cleanly, a TPM or HSM that
-refuses to export the key is the practical equivalent: the key exists, but
-nowhere you can copy it from.
+*Built 16 September 2026, except the split key.*
 
-One share lives in the broker. The other lives in the tower. The tower signs
-only against a verified decision and, where required, a released hold. The
-tower has no network, no shell, no vault, and a code path small enough to
-read in an afternoon.
+The tower is a process. `tower serve` runs it under its own user, with the CA
+key 0600 in a directory 0700 to a uid the broker is not, `PrivateNetwork=yes`
+so it can reach nothing, and SO_PEERCRED on every request so the tape records
+which uid asked rather than assuming. `ClearedBroker` and `ClearedExecutor`
+were not modified for any of it — they hold a `RemoteTower` in place of a
+`Tower` and cannot tell, which is what stage 1's interface was written for.
+
+Moving the key would have closed the wrong half on its own. A broker that can
+no longer sign can still *choose what is signed*, and a certificate for the
+wrong statement is as useful to an attacker as the key. So the tower rebuilds
+the plan: it revalidates the request against the typed schema, re-derives
+every attribute, rechecks each against the grant it verified, and constructs
+the plan with its own adapters from its own read of the declarations. A
+broker plan that differs is refused, by name, on the tape. The co-signer
+stopped being a second signature on the broker's arithmetic and became a
+second party doing the arithmetic.
+
+And some operations should wait for a person. A hold names them; while one
+waits **nothing is minted**, because material that exists before the approval
+can be stolen before it. A release covers one request, once — the key is a
+hash over the token, the operation and the request — and the approver is a
+uid the kernel identifies, which `tower serve` refuses to start unless it is
+different from the uid that asks.
+
+**What is still open, and named as such.** The minting key is never whole was
+the original promise of this stage, and it is not kept: the CA key is one file
+that one process can read. For Ed25519 a two-party threshold scheme — FROST —
+gives two shares that jointly sign and never combine; for keys that cannot be
+split cleanly, a TPM or HSM that refuses to export is the practical
+equivalent. Neither is built. The threshold scheme is not being hand-rolled on
+the credential path, for the same reason a gRPC client is not hand-rolled on
+the SPIFFE path: the implementation risk is larger than the risk it removes.
+The non-exportable key is one seam away and is the honest next step.
 
 What it removes: assumption 2. There is no moment at which a usable credential,
 or the key that mints one, exists in one place. A broker compromise yields
@@ -331,7 +356,7 @@ clearance is a small one: one operation, sixty seconds. It never overrides
 the runway: the target's own role privileges and its own invariants are
 consulted with the tower's clearance in hand and the tower's opinion
 disregarded, and stage 3 has the target check the flight plan itself. In
-stage 2 the broker and the tower each hold half a key, so an error has to
+stage 2 as designed the broker and the tower each hold half a key, so an error has to
 occur in both plus a valid chain. Every clearance is on the tape beside the
 decision it rested on, and revoking the token is the go-around — one
 revocation list, shared by broker and tower, so no second call is needed.
@@ -386,15 +411,18 @@ vault key in the declaration's `secrets.env`, if any, is not injected
 beside it. The loader refuses an action wildcard and a resource wildcard —
 the second was found by the red team, not by design.
 
-Two things this stage still does not do: the tower is a class in the
-broker's process, so its independence is a property of the code path and
-not yet of a uid boundary — that is stage 2, and the interface was written
-so that stage 2 is a transport change. And the invariants probe runs
-*under* the clearance rather than before it: the certificate is issued,
-the connection is made with it, the target is asked, and only then does
-the write run or not. The clearance is still one operation and sixty
-seconds, and a refusal by the target is on the tape beside it; stage 2
-reorders this so the tower does not sign until the runway has answered.
+Two things this stage did not do. The first is closed: the tower was a class
+in the broker's process, so its independence was a property of the code path
+and not of a uid boundary — `tower serve` makes it a uid, and the interface
+did turn out to be a transport change, which is the only part of this
+document that was a prediction. The second is still open: the invariants
+probe runs *under* the clearance rather than before it. The certificate is
+issued, the connection is made with it, the target is asked, and only then
+does the write run or not. The clearance is still one operation and sixty
+seconds and a refusal by the target is on the tape beside it — but the tower
+signed before the runway answered, and reordering that means giving the tower
+its own read-only connection to every target, which is exactly the network
+the hardened unit denies it. That and the split key want resolving together.
 
 Working name for the track: **Tower**. Its own package now; its own
 repository when it is more than one stage. The clearance as a UML sequence

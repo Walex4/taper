@@ -494,6 +494,9 @@ taper/ops.py          typed operation schemas (rule 1)
 taper/rootkey.py      the trust set, rotation, and signing through an ssh-agent
 taper/spiffe.py       which workload may hold a grant, attested by SPIRE
 taper/idp.py          an OIDC login decides the subject, the policy and the ceiling
+tower/clearance.py    the co-signer: re-verifies, rebuilds the plan, mints for one operation
+tower/serve.py        stage 2: the tower under its own uid, behind a socket
+tower/hold.py         which operations wait for a person, and who may answer
 taper/forward.py      ship the tape to syslog or a collector, with alerts
 taper/hardening.py    configuration the agent can write is not configuration
 taper/declared.py     an operation as a JSON file, compiled to the same thing
@@ -636,7 +639,7 @@ refuses anyone else before a token is even parsed. Set the socket's group to the
 ## Tests and validation
 
 ```bash
-make validate    # preflight + the test suite + 195 attacks + the algebra check. The release gate.
+make validate    # preflight + the test suite + 231 attacks + the algebra check. The release gate.
 ```
 
 Four layers, and they check different things:
@@ -644,7 +647,7 @@ Four layers, and they check different things:
 | Command | Checks | Needs |
 |---|---|---|
 | `pytest` | the code does what you meant — 273 tests | nothing |
-| `python validate/redteam.py` | the system refuses what someone *else* meant — 195 attacks | nothing |
+| `python validate/redteam.py` | the system refuses what someone *else* meant — 231 attacks | nothing |
 | `bash scripts/preflight.sh` | this machine can host a broker safely | nothing |
 | `python validate/check_postgres.py <dsn>` | **the database refuses on its own** | a real Postgres |
 | `bash validate/check_ssh.sh <host> <key>` | **sshd refuses on its own** | a real target host |
@@ -686,7 +689,7 @@ stacked statements classifying as `SELECT`, the real pgAdmin backslash payload
 getting through, `pg_read_file` passing as a plain select because it touched no
 table, and `/v1/../../admin` satisfying a `/v1/` prefix. All four are fixed and
 pinned by regression tests. Expect it to find more when you extend the adapters.
-[`docs/redteam.md`](docs/redteam.md) walks through the cases (fifty-nine at v0.1.1, eighty-one at v0.2.1, one hundred and ninety-five now), the
+[`docs/redteam.md`](docs/redteam.md) walks through the cases (fifty-nine at v0.1.1, eighty-one at v0.2.1, two hundred and thirty-one now), the
 four bypasses with their fixes, and what the harness does not prove.
 
 ## Binding a grant to a workload
@@ -817,6 +820,91 @@ invariants, and a layer-1-only operation that ran. Policy refusals are *not*
 alerts — they are the weekly pressure metric, and paging on them is how grants
 get wider. `scripts/systemd/taper-audit-forward.service` runs it as the broker
 user.
+
+## The tower under its own uid
+
+Tower stage 1 is a co-signer that re-verifies every decision with its own copy
+of the root key before minting a credential for one operation. It is a class
+in the broker's process, which makes the independence a code path: root in
+that process reads the CA key and mints whatever it likes.
+
+Stage 2 makes it a uid.
+
+```bash
+sudo bash scripts/setup-tower-user.sh     # the user, the 0700 home, a new CA, the unit
+systemctl enable --now taper-tower
+sudo -u taper-broker tower status         # uid=…, plan_checked=True
+
+systemctl edit taper-broker               # Environment=TAPER_TOWER_SOCKET=/run/taper/tower.sock
+systemctl restart taper-broker
+```
+
+`ClearedBroker` and `ClearedExecutor` are not modified for this: they hold a
+`RemoteTower` instead of a `Tower` and cannot tell. That was the point of
+writing the stage 1 interface the way it was written, and it is now checked
+rather than asserted.
+
+Three things change, and they are the whole of it:
+
+**The CA key is 0600 in a directory 0700 to a uid the broker is not.** `sudo -u
+taper-broker cat /var/lib/taper-tower/ca.key` is Permission denied, from the
+kernel. The unit adds `PrivateNetwork=yes`, so the tower cannot reach anything
+at all — it reads a chain, a request and a proof over a unix socket and signs
+or does not.
+
+**The broker's plan is checked rather than obeyed.** Moving the key behind a
+boundary would have closed the wrong half on its own: the broker could no
+longer mint, and could still choose what the certificate it asked for
+authorised. So the tower revalidates the request against the typed schema,
+re-derives every attribute, rechecks each against the grant it verified, and
+builds the plan itself. A broker that planned a different statement, a
+different host or another vault entry than the request names gets a refusal
+that says so, and the certificate is minted from the tower's plan either way.
+Every clearance record carries `plan_checked`, so a reader of the tape can
+tell a tower that checked from one that took the broker's word.
+
+**A tower that is down mints nothing.** Not a fallback to the vault — that
+would turn an outage into a silent downgrade to the long-lived credential,
+which is the failure this design exists to remove.
+
+### Holds: operations that wait for a person
+
+`/var/lib/taper-tower/holds.json`, which only the tower's uid can write:
+
+```json
+{
+  "ttl": "10m",
+  "rules": [
+    {"operation": "pg.migrate", "reason": "a schema change is a person's call"},
+    {"operation": "ssh.exec", "when": {"program": ["systemctl", "rm"]},
+     "reason": "restarting a service is not a build step"}
+  ]
+}
+```
+
+```bash
+tower serve … --approver-user alice      # refuses to start if alice may also ask
+tower hold list                          # what is waiting, with the attributes
+tower hold release <key>                 # or: tower hold deny <key>
+```
+
+Every PAM product has approval workflows; they approve a *human* getting a
+*session*, and the approval flips a flag that unlocks a stored credential.
+This is the same idea one level down. The thing approved is one typed
+operation by an agent, with the human it acts for named in the token, and the
+approval does not unlock anything: nothing is minted while the hold waits,
+because material that exists before the approval is material that can be
+stolen before the approval. A release authorises that exact request, once —
+approving `SELECT … WHERE id = 1` never approves `id = 2`, and the agent's
+next attempt spends it. The approver must be a different uid from the asker
+and `tower serve` refuses to start otherwise, because an approver that can
+also ask is a rubber stamp with extra steps.
+
+What stage 2 does **not** claim: the broker still receives the minted
+credential, because the broker is what runs the operation. What it loses is
+the ability to mint one. Removing the last part is stage 3 — the target
+verifies the token itself and no credential exists — and
+[`docs/no-vault.md`](docs/no-vault.md) says how.
 
 ## Verifying a release
 

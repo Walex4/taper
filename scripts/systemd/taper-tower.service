@@ -1,0 +1,72 @@
+# Stage 2: the tower as its own process, under its own uid.
+#
+# The whole of the boundary is in three lines of this file — User=taper-tower,
+# a home the broker's uid cannot open, and PrivateNetwork=yes. Everything
+# else is hardening around them.
+#
+# Set it up with scripts/setup-tower-user.sh, which creates the user, the
+# 0700 home, the CA, the socket directory and the group the broker joins.
+#
+#   systemctl enable --now taper-tower
+#   sudo -u taper-broker tower status          # should print uid=… plan_checked=True
+#
+# Then point the broker at it and restart it:
+#   systemctl edit taper-broker  ->  Environment=TAPER_TOWER_SOCKET=/run/taper/tower.sock
+
+[Unit]
+Description=taper tower — mints one credential per verified decision
+Documentation=https://github.com/Walex4/taper/blob/main/docs/no-vault.md
+Before=taper-broker.service
+
+[Service]
+Type=simple
+User=taper-tower
+Group=taper-tower
+# Its own copy of everything it needs to decide. The root public key is the
+# tower's own file: it verifies chains itself, which is the point of it.
+Environment=TAPER_TOWER=/var/lib/taper-tower
+Environment=TAPER_OPS=/etc/taper/ops
+ExecStart=/usr/local/bin/tower serve \
+    --socket /run/taper/tower.sock \
+    --allow-user taper-broker \
+    --root-pub /var/lib/taper-tower/root.pub \
+    --audit /var/lib/taper-tower/audit.jsonl
+Restart=always
+RestartSec=2
+
+# The socket directory, shared with the broker by group. RuntimeDirectory is
+# cleaned on stop, so a dead tower leaves no stale socket for the broker to
+# hang on — it gets "no tower at …" and mints nothing, which is correct.
+RuntimeDirectory=taper
+RuntimeDirectoryMode=0750
+
+# The tower talks to nothing. It reads a chain, a request and a proof over a
+# unix socket and signs or does not; it has no reason to open a port, and a
+# tower that cannot reach the network cannot be made to exfiltrate its key.
+# (Remove this only if an STS seed is configured — AssumeRole needs egress.)
+PrivateNetwork=yes
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/taper-tower
+# The declared operations are read, never written — by anyone, but especially
+# not by the process whose whole job is to check them.
+ReadOnlyPaths=/etc/taper
+
+[Install]
+WantedBy=multi-user.target

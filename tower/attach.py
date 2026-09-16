@@ -26,7 +26,26 @@ def attach(root_pub, adapters, audit_path, secrets, *, require_proof: bool = Fal
            env: Optional[dict] = None, role: str = "taper_agent", spiffe_bundle=None):
     """Return (broker, executor). Cleared if TAPER_TOWER is set, plain if not."""
     env = os.environ if env is None else env
+    # Stage 2 first: a tower at the other end of a socket needs no CA key, no
+    # ops directory and no directory at all on this host, because it reads
+    # all of that for itself over there. TAPER_TOWER_SOCKET wins over
+    # TAPER_TOWER, and naming both is a mistake worth saying out loud.
+    # verified-by: tests/test_tower.py::TestAttach::test_a_socket_attaches_a_remote_tower
+    socket_path = env.get("TAPER_TOWER_SOCKET", "").strip()
     where = env.get("TAPER_TOWER", "").strip()
+    if socket_path:
+        from .broker import ClearedBroker
+        from .client import RemoteTower
+        from .executor import ClearedExecutor
+
+        tower = RemoteTower(Path(socket_path).expanduser())
+        broker = ClearedBroker(root_pub=root_pub, adapters=adapters,
+                               audit_path=audit_path, secrets=secrets.get,
+                               require_proof=require_proof, tower=tower,
+                               role=env.get("TAPER_TOWER_ROLE", role),
+                               ssh_user=env.get("TAPER_TOWER_SSH_USER", "taper-agent"),
+                               spiffe_bundle=spiffe_bundle)
+        return broker, ClearedExecutor(secrets, tower), tower
     if not where:
         broker = Broker(root_pub=root_pub, adapters=adapters, audit_path=audit_path,
                         secrets=secrets.get, require_proof=require_proof,
@@ -50,9 +69,21 @@ def attach(root_pub, adapters, audit_path, secrets, *, require_proof: bool = Fal
                    for name, a in adapters.items()
                    if getattr(a, "definition_hash", None) is not None}
     ops_dir = env.get("TAPER_OPS", "").strip()
+    tower_adapters: dict = {}
     if ops_dir:
         from taper.declared import load_dir
-        definitions = load_dir(Path(ops_dir).expanduser()).hashes()
+        catalog = load_dir(Path(ops_dir).expanduser())
+        definitions = catalog.hashes()
+        # The tower's own adapters, from the tower's own read of the same
+        # files. It uses these to build the plan itself rather than take the
+        # broker's - see Tower.clear(). In-process this is one read in one
+        # process and the independence is nominal, as it has always been;
+        # behind `tower serve` it is the tower's process doing the reading.
+        from taper.adapters import default_adapters
+        tower_adapters = default_adapters()
+        tower_adapters.update(catalog.adapters(
+            ssh_adapter=tower_adapters["ssh.exec"],
+            http_adapter=tower_adapters["http.request"]))
     # Stage 1 for SSH: present when `tower init --ssh` (or `tower ssh-ca init`)
     # has put an Ed25519 CA beside the X.509 one. Absent, SSH keeps the vault
     # identity and only Postgres is cleared.
@@ -68,8 +99,12 @@ def attach(root_pub, adapters, audit_path, secrets, *, require_proof: bool = Fal
         sts = STS(seed_id, seed_secret, region=env.get("AWS_REGION", "us-east-1"),
                   endpoint=env.get("TAPER_STS_ENDPOINT") or None,
                   session_token=secrets.get("aws.seed.session_token"))
+    if not tower_adapters:
+        from taper.adapters import default_adapters
+        tower_adapters = default_adapters()
     tower = Tower(ca=CA.load(directory), root_pub=root_pub,
                   audit=AuditLog(Path(audit_path)), definitions=definitions,
+                  adapters=tower_adapters,
                   ssh_ca=ssh_ca, shim=env.get("TAPER_SHIM", "/usr/local/libexec/taper-shim"),
                   sts=sts)
     broker = ClearedBroker(root_pub=root_pub, adapters=adapters, audit_path=audit_path,

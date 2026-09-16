@@ -390,6 +390,9 @@ def run(report: Report, tmp: Path) -> None:
     section("9. The tower — nothing but a verified decision mints a credential")
     from taper.audit import AuditLog as _Audit
     from tower.ca import CA as _CA
+    from taper.audit import AuditLog
+    from taper.broker import Decision
+    import os
     from tower.clearance import ClearanceRefused as _Refused, Tower as _Tower
     from taper.broker import Decision as _Decision
     tower_ = _Tower(ca=_CA.create(), root_pub=root.public_key(),
@@ -1044,6 +1047,197 @@ def run(report: Report, tmp: Path) -> None:
     report.check("idp: no HMAC or `none` algorithm exists to be selected",
                  "none" not in _idp.ALGORITHMS
                  and not any(a.startswith("HS") for a in _idp.ALGORITHMS))
+
+    # ---------------------------------------------------------------------
+    section("15. Tower stage 2 - the broker's plan is a claim, and the uid is not")
+    import threading as _threading
+    from taper.adapters import PostgresAdapter as _PG
+    from tower.clearance import Tower as _Tower, plan_fingerprint as _fp
+    from tower.client import RemoteTower as _RemoteTower
+    from tower.hold import HoldPolicy as _HoldPolicy, Holds as _Holds, hold_key as _hkey
+    from tower.serve import TowerServer as _TowerServer
+    from tower.ca import CA as _CA
+
+    _s2dir = tmp / "stage2"
+    _s2dir.mkdir(exist_ok=True)
+    _pg_caps = {"pg.query": {"database": OneOf(["pocketos"]),
+                             "statement_kind": OneOf(["select"]),
+                             "tables": Subset(["public.orders"]),
+                             "max_rows": Range(0, 100)}}
+    _select = {"database": "pocketos", "statement": "SELECT * FROM public.orders",
+               "max_rows": 10}
+    _s2tok = Token.issue(root, _pg_caps, ttl_seconds=3600, now=NOW, subject="alice@e.com")
+    _s2wire = _s2tok.serialize()
+    _s2proof = lambda req: prove(_s2tok.proving_key(), _s2wire, "pg.query", req, now=NOW)
+
+    def _s2tower(holds=None, adapters=True):
+        return _Tower(ca=_CA.create(), root_pub=root.public_key(),
+                      audit=AuditLog(tmp / "stage2-audit.jsonl"), clock=lambda: NOW,
+                      adapters={"pg.query": _PG()} if adapters else {},
+                      issued_by="tower:uid=test", holds=holds)
+
+    def _s2plan(request):
+        from taper import ops as _o
+        return _PG().plan(_o.get("pg.query").validate(request), _pg_caps["pg.query"])
+
+    def _s2decision(plan, **kw):
+        fields = {"allowed": True, "reason": "ok", "operation": "pg.query",
+                  "attributes": {}, "plan": plan,
+                  "token_ids": _s2tok.revocation_ids(), "subject": "alice@e.com"}
+        fields.update(kw)
+        return Decision(**fields)
+
+    def _s2refused(name, tower, request, decision, proof=None):
+        from tower.clearance import ClearanceRefused as _CR
+        try:
+            tower.clear(_s2wire, "pg.query", request,
+                        _s2proof(request) if proof is None else proof,
+                        decision, "taper_agent")
+            report.check(name, False, "a clearance was issued")
+        except _CR as exc:
+            report.check(name, True, str(exc)[:70])
+
+    # --- the broker's plan is checked, not obeyed
+    _t = _s2tower()
+    _s2refused("stage2: a plan naming a statement nobody asked for is refused",
+               _t, _select, _s2decision(_s2plan(dict(_select,
+                   statement="SELECT * FROM public.orders LIMIT 1"))))
+    # a hand-built plan whose argv the broker edited after planning
+    _edited = _s2plan(_select)
+    _edited.detail["statement_text"] = "DROP TABLE public.orders"
+    _s2refused("stage2: a plan edited after the decision is refused",
+               _t, _select, _s2decision(_edited))
+    _edited2 = _s2plan(_select)
+    _edited2.secret_refs["dsn"] = "root.dsn"
+    _s2refused("stage2: a plan pointing at another vault entry is refused",
+               _t, _select, _s2decision(_edited2))
+    _s2refused("stage2: a decision with no plan at all is refused",
+               _t, _select, _s2decision(None))
+    # the honest one still works, and says the tower checked
+    _ok = _t.clear(_s2wire, "pg.query", _select, _s2proof(_select),
+                   _s2decision(_s2plan(_select)), "taper_agent")
+    report.check("stage2: the honest plan is cleared and the tape says plan_checked",
+                 [r["body"] for r in _t.audit.read()
+                  if r["body"].get("record") == "clearance"][-1]["plan_checked"] is True)
+    report.check("stage2: two different statements never share a plan fingerprint",
+                 _fp(_s2plan(_select)) != _fp(_s2plan(dict(_select,
+                     statement="SELECT id FROM public.orders"))))
+
+    # --- a request outside the grant, with a decision that says allow
+    _wide = dict(_select, statement="SELECT * FROM public.secrets")
+    _s2refused("stage2: a request outside the grant is refused even when the "
+               "broker allowed it", _s2tower(), _wide, _s2decision(_s2plan(_wide)))
+    _bad_schema = dict(_select, shell="/bin/sh")
+    _s2refused("stage2: a request the schema refuses never reaches the CA",
+               _s2tower(), _bad_schema, _s2decision(None))
+
+    # --- the socket
+    _sock_tower = _s2tower()
+    _server = _TowerServer(_sock_tower, tmp / "rt-tower.sock",
+                           allowed_uids={os.getuid()})
+    _server.start()
+    _threading.Thread(target=_server.serve_forever, daemon=True).start()
+    _client = _RemoteTower(tmp / "rt-tower.sock", timeout=10)
+    report.check("stage2: a clearance over the socket carries real material",
+                 _client.clear(_s2wire, "pg.query", _select, _s2proof(_select),
+                               _s2decision(_s2plan(_select)), "taper_agent").kind == "sql")
+    for _junk in ({"call": "mint"}, {"call": "take", "clearance": None},
+                  {"call": "clear", "token": "x", "operation": "y", "request": {},
+                   "role": "r", "decision": {"plan": "not-a-plan"}},
+                  {"call": "clear", "token": "x", "operation": "y", "request": {},
+                   "role": "r", "decision": {}, "sneak": True},
+                  {"call": "revoke", "id": ""}, {"call": "release", "key": "x"},
+                  {"call": "holds"}):
+        _a = _client._call(_junk)
+        report.check(f"stage2: the socket refuses {_junk.get('call')!r} shaped like that",
+                     _a.get("ok") is False, str(_a.get("refused"))[:60])
+    # a uid the tower does not know is refused before the parser
+    _closed = _TowerServer(_s2tower(), tmp / "rt-closed.sock",
+                           allowed_uids={os.getuid() + 4242})
+    _closed.start()
+    _threading.Thread(target=_closed.serve_forever, daemon=True).start()
+    _a = _RemoteTower(tmp / "rt-closed.sock", timeout=10)._call({"call": "status"})
+    report.check("stage2: an unlisted uid is refused before its request is parsed",
+                 _a.get("ok") is False and "may not ask" in _a.get("refused", ""))
+    _closed.close()
+    # an unreachable tower does not fall back to the vault
+    _gone = _RemoteTower(tmp / "rt-nothing.sock", timeout=2)
+    report.check("stage2: an unreachable tower answers 'has an SSH CA' so the plan "
+                 "fails closed instead of using the vault identity",
+                 _gone.ssh_ca is not None and _gone.sts is not None)
+    try:
+        _gone.clear(_s2wire, "pg.query", _select, _s2proof(_select),
+                    _s2decision(_s2plan(_select)), "taper_agent")
+        report.check("stage2: an unreachable tower mints nothing", False)
+    except Exception as exc:                                   # noqa: BLE001
+        report.check("stage2: an unreachable tower mints nothing",
+                     "no tower at" in str(exc), str(exc)[:60])
+    _server.close()
+
+    # --- holds
+    _policy_path = _s2dir / "holds.json"
+    _policy_path.write_text(json.dumps({"ttl": "10m", "rules": [
+        {"operation": "pg.query", "when": {"statement_kind": ["select"]},
+         "reason": "held in the red team"}]}))
+    _holds = _Holds(_HoldPolicy.load(_policy_path))
+    _ht = _s2tower(holds=_holds)
+    _s2refused("stage2: a held operation mints nothing", _ht, _select,
+               _s2decision(_s2plan(_select)))
+    report.check("stage2: nothing was minted while the hold waits",
+                 _ht._issued == {} and len(_holds.waiting(NOW)) == 1)
+    _key = _holds.waiting(NOW)[0]["key"]
+    # a release is for one request, once
+    _holds.release(_key, {"uid": 1}, NOW)
+    _ht.clear(_s2wire, "pg.query", _select, _s2proof(_select),
+              _s2decision(_s2plan(_select)), "taper_agent")
+    _s2refused("stage2: a release is spent by the request that used it", _ht, _select,
+               _s2decision(_s2plan(_select)))
+    # a release for one request does not cover another
+    _other = dict(_select, statement="SELECT id FROM public.orders")
+    _holds.release(_key, {"uid": 1}, NOW)
+    _s2refused("stage2: a release for one request does not cover another", _ht, _other,
+               _s2decision(_s2plan(_other)))
+    report.check("stage2: a hold key is per request, not per operation",
+                 _hkey("t", "pg.query", _select) != _hkey("t", "pg.query", _other))
+    report.check("stage2: a hold key is per token, not global",
+                 _hkey("t1", "pg.query", _select) != _hkey("t2", "pg.query", _select))
+    # a denial sticks
+    _key2 = [w["key"] for w in _holds.waiting(NOW)
+             if w["key"] != _key][0] if len(_holds.waiting(NOW)) > 1 \
+        else _holds.waiting(NOW)[0]["key"]
+    _holds.deny(_key2, {"uid": 9}, NOW)
+    report.check("stage2: a denied hold cannot be released afterwards",
+                 _key2 not in _holds.pending)
+    # the policy file refuses what it cannot mean
+    from tower.hold import HoldError as _HoldError
+    for _bad, _why in [({"rules": [{"operation": ""}]}, "an empty operation"),
+                       ({"rules": [{"operation": "x", "when": ["a"]}]}, "a when that is a list"),
+                       ({"rules": [{"operation": "x", "bypass": True}]}, "an unknown key in a rule"),
+                       ({"rules": [], "auto_approve": True}, "an unknown key"),
+                       ({"ttl": "soon", "rules": []}, "a ttl that is not a duration"),
+                       ({"ttl": "0s", "rules": []}, "a zero ttl")]:
+        _p = _s2dir / "bad-holds.json"
+        _p.write_text(json.dumps(_bad))
+        try:
+            _HoldPolicy.load(_p)
+            report.check(f"stage2: {_why} is refused at load", False, "it loaded")
+        except _HoldError as exc:
+            report.check(f"stage2: {_why} is refused at load", True, str(exc)[:70])
+    # the approver is not the asker
+    _hserver = _TowerServer(_s2tower(holds=_Holds(_HoldPolicy.load(_policy_path))),
+                            tmp / "rt-hold.sock", allowed_uids={os.getuid()},
+                            approver_uids={os.getuid() + 7777})
+    _hserver.start()
+    _threading.Thread(target=_hserver.serve_forever, daemon=True).start()
+    _hc = _RemoteTower(tmp / "rt-hold.sock", timeout=10)
+    for _call in ("holds", "release", "deny"):
+        _a = _hc._call({"call": _call, "key": "whatever"})
+        report.check(f"stage2: the asker's uid cannot {_call}",
+                     _a.get("ok") is False and "may not answer holds" in _a.get("refused", ""))
+    _hserver.close()
+
+    intact, _ = _sock_tower.audit.verify()
+    report.check("stage2: every stage 2 refusal is on an intact tape", intact)
 
     # ---------------------------------------------------------------------
     section("8. Audit integrity")

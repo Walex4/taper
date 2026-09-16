@@ -26,11 +26,22 @@ class ClearedBroker(Broker):
         self.tower = tower
         self.role = role
         self.ssh_user = ssh_user
-        # One revocation list, shared. Revoking a token at the broker is the
-        # go-around: from that moment the tower refuses every clearance the
-        # token or any child of it asks for, without a second call.
+        # Revoking a token at the broker is the go-around: from that moment
+        # the tower refuses every clearance the token or any child of it asks
+        # for. In one process that is one shared set and needs no message;
+        # across a uid boundary it is a message, and `revoke()` below sends
+        # it. Either way the tower keeps its own list too, and that one an
+        # operator writes and the broker cannot touch.
         # verified-by: tests/test_tower.py::TestClearedBroker::test_revoking_at_the_broker_is_a_go_around_at_the_tower
-        self.tower.revoked = self.revoked
+        # verified-by: tests/test_tower.py::TestTowerSocket::test_a_revocation_crosses_the_boundary_one_way
+        self.tower.share_revocations(self.revoked)
+
+    def revoke(self, revocation_id: str) -> None:
+        super().revoke(revocation_id)
+        # In-process this is the same set twice and costs nothing. Remote it
+        # is the one call that crosses the boundary in the narrowing
+        # direction, which is the only direction it is safe to cross in.
+        self.tower.revoke(revocation_id)
 
     def decide(self, token_text: str, operation: str, request: dict,
                peer: Optional[dict] = None, proof: Optional[dict] = None) -> Decision:

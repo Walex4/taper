@@ -2481,3 +2481,65 @@ class TestIdPCLI:
                             "jwks_uri": "https://login.example.com/keys"}
         with pytest.raises(SystemExit, match="discovery document names issuer"):
             cli.main(["idp", "refresh"])
+
+
+# ------------------------------------------------------ the tower's own process
+
+class TestTowerServeCLI:
+    """`tower serve` refuses to start where the boundary would be a fiction.
+
+    Stage 2's whole claim is that the CA key is out of the broker's reach.
+    A tower that starts anyway on a key anyone can read, or that clears for
+    its own uid, has the interface of stage 2 and the properties of stage 1,
+    which is worse than stage 1 because it reads as progress.
+    """
+
+    def _home(self, tmp_path, monkeypatch):
+        from tower import cli as tower_cli
+        home = tmp_path / "tower"
+        home.mkdir()
+        monkeypatch.setattr(tower_cli, "HOME", home)
+        assert tower_cli.main(["init"]) == 0
+        root = Ed25519PrivateKey.generate()
+        (home / "root.pub").write_bytes(root.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+        return tower_cli, home, root
+
+    def test_serve_refuses_a_ca_key_anyone_can_read(self, tmp_path, monkeypatch, capsys):
+        tower_cli, home, _ = self._home(tmp_path, monkeypatch)
+        (home / "ca.key").chmod(0o666)
+        with pytest.raises(SystemExit) as exc:
+            tower_cli.main(["serve", "--socket", str(tmp_path / "t.sock"),
+                            "--allow-uid", str(os.getuid() + 1)])
+        assert "The CA key is the whole boundary" in str(exc.value)
+        # and the escape hatch exists for a laptop, but the uid check does not bend
+        (home / "ca.key").chmod(0o600)
+        with pytest.raises(SystemExit, match="must be a different uid"):
+            tower_cli.main(["serve", "--socket", str(tmp_path / "t.sock"),
+                            "--allow-uid", str(os.getuid())])
+
+    def test_serve_needs_a_named_caller_and_its_own_root_key(
+            self, tmp_path, monkeypatch, capsys):
+        tower_cli, home, _ = self._home(tmp_path, monkeypatch)
+        with pytest.raises(SystemExit, match="name who may ask"):
+            tower_cli.main(["serve", "--socket", str(tmp_path / "t.sock")])
+        (home / "root.pub").unlink()
+        with pytest.raises(SystemExit) as exc:
+            tower_cli.main(["serve", "--socket", str(tmp_path / "t.sock"),
+                            "--allow-uid", str(os.getuid() + 1)])
+        assert "verifies chains itself" in str(exc.value)
+
+    def test_revoke_writes_the_towers_own_list(self, tmp_path, monkeypatch, capsys):
+        tower_cli, home, _ = self._home(tmp_path, monkeypatch)
+        assert tower_cli.main(["revoke", "abc123", "def456"]) == 0
+        assert tower_cli.main(["revoke", "abc123"]) == 0          # idempotent
+        text = (home / "revoked").read_text().split()
+        assert text.count("abc123") == 1 and "def456" in text
+        assert (home / "revoked").stat().st_mode & 0o777 == 0o600
+
+    def test_status_against_no_tower_is_a_message_not_a_traceback(
+            self, tmp_path, monkeypatch, capsys):
+        from tower import cli as tower_cli
+        assert tower_cli.main(["status", "--socket", str(tmp_path / "nothing.sock")]) == 1
+        _, err = capsys.readouterr()
+        assert "no tower at" in err

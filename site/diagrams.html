@@ -139,15 +139,18 @@ flowchart TB
     mcp[&quot;&lt;b&gt;MCP server&lt;/b&gt;&lt;br/&gt;[Container: Python]&lt;br/&gt;&lt;i&gt;taper serve. One tool per typed operation.&lt;/i&gt;&quot;]
     broker[&quot;&lt;b&gt;Broker&lt;/b&gt;&lt;br/&gt;[Container: Python]&lt;br/&gt;&lt;i&gt;chain → proof → schema → policy by intersection → plan. Unknown field, unknown constraint kind, unconstrained attribute: refuse.&lt;/i&gt;&quot;]
     exec[&quot;&lt;b&gt;Executor + adapters&lt;/b&gt;&lt;br/&gt;[Container: Python]&lt;br/&gt;&lt;i&gt;ssh.exec · pg.query · pg.migrate · pg.describe · http.request. Asks taper.invariants() before a write.&lt;/i&gt;&quot;]
-    vault[(&quot;&lt;b&gt;Vault&lt;/b&gt;&lt;br/&gt;[Container: directory, 0700]&lt;br/&gt;&lt;i&gt;Resource secrets. Under Tower, for Postgres: the CA key only.&lt;/i&gt;&quot;)]
+    vault[(&quot;&lt;b&gt;Vault&lt;/b&gt;&lt;br/&gt;[Container: directory, 0700]&lt;br/&gt;&lt;i&gt;Resource secrets for targets the tower does not clear. The CA key is NOT here — it is in the tower&#x27;s own home, which this uid cannot open.&lt;/i&gt;&quot;)]
     audit[(&quot;&lt;b&gt;Audit log&lt;/b&gt;&lt;br/&gt;[Container: JSONL, hash chain]&lt;br/&gt;&lt;i&gt;decision · clearance · result. Each record hashes the one before.&lt;/i&gt;&quot;)]
-    revoked[(&quot;&lt;b&gt;Revocation list&lt;/b&gt;&lt;br/&gt;[Container: in memory]&lt;br/&gt;&lt;i&gt;One list, shared with the tower.&lt;/i&gt;&quot;)]
-    subgraph towerb[&quot;Tower · stage 1 in-process · stage 2 own uid&quot;]
-      direction LR
-      tower[&quot;&lt;b&gt;Tower&lt;/b&gt;&lt;br/&gt;[Container: Python]&lt;br/&gt;&lt;i&gt;Re-verifies chain and proof with its own root key and nonce cache. Refuses a decision about another chain or subject.&lt;/i&gt;&quot;]
-      ca[&quot;&lt;b&gt;CA&lt;/b&gt;&lt;br/&gt;[Container: ECDSA P-256]&lt;br/&gt;&lt;i&gt;One client certificate per clearance: CN=role, OU=subject, SAN urn:taper:clearance:id, 60 s.&lt;/i&gt;&quot;]
-    end
+    revoked[(&quot;&lt;b&gt;Revocation list&lt;/b&gt;&lt;br/&gt;[Container: in memory]&lt;br/&gt;&lt;i&gt;Sent to the tower on revoke. Narrowing only: no call takes one off.&lt;/i&gt;&quot;)]
   end
+
+  subgraph towerb[&quot;Tower · uid taper-tower · no network&quot;]
+    direction LR
+    tower[&quot;&lt;b&gt;Tower&lt;/b&gt;&lt;br/&gt;[Container: Python]&lt;br/&gt;&lt;i&gt;Re-verifies chain and proof with its own root key and nonce cache. Rebuilds the plan from the request with its own adapters and refuses a broker plan that differs.&lt;/i&gt;&quot;]
+    ca[&quot;&lt;b&gt;CA&lt;/b&gt;&lt;br/&gt;[Container: ECDSA P-256]&lt;br/&gt;&lt;i&gt;ca.key 0600 in a 0700 home. One client certificate per clearance: CN=role, OU=subject, SAN urn:taper:clearance:id, 60 s.&lt;/i&gt;&quot;]
+    holds[(&quot;&lt;b&gt;Holds&lt;/b&gt;&lt;br/&gt;[Container: policy + memory]&lt;br/&gt;&lt;i&gt;Which operations wait for a person. Nothing is minted while one waits.&lt;/i&gt;&quot;)]
+  end
+  approver[&quot;&lt;b&gt;Approver&lt;/b&gt;&lt;br/&gt;[Person]&lt;br/&gt;&lt;i&gt;A uid that may answer a hold and may not ask for a clearance.&lt;/i&gt;&quot;]
 
   pg[(&quot;&lt;b&gt;PostgreSQL 16&lt;/b&gt;&lt;br/&gt;[Container, external]&lt;br/&gt;&lt;i&gt;hostssl … cert clientcert=verify-full. Role has PASSWORD NULL. taper.invariants() is SECURITY DEFINER.&lt;/i&gt;&quot;)]
 
@@ -160,22 +163,23 @@ flowchart TB
   broker -- &quot;revoked?&quot; --&gt; revoked
   broker -- &quot;decision · result&quot; --&gt; audit
   broker -- &quot;clear(decision, chain, proof)&quot; --&gt; tower
-  tower -- &quot;revoked?&quot; --&gt; revoked
+  broker -- &quot;revoke(id) — narrowing only&quot; --&gt; tower
+  tower -- &quot;held?&quot; --&gt; holds
   tower -- &quot;issue_client(role, subject, id)&quot; --&gt; ca
-  tower -- &quot;clearance · refusal&quot; --&gt; audit
+  tower -- &quot;clearance · hold · refusal&quot; --&gt; audit
+  approver -- &quot;hold list · release · deny&lt;br/&gt;[same socket, approver uid]&quot; --&gt; tower
   broker -- &quot;run(plan)&quot; --&gt; exec
   exec -- &quot;take(id), once&quot; --&gt; tower
   exec -. &quot;reads a secret — targets without Tower&quot; .-&gt; vault
-  ca -. &quot;reads the CA key&quot; .-&gt; vault
   exec -- &quot;TLS + client cert · invariants · statement&quot; --&gt; pg
 
   classDef person fill:#08427b,stroke:#052e56,color:#fff
   classDef container fill:#438dd5,stroke:#2e6295,color:#fff
   classDef store fill:#438dd5,stroke:#2e6295,color:#fff
   classDef ext fill:#8a8a8a,stroke:#5f5f5f,color:#fff
-  class operator person
+  class operator,approver person
   class cli,ipc,mcp,broker,exec,tower,ca container
-  class vault,audit,revoked store
+  class vault,audit,revoked,holds store
   class agent,pg ext
   style host fill:none,stroke:#666,stroke-dasharray:6 4
   style towerb fill:none,stroke:#b45309,stroke-dasharray:6 4
@@ -316,7 +320,7 @@ flowchart TB
     D3[(D3 Audit log&lt;br/&gt;hash chain)]
     D4[(D4 Revocation list)]
     D5[(D5 Nonce cache)]
-    subgraph TB3[&quot;Trust boundary · tower — stage 1 in-process, stage 2 own uid&quot;]
+    subgraph TB3[&quot;Trust boundary · tower — uid taper-tower, PrivateNetwork&quot;]
       P4((4.0 Clear))
       D6[(D6 Issued material&lt;br/&gt;taken once)]
     end

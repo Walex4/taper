@@ -1,4 +1,4 @@
-# The red team: one hundred and ninety-five attacks, and the five that worked
+# The red team: two hundred and thirty-one attacks, and the five that worked
 
 `validate/redteam.py` is a script that attacks Taper. Every case in it is
 something that must be refused, and the script exits non-zero if any of them is
@@ -34,7 +34,7 @@ attacked by people who were not thinking about Taper when they wrote the attack.
 
 ## What it throws
 
-One hundred and ninety-five cases in sixteen sections (one hundred and fifteen at v0.3.0, eighty-one at v0.2.1, fifty-nine at v0.1.1). The count is the count on this commit; it
+Two hundred and thirty-one cases in seventeen sections (one hundred and fifteen at v0.3.0, eighty-one at v0.2.1, fifty-nine at v0.1.1). The count is the count on this commit; it
 goes up when adapters are added, and the number is not the claim.
 
 | section | cases | what is being tested |
@@ -54,6 +54,7 @@ goes up when adapters are added, and the number is not the claim.
 | 12. The root of trust | 7 | both keys verify during a rotation; a chain signed by a retired root, and a child of one; a chain wearing a trusted kid but signed by another key; a child block naming a root key; a signer answering for a key it was not named for, caught at mint; an unnamed root against a trust set of several, where the verifier does not guess |
 | 13. SPIFFE | 20 | the attested workload is allowed, and then: no SVID at all; an SVID from a CA the bundle does not hold; a genuine SVID for a workload outside the pattern; the right certificate signed by a key that is not its own; an attestation made for a different request; the same attestation twice; a timestamp an hour old; an expired SVID; a child block naming its own workload; the root's workload rewritten; a broker with no trust bundle refusing rather than ignoring; six malformed SPIFFE IDs; the tape intact |
 | 14. The identity provider | 28 | `alg: none`; HS256 signed with the provider's own public key as the shared secret; a token signed by another RSA key; an empty signature on a real algorithm; a `kid` outside the pinned set, which is refused rather than tried against every key; another issuer; another audience; an expired token; a token dated in the future; a group nobody mapped; no subject claim; a subject with a newline in it. Then the mapping: a dev's token yields the dev policy and its one-hour ceiling; membership in two groups takes the first rule in file order rather than the widest; the same token cannot mint twice; a token with no `jti` is still spent once by its hash; the seen-file holds neither token nor `jti` and is 0600; the record names the issuer, the person and the rule and carries no token and no other claim; an http issuer, an empty rule set, a workload that is not a SPIFFE id and two unknown keys are all refused at load; a symmetric key in the key set is not a signing key; and no HMAC or `none` algorithm exists in the table to be selected |
+| 15. Tower stage 2 | 36 | The plan: a broker plan naming a statement nobody asked for; a plan edited after the decision; a plan pointing at another vault entry; a decision with no plan; a request outside the grant the broker allowed anyway; a request the schema refuses — each refused before the CA is touched, and the honest one cleared with `plan_checked` on the tape. The socket: an unknown call; a `take` with a non-string id; an undecodable plan; an extra field; an empty revocation id; a uid the tower does not know, refused before its request is parsed; and an unreachable tower answering "I have an SSH CA" so the plan fails closed instead of quietly using the vault identity. Holds: a held operation minting nothing while it waits; a release spent by the request that used it; a release for one request not covering another; a key that is per request and per token rather than per operation; a denied hold that cannot be released afterwards; six malformed policy files; and the asker's own uid refused `holds`, `release` and `deny` |
 | 8. Audit integrity | 3 | the hash chain is intact after the run; every denial above was recorded; deleting a record is detected |
 
 Sections 1 through 4 share one property that matters more than any individual

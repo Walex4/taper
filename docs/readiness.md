@@ -142,7 +142,7 @@ means the design accepts it and says so; *open* means work not yet done;
 
 | # | Risk | State | What is true today |
 |---|------|-------|--------------------|
-| 1 | The broker's code has never been externally reviewed | **open** | About four and a half thousand lines of Python (seven thousand with the comments) across `taper/` and `tower/`, one author, a red team of 195 cases and a lint that ties every claim to a test. No external audit. The algebra is checked exhaustively over a finite universe in CI (`validate/algebra.py`) — conjunction, subsumption, lattice laws, the fold never widening — which found and fixed three edge cases on its first run; that is a check, not a proof in a proof assistant. |
+| 1 | The broker's code has never been externally reviewed | **open** | About four and a half thousand lines of Python (seven thousand with the comments) across `taper/` and `tower/`, one author, a red team of 231 cases and a lint that ties every claim to a test. No external audit. The algebra is checked exhaustively over a finite universe in CI (`validate/algebra.py`) — conjunction, subsumption, lattice laws, the fold never widening — which found and fixed three edge cases on its first run; that is a check, not a proof in a proof assistant. |
 | 2 | The broker holds credentials at rest | **inherent, narrowing** | Under Tower: for Postgres the CA key only, and the agent role has no password; for SSH an SSH CA only, and every operation gets a sixty-second certificate pinned to its one request; for AWS a seed that can only assume one role, and every operation gets a 900-second session scoped to its own values. For HTTP the vault still holds the bearer token. |
 | 3 | A broker compromise yields what it holds | **built** | Layer 2. A total policy bypass yields what the target itself permits — a read on granted tables, the shim's allowlist. Verified with the broker removed. |
 | 4 | Side channels: the agent reads a secret from somewhere else | **inherent** | Taper is not a sandbox and says so in DESIGN.md §1. It bounds what a credential can *do*; a credential the agent finds elsewhere is the operator's problem. The PocketOS rig puts the password in the README on purpose to keep this honest. |
@@ -152,11 +152,13 @@ means the design accepts it and says so; *open* means work not yet done;
 | 8 | Workload attestation: who may hold a root token at all | **built** | A grant may name a SPIFFE ID or `/*` pattern in the root block; the broker refuses any caller whose SVID does not chain to the trust bundle, match the pattern, and prove possession of its key for that exact request. A broker with no bundle refuses such a grant rather than ignoring it. The attestation itself is SPIRE's; the Workload API is read through the files `spiffe-helper` writes, not by a hand-rolled gRPC client. Twenty red-team cases. |
 | 9 | The policy file and the catalog are agent-writable in the repository | **built** | `taper grant` refuses a symlinked, group- or world-writable policy or ops directory; `taper broker` refuses to start on an ops directory owned by a uid it accepts connections from; `taper doctor --agent-user` reports both. `--allow-writable-config` warns instead, loudly, and has no environment form. |
 | 10 | Typed surface fails to cover real tasks | **open, measured** | The falsification test. Declared operations and `taper coverage` are the relief and the measurement; a week of real use has not happened. |
-| 11 | Tower's independence is a code path, not a uid | **open** | Stage 1, now for Postgres, SSH and AWS. The interface was written for stage 2 (own uid, split key, holds), which is not built. |
+| 11 | Tower's independence is a code path, not a uid | **built, minus the split key** | Stage 2: `tower serve` runs the tower under its own uid with the CA key 0600 in a directory the broker cannot open, `PrivateNetwork=yes`, and SO_PEERCRED on every clearance. `ClearedBroker`/`ClearedExecutor` are unmodified — the stage 1 interface held. The tower also rebuilds the plan from the request with its own adapters and refuses a broker plan that differs, so the boundary removes the ability to *choose* what a certificate authorises and not only the ability to sign it. Holds: named operations wait for a person, nothing is minted while they wait, a release covers one request once, and the approver must be a different uid from the asker. Thirty-six red-team cases. **Not built: the split key.** See the new gap below. |
 | 12 | Supply chain: is the package what the repository says | **built** | PyPI trusted publishing (OIDC, no token anywhere). From v0.4.0: Sigstore keyless signatures on every artefact bound to the workflow's identity, a CycloneDX SBOM (signed), and SLSA build provenance attested by GitHub; the README says how to verify. Not reproducible-build. |
 | 13 | SaaS targets | **out of scope** | GitHub, Slack, Salesforce need someone to hold a token. The design says: do not be the thing that stores it. A proxy is the right tool there. |
 | 14 | Prompt injection | **inherent, bounded** | Not prevented — Taper is not a model-layer control. Bounded: an injected instruction can only name an operation inside the grant, and the injected-run experiment showed exactly that. |
 | 18 | Who may mint, and on whose authority | **built** | `taper grant --id-token`: an OIDC login decides the subject, the policy and the ceiling, from a root-owned mapping of group to policy. The JWKS is pinned (stale ⇒ every mint refused), `alg: none` and HMAC do not exist in the algorithm table, a token is spent once in a 0600 seen-file, `--subject` is refused alongside `--id-token`, and the mint is recorded. Twenty-eight red-team cases. What is not closed: Taper still trusts whoever pinned the JWKS and wrote the mapping. |
+| 19 | The minting key exists whole, in one place | **open** | Stage 2 moved the CA key behind a uid; it is still one file one process can read. The design calls for a two-party threshold signature (FROST for Ed25519) so no single host holds a usable key. Not built, and deliberately not hand-rolled: implementing a threshold scheme on the credential path is a larger risk than the one it removes — the same judgement that keeps a hand-written gRPC client off the SPIFFE path. The practical equivalent available today is a PKCS#11 or TPM-backed CA key that cannot be exported; the signing call is one seam away from accepting one. |
+| 20 | The target's invariants are checked after the signature, by the broker | **open** | `taper.invariants()` runs in the executor, so the tower signs before the target has objected, and the objection is the broker's to report. Moving the probe in front of the signature means the tower holding its own read-only connection to each target, which is a network the `PrivateNetwork=yes` unit deliberately does not have. The two want resolving together. |
 | 15 | Bus factor | **open** | One maintainer. No second reviewer, no disclosure SLA beyond SECURITY.md's private reporting. |
 | 17 | The log is per host and nobody reads it | **built** | `taper audit --forward` ships records with their hashes to syslog or an HTTPS collector from a durable cursor, with a seven-item alert set; the collector can re-verify the chain independently. A compromised host can still stop forwarding — the gap that closes is "nobody was watching", not "a host cannot lie by silence". |
 | 16 | History-blind decisions | **open** | Nothing reads the sequence of an agent's actions at decision time; ACP names this. The target's `another_agent_active` is the only history signal. A stage-2 hold could carry "escalate after N". |
@@ -226,9 +228,11 @@ reaches it. Each item is one deliverable; none is started unless listed.
 10. **Load and soak.** A day of sustained requests through the socket, the
     MCP path and the tower, with numbers in the README. The design makes no
     performance claim today because it has none.
-11. **Tower stage 2.** Stage 1 for SSH and AWS shipped on 16 September;
-    stage 2 puts the tower in its own uid with a split key and holds, and
-    moves the invariants probe before the signature.
+11. ~~Tower stage 2~~ — mostly done 16 September: own uid behind a socket,
+    the plan rebuilt rather than trusted, and holds (`tower/serve.py`,
+    `tower/hold.py`). Two pieces of the original description are not built
+    and are now their own rows: the **split key** (row 19) and moving the
+    **invariants probe before the signature** (row 20).
 12. **A week of real use, measured.** The falsification test in DESIGN.md
     §10, run for real: one team, one week, `taper audit --refusals` at the
     end, and the result published whatever it says.
@@ -236,8 +240,9 @@ reaches it. Each item is one deliverable; none is started unless listed.
     property. A named second reviewer for every change to the six files in
     item 1, and a response time in SECURITY.md.
 
-Items 2, 3, 4, 5, 6, 7 and 8 are done — every item on this list that one
-person could build. What is left is item 11 (Tower stage 2) and items
+Items 2 through 8 are done, and item 11 is done except for the split key and
+the invariants probe (rows 19 and 20), which want resolving together and are
+the honest remainder of the tower's story. What is left is items
 1, 9, 10, 12, which need other people — a reviewer, an organization willing to
 pilot, a real workload — and are the ones that turn a project into a thing
 a company can adopt. The eight-week install window in PLAN.md is the clock
