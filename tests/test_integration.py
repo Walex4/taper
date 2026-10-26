@@ -11,6 +11,7 @@ import os
 import shutil
 import socket
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -2101,6 +2102,35 @@ class TestDeclaredCLI:
         assert "ssh.exec" in lines[2]
         assert "terraform" in lines[3] and lines[3].lstrip().startswith(("-", "\x1b"))
         assert "2 of 4" in err
+
+
+class TestSuiteUmask:
+    """The suite's own assumption, asserted instead of assumed.
+
+    Nearly every mint test writes a policy file and expects it to be acceptable
+    configuration. That holds only if the files this suite creates are not
+    group-writable, which depends on the umask of whoever runs it - and on
+    2026-10-26 sixteen tests failed on all four Python versions in CI while the
+    same commit passed on a machine with umask 022.
+
+    tests/conftest.py sets it. These two assert that it took, so the next time
+    it does not, one named test says so instead of sixteen unrelated ones
+    reporting a refusal nobody can place.
+    """
+
+    def test_a_file_this_suite_writes_is_not_writable_by_the_agent(self, tmp_path):
+        path = tmp_path / "policy.json"
+        path.write_text("{}")
+        mode = path.stat().st_mode
+        assert not mode & stat.S_IWGRP, oct(mode & 0o777)
+        assert not mode & stat.S_IWOTH, oct(mode & 0o777)
+
+    def test_a_directory_this_suite_makes_is_not_writable_by_the_agent(self, tmp_path):
+        ops = tmp_path / "ops"
+        ops.mkdir()
+        mode = ops.stat().st_mode
+        assert not mode & stat.S_IWGRP, oct(mode & 0o777)
+        assert not mode & stat.S_IWOTH, oct(mode & 0o777)
 
 
 class TestConfigOwnership:
