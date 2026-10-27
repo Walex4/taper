@@ -347,12 +347,19 @@ class Executor:
                 text, cut = _truncate(response.read().decode("utf-8", "replace"))
                 return Result(True, response.status, text, "", cut)
         except urllib.error.HTTPError as exc:
-            text, _ = _truncate(exc.read().decode("utf-8", "replace"))
+            text, cut = _truncate(exc.read().decode("utf-8", "replace"))
             if exc.code == 401 and ref and hasattr(self.secrets, "forget"):
                 # A minted token the target no longer accepts is dropped, so
                 # the next call mints a fresh one rather than reusing it.
                 self.secrets.forget(ref)
-            return Result(False, exc.code, text, str(exc))
+            # The target's own error body goes back with the status: "rate
+            # limited" and "no such message" are both HTTP 400 at some APIs,
+            # and only the body tells a caller whether to retry. A body that
+            # quotes the credential is withheld, as an exception message is.
+            # verified-by: tests/test_taper.py::TestDeclaredExecution::test_an_http_error_carries_the_targets_answer
+            if value and value in text:
+                text = "(the answer was withheld: it quoted the credential)"
+            return Result(False, exc.code, text, f"HTTP {exc.code}", cut)
         except Exception as exc:                       # noqa: BLE001
             message = f"{type(exc).__name__}: {exc}"
             if value and value in message:

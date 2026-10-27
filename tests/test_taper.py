@@ -3133,6 +3133,71 @@ class TestTokenExchange:
         clock[0] += 3600
         assert chain.require("tt.token") == "t3" and seen[-1] == "r3"
 
+    def test_a_second_rotation_before_write_back_never_replays_a_spent_token(self):
+        """The issuer rotates on every use and the vault cannot be written:
+        each exchange must send the newest token, never the stored (spent) one."""
+        from taper.secrets import ChainProvider, SecretUnreadable
+        seen = []
+
+        def post(url, fields, style):
+            seen.append(fields["refresh_token"])
+            return 200, json.dumps({"access_token": f"t{len(seen)}", "expires_in": 1800,
+                                    "refresh_token": f"r{len(seen) + 1}"})
+        vault = {"g.oauth2": json.dumps({"token_url": "https://issuer.example/token",
+                                         "client_id": "c", "client_secret": "s",
+                                         "refresh_token": "r1"})}
+
+        class Vault:
+            def get(self, ref): return vault.get(ref)
+
+        def refuse(ref, text):
+            raise PermissionError("read-only vault")
+        clock = [NOW]
+        chain = ChainProvider(Vault(), clock=lambda: clock[0], post=post, persist=refuse)
+        for _ in range(4):
+            chain.require("g")
+            assert chain.require("g") == f"t{len(seen)}"                  # cached while valid
+            clock[0] += 3600
+        assert seen == ["r1", "r2", "r3", "r4"]
+        with pytest.raises(SecretUnreadable, match="rotated its refresh token"):
+            chain.has("g")                                                  # doctor sees it
+
+    def test_a_write_back_that_does_not_take_effect_is_reported(self):
+        """A Keychain entry shadows the file the rotation was written to: the
+        write "succeeded" and changed nothing. That is reported, not trusted."""
+        from taper.secrets import ChainProvider
+        keychain = {"g.oauth2": json.dumps({"token_url": "https://issuer.example/token",
+                                            "client_id": "c", "client_secret": "s",
+                                            "refresh_token": "r1"})}
+        files = {}
+
+        class First:
+            def get(self, ref): return keychain.get(ref)
+
+        class Second:
+            def get(self, ref): return files.get(ref)
+
+        def post(url, fields, style):
+            return 200, json.dumps({"access_token": "t", "expires_in": 60, "refresh_token": "r2"})
+        chain = ChainProvider(First(), Second(), clock=lambda: NOW, post=post,
+                              persist=lambda ref, text: files.__setitem__(ref, text))
+        assert chain.require("g") == "t"
+        assert "shadows" in chain.unsaved["g"]
+        keychain["g.oauth2"] = files["g.oauth2"]                            # stored where it is read
+        chain.require("g")
+        assert "g" not in chain.unsaved and chain.has("g")
+
+    def test_a_token_with_no_usable_lifetime_is_not_cached(self):
+        calls = []
+
+        def post(url, fields, style):
+            calls.append(1)
+            return 200, json.dumps({"access_token": f"t{len(calls)}", "expires_in": -5})
+        cfg = {"token_url": "https://x.example/t", "grant_type": "client_credentials",
+               "client_id": "a", "client_secret": "s"}
+        chain = self._chain({"k.oauth2": json.dumps(cfg)}, post)
+        assert chain.require("k") == "t1" and chain.require("k") == "t2"
+
     def test_the_cache_follows_the_config_and_forgets_on_request(self):
         calls = []
 
@@ -3246,6 +3311,17 @@ class TestDeclaredExecution:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(length).decode() if length else ""
                 hits.append((self.command, self.path, dict(self.headers), body))
+                if self.path.startswith("/limited"):
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"error": {"code": 4, "is_transient": true}}')
+                    return
+                if self.path.startswith("/echo"):
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(("bad token: " + self.headers.get("Authorization", "")).encode())
+                    return
                 if self.path.startswith("/redirect"):
                     self.send_response(302)
                     self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/landing")
@@ -3280,6 +3356,22 @@ class TestDeclaredExecution:
             server.shutdown()
         assert not result.ok and result.exit_code == 302
         assert [h[1] for h in hits] == ["/redirect"]              # /landing never asked
+
+    def test_an_http_error_carries_the_targets_answer(self):
+        """A 400 that means "rate limited, retry" and a 400 that means "no such
+        object" differ only in the body, so the body comes back with the
+        status - unless it quotes the credential."""
+        server, _ = self._server()
+        try:
+            limited = self._run_http(f"http://127.0.0.1:{server.server_port}/limited")
+            echoed = self._run_http(f"http://127.0.0.1:{server.server_port}/echo",
+                                    auth_scheme="Bearer")
+        finally:
+            server.shutdown()
+        assert not limited.ok and limited.exit_code == 400 and limited.stderr == "HTTP 400"
+        assert json.loads(limited.stdout)["error"]["is_transient"] is True
+        assert not echoed.ok and "s3cr3t" not in echoed.stdout + echoed.stderr
+        assert "withheld" in echoed.stdout
 
     def test_http_sends_the_credential_in_the_declared_header_and_scheme(self):
         server, hits = self._server()

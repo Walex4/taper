@@ -15,6 +15,7 @@ import json
 import math
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -207,7 +208,14 @@ class ChainProvider:
         # failure message or None). A failure is remembered briefly too, so an
         # unreachable issuer costs one timeout a minute rather than one a call.
         self._minted: dict[str, tuple[Optional[str], float, str, Optional[str]]] = {}
+        # ref -> (sha256 of the STORED config it replaces, the rotated config).
+        # Keyed to the stored copy, so a second rotation before the first is
+        # written back still replaces what the vault holds, never resurrects it.
         self._rotated: dict[str, tuple[str, str]] = {}
+        # ref -> why a rotated refresh token could not be written back. The
+        # live process keeps working from memory; has() reports it, so
+        # `taper doctor` shows it before a restart would lose the token.
+        self.unsaved: dict[str, str] = {}
 
     def get(self, ref: str) -> Optional[str]:
         for provider in self.providers:
@@ -225,10 +233,12 @@ class ChainProvider:
         """
         if self.get(ref) is not None:
             return True
-        text = self._config_text(ref)
-        if text is None:
+        found = self._config_text(ref)
+        if found is None:
             return False
-        _exchange_config(ref, text)
+        _exchange_config(ref, found[0])
+        if ref in self.unsaved:
+            raise SecretUnreadable(self.unsaved[ref], ref=ref)
         return True
 
     def forget(self, ref: str) -> None:
@@ -238,9 +248,9 @@ class ChainProvider:
     def require(self, ref: str) -> str:
         value = self.get(ref)
         if value is None:
-            exchange = self._config_text(ref)
-            if exchange is not None:
-                return self._exchange(ref, exchange)
+            found = self._config_text(ref)
+            if found is not None:
+                return self._exchange(ref, *found)
             raise SecretNotFound(
                 f"no secret for {ref!r}; add it with "
                 f"`taper secret set {ref}` or place it in ~/.taper/secrets/{ref}",
@@ -248,18 +258,25 @@ class ChainProvider:
             )
         return value
 
-    def _config_text(self, ref: str) -> Optional[str]:
+    def _config_text(self, ref: str) -> Optional[tuple[str, str]]:
+        """(the config to use, sha256 of the stored copy), or None.
+
+        A rotation this process saw but could not write back wins over the
+        stored copy only while the stored copy is the one it rotated from;
+        once someone stores a different config, theirs wins."""
         stored = self.get(ref + EXCHANGE_SUFFIX)
         if stored is None:
             return None
-        # A rotation this process saw but could not write back wins over the
-        # stored copy only while the stored copy is the one it rotated from.
+        stored_digest = _digest(stored)
         rotated = self._rotated.get(ref)
-        if rotated is not None and rotated[0] == _digest(stored):
-            return rotated[1]
-        return stored
+        if rotated is not None and rotated[0] == stored_digest:
+            return rotated[1], stored_digest
+        if rotated is not None:
+            self._rotated.pop(ref, None)                 # replaced or written back
+            self.unsaved.pop(ref, None)
+        return stored, stored_digest
 
-    def _exchange(self, ref: str, config_text: str) -> str:
+    def _exchange(self, ref: str, config_text: str, stored_digest: Optional[str] = None) -> str:
         """A short-lived access token, minted from what the vault holds.
 
         Some services issue no long-lived credential worth storing: Google
@@ -275,7 +292,11 @@ class ChainProvider:
         verified-by: tests/test_taper.py::TestTokenExchange::test_an_exchange_config_must_name_an_https_issuer
         verified-by: tests/test_taper.py::TestTokenExchange::test_a_rotated_refresh_token_is_kept
         verified-by: tests/test_taper.py::TestTokenExchange::test_the_cache_follows_the_config_and_forgets_on_request
+        verified-by: tests/test_taper.py::TestTokenExchange::test_a_second_rotation_before_write_back_never_replays_a_spent_token
+        verified-by: tests/test_taper.py::TestTokenExchange::test_a_write_back_that_does_not_take_effect_is_reported
         """
+        if stored_digest is None:
+            stored_digest = _digest(config_text)
         now = self.clock()
         digest = _digest(config_text)
         cached = self._minted.get(ref)
@@ -294,17 +315,38 @@ class ChainProvider:
             # The issuer rotated the refresh token: the old one is spent. Keep
             # the new one, in the vault when it can be written.
             updated = json.dumps({**json.loads(config_text), "refresh_token": rotated})
-            self._rotated[ref] = (digest, updated)
-            if self._persist is not None:
-                try:
-                    self._persist(ref + EXCHANGE_SUFFIX, updated)
-                except OSError:
-                    pass                                  # kept in memory, above
+            self._rotated[ref] = (stored_digest, updated)
+            self._write_back(ref, updated)
             digest = _digest(updated)
         # Re-mint a little early: a token that expires between this line and
         # the target is a failure that looks like the target's.
         self._minted[ref] = (token, now + max(lifetime - EXCHANGE_SKEW, 0.0), digest, None)
         return token
+
+    def _write_back(self, ref: str, updated: str) -> None:
+        """Store a rotated config, and check that the store now returns it:
+        a write the chain does not read back (a Keychain entry shadowing the
+        file, a read-only vault) is as good as no write after a restart."""
+        problem = None
+        if self._persist is None:
+            problem = "no writable vault is configured"
+        else:
+            try:
+                self._persist(ref + EXCHANGE_SUFFIX, updated)
+            except OSError as exc:
+                problem = f"the write failed ({type(exc).__name__})"
+            else:
+                if self.get(ref + EXCHANGE_SUFFIX) != updated:
+                    problem = "the vault still returns the old copy (another store shadows it)"
+        if problem is None:
+            self._rotated.pop(ref, None)
+            self.unsaved.pop(ref, None)
+            return
+        self.unsaved[ref] = (
+            f"{ref!r}: the issuer rotated its refresh token and {problem}. It is kept in "
+            f"memory until the broker stops; store {ref + EXCHANGE_SUFFIX} again before "
+            f"restarting, or re-authorize")
+        print(f"taper: warning: {self.unsaved[ref]}", file=sys.stderr)
 
     def _ask_issuer(self, ref: str, config: dict) -> tuple[str, float, Optional[str]]:
         form = {"grant_type": config["grant_type"],
@@ -336,12 +378,16 @@ class ChainProvider:
                 f"token exchange for {ref!r} was refused: HTTP {status}"
                 + (f" ({code})" if isinstance(code, str) and len(code) < 64 else ""),
                 ref=ref)
+        # No expires_in: the common hour. A value that is not a positive
+        # number: no caching at all, since the issuer said nothing usable
+        # about how long the token lasts.
+        raw = answer.get("expires_in", 3600)
         try:
-            lifetime = float(answer.get("expires_in", 3600))
+            lifetime = float(raw)
         except (TypeError, ValueError):
-            lifetime = 3600.0
+            lifetime = 0.0
         if not math.isfinite(lifetime) or lifetime <= 0:
-            lifetime = 3600.0
+            lifetime = 0.0
         lifetime = min(lifetime, EXCHANGE_MAX_LIFETIME)
         rotated = answer.get("refresh_token") if isinstance(answer, dict) else None
         return token, lifetime, rotated if isinstance(rotated, str) and rotated else None
@@ -360,7 +406,15 @@ def write_secret(directory: Path, ref: str, value: str) -> None:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as handle:
         handle.write(value)
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(tmp, directory / ref)
+    # The rename itself is durable only once the directory is.
+    dfd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
 
 
 def default_provider() -> ChainProvider:

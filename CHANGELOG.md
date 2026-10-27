@@ -37,6 +37,17 @@ grammar, and DESIGN.md §7 now records why it moved and what it still refuses.
 - Token exchange: rotated refresh tokens are written back, the cache follows
   the config, a 401 drops the token, lifetimes are capped at a day, and a
   failed exchange waits a minute before the next attempt.
+- **Fixed:** a second rotation before the first was written back sent the
+  spent refresh token again (an issuer that detects reuse revokes the grant).
+  A rotation is now keyed to the stored copy it replaces. A write-back is
+  fsynced and read back; one that did not take effect (a read-only vault, a
+  Keychain entry shadowing the file) is kept in memory, warned about, and
+  reported by `taper doctor` until it is stored.
+- An `expires_in` that is not a positive number means "do not cache", not an
+  hour.
+- An HTTP error now carries the target's answer after the status, so a caller
+  can tell "rate limited, retry" from "no such object" (both are HTTP 400 at
+  Meta). An answer that quotes the credential is withheld.
 - Red team: 19 new cases, 250 in all.
 
 ## v0.4.0 — 2026-09-16

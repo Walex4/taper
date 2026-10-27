@@ -236,7 +236,12 @@ class Server:
             })
 
         ok = reply.get("ok", False)
-        text = reply.get("stdout", "") if ok else (reply.get("stderr") or reply.get("stdout", ""))
+        if ok:
+            text = reply.get("stdout", "")
+        else:
+            # What failed, then what the target said about it, when it said
+            # anything: an HTTP status alone does not tell retry from give up.
+            text = "\n".join(p for p in (reply.get("stderr"), reply.get("stdout")) if p)
         if reply.get("truncated"):
             text += "\n[output truncated]"
         return self._reply(request_id, {
