@@ -65,6 +65,11 @@ class Decision:
     workload: str = ""
 
 
+
+# Grant fields no request carries: the target's invariants a grant may
+# proceed under. Every other key in a capability must be a policy attribute.
+GRANT_ONLY_ATTRIBUTES = frozenset({"invariants"})
+
 class Broker:
     def __init__(self,
                  root_pub: Ed25519PublicKey,
@@ -227,6 +232,24 @@ class Broker:
             self._record(decision, peer)
             return decision
 
+        # A constraint on something policy never checks would be ignored, and
+        # an ignored constraint is a grant that says more than it enforces. A
+        # text field is the common case: it is content, not an attribute, so
+        # `to: one_of ["wale"]` on a text field would let any recipient
+        # through. Refuse the grant rather than honour half of it.
+        # verified-by: tests/test_taper.py::TestBoundText::test_a_grant_that_constrains_a_text_field_is_refused
+        unchecked = sorted(set(granted) - set(ops.POLICY_ATTRIBUTES.get(operation, ()))
+                           - GRANT_ONLY_ATTRIBUTES)
+        if unchecked and operation in ops.POLICY_ATTRIBUTES:
+            decision = Decision(
+                False,
+                f"this grant constrains {operation}.{', '.join(unchecked)}, which policy "
+                f"never checks (a text field is content, not an attribute); a "
+                f"constraint that cannot be enforced is refused, not ignored",
+                operation, attributes, token_ids=token_ids, subject=subject, workload=workload)
+            self._record(decision, peer)
+            return decision
+
         for name, value in attributes.items():
             constraint: Constraint | None = granted.get(name)
             if constraint is None:
@@ -254,8 +277,10 @@ class Broker:
         # verified-by: tests/test_taper.py::TestHttpDeclared::test_a_plan_the_adapter_refuses_is_a_recorded_denial
         try:
             plan = adapter.plan(clean, granted)
-        except ops.OperationError as exc:
-            decision = Decision(False, str(exc), operation, attributes,
+        except (ops.OperationError, KeyError, ValueError, TypeError) as exc:
+            reason = str(exc) if isinstance(exc, ops.OperationError) else \
+                f"{operation}: the adapter could not build a plan ({type(exc).__name__})"
+            decision = Decision(False, reason, operation, attributes,
                                 token_ids=token_ids, subject=subject, workload=workload)
             self._record(decision, peer)
             return decision

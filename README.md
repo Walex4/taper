@@ -570,8 +570,10 @@ header a credential goes in:
 ```
 
 A vault entry named `<ref>.oauth2` makes `<ref>` a short-lived token minted at
-use from a refresh token or client credentials, so a Google or Shopify key is
-never stored long-lived. DESIGN.md §7, "Revisited", says why the grammar moved
+use from a refresh token or client credentials: the long-lived half stays in the
+vault and only the broker ever exchanges it. A grant that constrains a text
+field is refused, because text is content and policy never checks it; a field
+that chooses a target is a string with a pattern. DESIGN.md §7, "Revisited", says why the grammar moved
 and what it still refuses.
 
 The grant signs the hash of each declared operation's definition into the
@@ -666,7 +668,7 @@ refuses anyone else before a token is even parsed. Set the socket's group to the
 ## Tests and validation
 
 ```bash
-make validate    # preflight + the test suite + 248 attacks + the algebra check. The release gate.
+make validate    # preflight + the test suite + 250 attacks + the algebra check. The release gate.
 ```
 
 Four layers, and they check different things:
@@ -674,7 +676,7 @@ Four layers, and they check different things:
 | Command | Checks | Needs |
 |---|---|---|
 | `pytest` | the code does what you meant — 273 tests | nothing |
-| `python validate/redteam.py` | the system refuses what someone *else* meant — 248 attacks | nothing |
+| `python validate/redteam.py` | the system refuses what someone *else* meant — 250 attacks | nothing |
 | `bash scripts/preflight.sh` | this machine can host a broker safely | nothing |
 | `python validate/check_postgres.py <dsn>` | **the database refuses on its own** | a real Postgres |
 | `bash validate/check_ssh.sh <host> <key>` | **sshd refuses on its own** | a real target host |

@@ -218,6 +218,12 @@ class Declaration:
     def definition_hash(self) -> str:
         return definition_hash(self.spec)
 
+    def host_fields(self) -> frozenset[str]:
+        """Fields that name the host of an ssh or http operation."""
+        host = self.spec.get("host") if self.kind in ("http", "ssh") else None
+        m = _PLACEHOLDER.match(host) if isinstance(host, str) else None
+        return frozenset({m.group(1)}) if m else frozenset()
+
     def segment_fields(self) -> frozenset[str]:
         """Fields that fill an HTTP path segment, and so must be one."""
         if self.kind != "http":
@@ -231,8 +237,14 @@ class Declaration:
 
     def operation(self) -> Operation:
         segments = self.segment_fields()
+        hosts = self.host_fields()
 
         def validator(f: DeclaredField):
+            if f.name in hosts:
+                # The safe alphabet admits `api.example.com.evil.example`
+                # and `x@y`; a host field is held to the hostname grammar
+                # the built-in operations use.
+                return lambda v: f.accepts(v) and ops._hostname(str(v))
             if f.name not in segments:
                 return f.accepts
             # A path field is refused at validation, where every other
@@ -837,11 +849,23 @@ def compile_spec(spec: dict, source: str = "<spec>") -> Declaration:
                     raise _fail(where, "'body.text' is one required string or text field")
                 used.add(b)
             elif isinstance(body, dict) and set(body) == {"json"}:
+                whole = body["json"]
+                m = _PLACEHOLDER.match(whole) if isinstance(whole, str) else None
+                if m and m.group(1) in fields and not fields[m.group(1)].required:
+                    raise _fail(where, "'body.json' is a whole optional field; an absent "
+                                "one would leave nothing to send. Make it required")
                 _compile_json_body(where + ".body.json", body["json"], fields, used)
             else:
                 raise _fail(where, "'body' is \"{field}\", {\"text\": \"{field}\"} or "
                             "{\"json\": <template>}")
-        _compile_authorization(where + ".authorization", spec.get("authorization"))
+        auth = _compile_authorization(where + ".authorization", spec.get("authorization"))
+        if auth is not None and h is not None:
+            # A credential is bound to one host, named in the file, so no value
+            # in a request can carry it anywhere else.
+            # verified-by: tests/test_taper.py::TestHttpDeclared::test_a_credential_is_bound_to_a_literal_host
+            raise _fail(where, "'authorization' needs a literal 'host': a credential "
+                        "is bound to the host the file names, never to one a request "
+                        "supplies")
 
     unused = set(fields) - used
     if unused:
@@ -1018,7 +1042,7 @@ class DeclaredAdapter(Adapter):
                 "session_settings": {
                     "statement_timeout": "15000ms",
                     "idle_in_transaction_session_timeout": "5s",
-                    "default_transaction_read_only": "off" if writes else "on",
+                    **({} if writes else {"transaction_read_only": "on"}),
                     "row_security": "on",
                 },
                 "boundary": "postgres:role+grant+force-rls",

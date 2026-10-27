@@ -243,8 +243,12 @@ class PostgresAdapter(Adapter):
                 "session_settings": {
                     "statement_timeout": f"{self.statement_timeout_ms}ms",
                     "idle_in_transaction_session_timeout": "5s",
-                    "default_transaction_read_only":
-                        "on" if kind == "select" else "off",
+                    # transaction_read_only, not default_transaction_read_only:
+                    # the default applies to transactions not yet begun, and
+                    # this one has. Set locally, the default changed nothing,
+                    # and a "read" that wrote went through.
+                    # verified-by: tests/test_taper.py::TestExecutor::test_a_read_makes_its_own_transaction_read_only
+                    **({"transaction_read_only": "on"} if kind == "select" else {}),
                     "row_security": "on",
                 },
                 "boundary": "postgres:role+grant+force-rls",
@@ -320,7 +324,6 @@ class PostgresMigrateAdapter(Adapter):
                 "session_settings": {
                     "statement_timeout": f"{self.statement_timeout_ms}ms",
                     "idle_in_transaction_session_timeout": "5s",
-                    "default_transaction_read_only": "off",
                     "row_security": "on",
                 },
                 "boundary": "postgres:security-definer-function",
@@ -416,7 +419,7 @@ WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('r', 'p', 'v', 'm')"""
                 "session_settings": {
                     "statement_timeout": f"{self.statement_timeout_ms}ms",
                     "idle_in_transaction_session_timeout": "5s",
-                    "default_transaction_read_only": "on",
+                    "transaction_read_only": "on",
                     "row_security": "on",
                 },
                 "boundary": "postgres:read-only-transaction+role",

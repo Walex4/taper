@@ -988,13 +988,65 @@ class TestExecutor:
                 del sys.modules["psycopg"]
         return executed, result
 
+    def test_a_read_makes_its_own_transaction_read_only(self, tmp_path):
+        """default_transaction_read_only, set locally inside the transaction
+        the statement runs in, governs transactions not yet begun - so a
+        "read" that wrote went through. transaction_read_only governs this
+        one. Checked against a real server when one can be started here."""
+        import os, shutil, subprocess, tempfile
+        plan = PostgresAdapter().plan({"database": "d", "statement": "SELECT a FROM public.t"}, {})
+        assert plan.detail["session_settings"]["transaction_read_only"] == "on"
+        assert "default_transaction_read_only" not in plan.detail["session_settings"]
+        write = PostgresAdapter().plan({"database": "d", "statement": "INSERT INTO t VALUES (1)"}, {})
+        assert "transaction_read_only" not in write.detail["session_settings"]
+
+        bins = sorted(Path("/usr/lib/postgresql").glob("*/bin")) if Path("/usr/lib/postgresql").is_dir() else []
+        try:
+            import psycopg
+        except ImportError:
+            psycopg = None
+        if not bins or psycopg is None:
+            pytest.skip("no PostgreSQL server binaries or psycopg to check against")
+        pg = bins[-1]
+        base = Path(tempfile.mkdtemp(prefix="taper-ro-"))
+        run = (lambda argv: subprocess.run(["runuser", "-u", "postgres", "--", *argv], check=True,
+                                           capture_output=True)) if os.geteuid() == 0 else \
+              (lambda argv: subprocess.run(argv, check=True, capture_output=True))
+        if os.geteuid() == 0:
+            shutil.chown(base, "postgres")
+        import socket as _s
+        with _s.socket() as s:
+            s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]
+        run([str(pg / "initdb"), "-D", str(base / "d"), "-U", "postgres", "--auth=trust"])
+        run([str(pg / "pg_ctl"), "-D", str(base / "d"), "-w", "-l", str(base / "log"),
+             "-o", f"-p {port} -k {base} -c listen_addresses=127.0.0.1", "start"])
+        try:
+            dsn = f"postgresql://postgres@127.0.0.1:{port}/postgres"
+            with psycopg.connect(dsn, autocommit=True) as conn:
+                conn.execute("CREATE TABLE t (a int)")
+            from taper.adapters.base import ExecPlan
+            from taper.execute import Executor
+            from taper.secrets import ChainProvider
+
+            class Fixed:
+                def get(self, ref): return dsn
+            sneaky = ExecPlan(kind="sql", secret_refs={"dsn": "pg.dsn"},
+                              detail={**plan.detail, "statement_text": "INSERT INTO t VALUES (1)"})
+            result = Executor(ChainProvider(Fixed()), require_invariants=False).run(sneaky)
+            assert not result.ok and "read-only" in result.stderr
+            with psycopg.connect(dsn) as conn:
+                assert conn.execute("SELECT count(*) FROM t").fetchone() == (0,)
+        finally:
+            run([str(pg / "pg_ctl"), "-D", str(base / "d"), "-m", "immediate", "stop"])
+            shutil.rmtree(base, ignore_errors=True)
+
     def test_session_settings_bind_rather_than_interpolate(self):
         """`SET LOCAL x = %s` is a syntax error: Postgres parses SET before any
         parameter is bound, so it failed at "$1" and aborted the transaction
         before the permitted statement ran. Every denial still looked right,
         which is why it survived — only the ALLOWED path was broken."""
         executed, result = self._run(settings={"statement_timeout": "15000ms",
-                                               "default_transaction_read_only": "on"})
+                                               "transaction_read_only": "on"})
 
         setting_calls = [(sql, params) for sql, params in executed
                          if "set_config" in sql or "SET LOCAL" in sql.upper()]
@@ -1009,7 +1061,7 @@ class TestExecutor:
             assert params[0] not in sql
 
         applied = {params[0] for _, params in setting_calls}
-        assert applied == {"statement_timeout", "default_transaction_read_only"}
+        assert applied == {"statement_timeout", "transaction_read_only"}
         # is_local — the third argument is what makes set_config a SET LOCAL
         # rather than a session-wide SET that outlives this transaction on a
         # pooled connection. It is a literal in the SQL, not a bound parameter.
@@ -1340,7 +1392,7 @@ class TestDescribeAdapter:
 
     def test_the_transaction_is_read_only(self):
         plan = self._plan()
-        assert plan.detail["session_settings"]["default_transaction_read_only"] == "on"
+        assert plan.detail["session_settings"]["transaction_read_only"] == "on"
         assert plan.detail["max_rows"] == 1
         # and the statement reads the catalogue, not the table
         text = plan.detail["statement_text"].lower()
@@ -1898,7 +1950,7 @@ class TestDeclared:
         assert plan.kind == "sql"
         assert plan.detail["statement_text"] == spec["statement"]
         assert plan.detail["statement_params"] == [42]
-        assert plan.detail["session_settings"]["default_transaction_read_only"] == "on"
+        assert plan.detail["session_settings"]["transaction_read_only"] == "on"
         assert "invariants" not in plan.detail                # a read asks nothing
         with pytest.raises(SpecError, match="fixed text"):
             compile_spec({**spec, "statement": "SELECT * FROM {table}"})
@@ -1910,7 +1962,7 @@ class TestDeclared:
                   "params": ["customer"]}
         plan = DeclaredAdapter(compile_spec(writer)).plan({"database": "shop", "customer": 7}, {})
         assert plan.detail["invariants"]["subjects"] == [["production", "orders"]]
-        assert plan.detail["session_settings"]["default_transaction_read_only"] == "off"
+        assert "transaction_read_only" not in plan.detail["session_settings"]
 
     def test_an_http_declaration_is_method_host_and_segments(self):
         from taper.declared import DeclaredAdapter, SpecError, compile_spec
@@ -2825,6 +2877,32 @@ class TestBoundText:
         assert not decide({**request, "status": "replied"}).allowed
 
 
+    def test_a_grant_that_constrains_a_text_field_is_refused(self, root, tmp_path, monkeypatch):
+        """A constraint policy never checks would be silently ignored: on a
+        text field that chooses a recipient, `one_of ["wale"]` would let any
+        recipient through. The broker refuses the grant instead."""
+        from taper.declared import compile_spec
+        decl = compile_spec(_upsert_spec())
+        broker = _declared_broker(root, tmp_path, decl, monkeypatch)
+        caps = {"inbox.upsert": {"id": Any_(), "status": Any_(),
+                                 "summary": OneOf(["only this"])}}
+        token = Token.issue(root, caps, ttl_seconds=3600, now=NOW,
+                            definitions={"inbox.upsert": decl.definition_hash()})
+        wire = token.serialize()
+        request = {"id": "ig-1", "summary": "anything else", "status": "replied"}
+        d = broker.decide(wire, "inbox.upsert", request,
+                          proof=prove(token.proving_key(), wire, "inbox.upsert", request, now=NOW))
+        assert not d.allowed and "never checks" in d.reason and "summary" in d.reason
+
+    def test_an_optional_field_cannot_be_the_whole_json_body(self):
+        from taper.declared import SpecError, compile_spec
+        with pytest.raises(SpecError, match="whole optional field"):
+            compile_spec(_api_spec(method="POST", query=None,
+                                   fields={**_api_spec()["fields"],
+                                           "v": {"type": "text", "required": False}},
+                                   body={"json": "{v}"}))
+
+
 class TestHttpDeclared:
 
     def _plan(self, spec, request):
@@ -2943,6 +3021,21 @@ class TestHttpDeclared:
         assert a != b.definition_hash()
 
 
+    def test_a_credential_is_bound_to_a_literal_host(self):
+        from taper.declared import SpecError, compile_spec
+        with pytest.raises(SpecError, match="literal 'host'"):
+            compile_spec(_api_spec(host="{h}", fields={**_api_spec()["fields"],
+                                                       "h": {"type": "string"}}))
+        # without a credential a host may still be a field - held to the hostname grammar
+        loose = compile_spec(_api_spec(host="{h}", authorization=None,
+                                       fields={**_api_spec()["fields"], "h": {"type": "string"}}))
+        op = loose.operation()
+        assert op.validate({"message_id": "1", "h": "api.example.com"})
+        for bad in ("x@evil.example", "-oProxy", "evil.example:8443", "evil.example/x"):
+            with pytest.raises(ops.OperationError):
+                op.validate({"message_id": "1", "h": bad})
+
+
 class TestTokenExchange:
 
     def _chain(self, vault, post, clock=lambda: NOW):
@@ -3013,6 +3106,83 @@ class TestTokenExchange:
             raise AssertionError("an issuer was contacted")
         chain = self._chain({"t": "static", "t.oauth2": "{}"}, post)
         assert chain.require("t") == "static"
+
+
+    def test_a_rotated_refresh_token_is_kept(self):
+        seen, written = [], {}
+
+        def post(url, fields, style):
+            seen.append(fields["refresh_token"])
+            return 200, json.dumps({"data": {"access_token": f"t{len(seen)}", "expires_in": 60,
+                                             "refresh_token": f"r{len(seen) + 1}"}})
+        from taper.secrets import ChainProvider
+        vault = {"tt.token.oauth2": json.dumps({"token_url": "https://issuer.example/token",
+                                                "client_id": "c", "client_secret": "s",
+                                                "refresh_token": "r1", "style": "json"})}
+
+        class Vault:
+            def get(self, ref): return vault.get(ref)
+        clock = [NOW]
+        chain = ChainProvider(Vault(), clock=lambda: clock[0], post=post,
+                              persist=lambda ref, text: written.__setitem__(ref, text))
+        assert chain.require("tt.token") == "t1"
+        assert json.loads(written["tt.token.oauth2"])["refresh_token"] == "r2"
+        clock[0] += 3600
+        assert chain.require("tt.token") == "t2" and seen == ["r1", "r2"]   # in memory, too
+        vault["tt.token.oauth2"] = written["tt.token.oauth2"]               # once persisted
+        clock[0] += 3600
+        assert chain.require("tt.token") == "t3" and seen[-1] == "r3"
+
+    def test_the_cache_follows_the_config_and_forgets_on_request(self):
+        calls = []
+
+        def post(url, fields, style):
+            calls.append(fields["client_id"])
+            return 200, json.dumps({"access_token": f"t{len(calls)}", "expires_in": 1e308})
+        cfg = {"token_url": "https://x.example/t", "grant_type": "client_credentials",
+               "client_id": "a", "client_secret": "s"}
+        vault = {"k.oauth2": json.dumps(cfg)}
+        clock = [NOW]
+        chain = self._chain(vault, post, clock=lambda: clock[0])
+        assert chain.require("k") == "t1" and chain.require("k") == "t1"
+        vault["k.oauth2"] = json.dumps({**cfg, "client_id": "b"})       # config changed
+        assert chain.require("k") == "t2" and calls == ["a", "b"]
+        chain.forget("k")
+        assert chain.require("k") == "t3"
+        clock[0] += 86400                                                # lifetime is capped
+        assert chain.require("k") == "t4"
+
+    def test_a_failed_exchange_is_not_retried_at_once(self):
+        from taper.secrets import SecretUnreadable
+        calls = []
+
+        def post(url, fields, style):
+            calls.append(1)
+            raise TimeoutError("issuer down")
+        cfg = {"token_url": "https://x.example/t", "grant_type": "client_credentials",
+               "client_id": "a", "client_secret": "s"}
+        clock = [NOW]
+        chain = self._chain({"k.oauth2": json.dumps(cfg)}, post, clock=lambda: clock[0])
+        for _ in range(3):
+            with pytest.raises(SecretUnreadable, match="could not reach"):
+                chain.require("k")
+        assert len(calls) == 1
+        clock[0] += 61
+        with pytest.raises(SecretUnreadable):
+            chain.require("k")
+        assert len(calls) == 2
+
+    def test_has_checks_the_config_without_contacting_the_issuer(self):
+        from taper.secrets import SecretUnreadable
+
+        def post(*a):
+            raise AssertionError("an issuer was contacted")
+        assert not self._chain({}, post).has("k")
+        with pytest.raises(SecretUnreadable):
+            self._chain({"k.oauth2": "{}"}, post).has("k")
+        ok = {"token_url": "https://x.example/t", "grant_type": "client_credentials",
+              "client_id": "a", "client_secret": "s"}
+        assert self._chain({"k.oauth2": json.dumps(ok)}, post).has("k")
 
 
 class TestDeclaredExecution:
@@ -3136,3 +3306,17 @@ class TestDeclaredExecution:
         monkeypatch.setenv("TAPER_HOME", str(home))
         monkeypatch.setenv("HOME", str(tmp_path / "someone"))
         assert default_provider().get("mavsey.db") == "postgresql://x"
+
+    def test_a_malformed_credential_never_reaches_an_error_message(self):
+        from taper.adapters.base import ExecPlan
+        from taper.execute import Executor
+        from taper.secrets import ChainProvider
+
+        class Bad:
+            def get(self, ref): return "s3cr3t\r\nX-Injected: 1"
+        plan = ExecPlan(kind="http", secret_refs={"authorization": "t"},
+                        detail={"url": "https://127.0.0.1:9/x", "method": "GET",
+                                "auth_scheme": "Bearer"})
+        result = Executor(ChainProvider(Bad()), timeout=2).run(plan)
+        assert not result.ok and "s3cr3t" not in result.stderr + result.stdout
+        assert "'t'" in result.stderr

@@ -27,7 +27,17 @@ grammar, and DESIGN.md §7 now records why it moved and what it still refuses.
 - **Fixed:** a path field could leave its segment (`%2e%2e` decoded to `..`
   during normalization). Refused at validation and again at planning; an
   adapter that refuses a plan is now a recorded denial rather than an error.
-- Red team: 17 new cases, 248 in all.
+- A grant that constrains a field policy never checks (a text field) is
+  refused at mint and by the broker, rather than silently ignored. A
+  credential is bound to a literal host; a host field is held to the hostname
+  grammar.
+- **Fixed:** reads were not read-only. `default_transaction_read_only`, set
+  inside the transaction, governs the next one; reads now set
+  `transaction_read_only`. Checked against a real PostgreSQL.
+- Token exchange: rotated refresh tokens are written back, the cache follows
+  the config, a 401 drops the token, lifetimes are capped at a day, and a
+  failed exchange waits a minute before the next attempt.
+- Red team: 19 new cases, 250 in all.
 
 ## v0.4.0 — 2026-09-16
 

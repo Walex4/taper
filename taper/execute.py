@@ -316,8 +316,16 @@ class Executor:
         headers = {"User-Agent": "taper/0.1"}
 
         ref = plan.secret_refs.get("authorization")
+        value = None
         if ref:
             value = self.secrets.require(ref)
+            # A line break in a header value is refused by http.client with
+            # the value quoted in the exception - the credential, in the text
+            # that goes back to the agent. Check first; say which ref, never what.
+            # verified-by: tests/test_taper.py::TestDeclaredExecution::test_a_malformed_credential_never_reaches_an_error_message
+            if any(c in value for c in "\r\n\x00"):
+                return Result(False, -1, "", f"the credential {ref!r} is not a valid "
+                              f"header value (it contains a line break); fix it in the vault")
             scheme = plan.detail.get("auth_scheme")
             headers[plan.detail.get("auth_header") or "Authorization"] = \
                 f"{scheme} {value}" if scheme else value
@@ -340,9 +348,16 @@ class Executor:
                 return Result(True, response.status, text, "", cut)
         except urllib.error.HTTPError as exc:
             text, _ = _truncate(exc.read().decode("utf-8", "replace"))
+            if exc.code == 401 and ref and hasattr(self.secrets, "forget"):
+                # A minted token the target no longer accepts is dropped, so
+                # the next call mints a fresh one rather than reusing it.
+                self.secrets.forget(ref)
             return Result(False, exc.code, text, str(exc))
         except Exception as exc:                       # noqa: BLE001
-            return Result(False, -1, "", f"{type(exc).__name__}: {exc}")
+            message = f"{type(exc).__name__}: {exc}"
+            if value and value in message:
+                message = f"{type(exc).__name__}: (message withheld: it quoted the credential)"
+            return Result(False, -1, "", message)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):

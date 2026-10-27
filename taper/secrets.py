@@ -10,7 +10,9 @@ wins, so put the most secure store first and the development fallback last.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import subprocess
 import time
@@ -53,6 +55,8 @@ class SecretUnreadable(SecretNotFound):
 # `<ref>.oauth2` in the vault configures an exchange for `<ref>`.
 EXCHANGE_SUFFIX = ".oauth2"
 EXCHANGE_SKEW = 120.0
+EXCHANGE_RETRY = 60.0            # a failed exchange is not retried for this long
+EXCHANGE_MAX_LIFETIME = 86400.0  # whatever expires_in says
 EXCHANGE_GRANTS = ("refresh_token", "client_credentials")
 
 
@@ -189,13 +193,21 @@ class KeychainProvider:
 
 
 class ChainProvider:
-    def __init__(self, *providers: Provider, clock=time.time, post=None):
+    def __init__(self, *providers: Provider, clock=time.time, post=None, persist=None):
         self.providers = providers
         self.clock = clock
         # How a token exchange reaches the issuer. Injected for tests; the
         # default is a plain HTTPS POST that follows no redirect.
         self._post = post or _https_post
-        self._minted: dict[str, tuple[str, float]] = {}
+        # Where a rotated refresh token is written back: (ref, text) -> None.
+        # None keeps the rotation in memory only, which survives until the
+        # broker restarts and says so.
+        self._persist = persist
+        # ref -> (token or None, good until, sha256 of the config it came from,
+        # failure message or None). A failure is remembered briefly too, so an
+        # unreachable issuer costs one timeout a minute rather than one a call.
+        self._minted: dict[str, tuple[Optional[str], float, str, Optional[str]]] = {}
+        self._rotated: dict[str, tuple[str, str]] = {}
 
     def get(self, ref: str) -> Optional[str]:
         for provider in self.providers:
@@ -206,14 +218,27 @@ class ChainProvider:
 
     def has(self, ref: str) -> bool:
         """Whether `ref` can be resolved, without resolving it: a stored
-        value, or an exchange configured for it. Never contacts an issuer,
-        so `taper doctor` can ask it."""
-        return self.get(ref) is not None or self.get(ref + EXCHANGE_SUFFIX) is not None
+        value, or a well-formed exchange configured for it. Never contacts an
+        issuer, so `taper doctor` can ask it; a malformed `.oauth2` raises
+        SecretUnreadable rather than counting as present.
+        verified-by: tests/test_taper.py::TestTokenExchange::test_has_checks_the_config_without_contacting_the_issuer
+        """
+        if self.get(ref) is not None:
+            return True
+        text = self._config_text(ref)
+        if text is None:
+            return False
+        _exchange_config(ref, text)
+        return True
+
+    def forget(self, ref: str) -> None:
+        """Drop a minted token, e.g. after the target answered 401 to it."""
+        self._minted.pop(ref, None)
 
     def require(self, ref: str) -> str:
         value = self.get(ref)
         if value is None:
-            exchange = self.get(ref + EXCHANGE_SUFFIX)
+            exchange = self._config_text(ref)
             if exchange is not None:
                 return self._exchange(ref, exchange)
             raise SecretNotFound(
@@ -223,25 +248,65 @@ class ChainProvider:
             )
         return value
 
+    def _config_text(self, ref: str) -> Optional[str]:
+        stored = self.get(ref + EXCHANGE_SUFFIX)
+        if stored is None:
+            return None
+        # A rotation this process saw but could not write back wins over the
+        # stored copy only while the stored copy is the one it rotated from.
+        rotated = self._rotated.get(ref)
+        if rotated is not None and rotated[0] == _digest(stored):
+            return rotated[1]
+        return stored
+
     def _exchange(self, ref: str, config_text: str) -> str:
         """A short-lived access token, minted from what the vault holds.
 
         Some services issue no long-lived credential worth storing: Google
         hands out hour-long access tokens against a refresh token, a Shopify
         app gets a day-long token from its client credentials. The vault
-        holds `<ref>.oauth2` - the issuer, the grant and its secrets - and the
-        token is minted here, in the broker's process, at the moment of use,
-        and cached until shortly before it expires. The agent never sees
-        either half; the plan names `<ref>`, as it would a stored secret.
+        holds `<ref>.oauth2` - the issuer, the grant and its long-lived half
+        (a refresh token or a client secret) - and the access token is minted
+        here, in the broker's process, at the moment of use, and cached until
+        shortly before it expires. The agent never sees either half; the plan
+        names `<ref>`, as it would a stored secret.
 
         verified-by: tests/test_taper.py::TestTokenExchange::test_a_refresh_grant_is_exchanged_once_and_cached
         verified-by: tests/test_taper.py::TestTokenExchange::test_an_exchange_config_must_name_an_https_issuer
+        verified-by: tests/test_taper.py::TestTokenExchange::test_a_rotated_refresh_token_is_kept
+        verified-by: tests/test_taper.py::TestTokenExchange::test_the_cache_follows_the_config_and_forgets_on_request
         """
         now = self.clock()
+        digest = _digest(config_text)
         cached = self._minted.get(ref)
-        if cached is not None and cached[1] > now:
+        if cached is not None and cached[2] == digest and cached[1] > now:
+            if cached[0] is None:
+                raise SecretUnreadable(cached[3] or f"token exchange for {ref!r} failed",
+                                       ref=ref)
             return cached[0]
         config = _exchange_config(ref, config_text)
+        try:
+            token, lifetime, rotated = self._ask_issuer(ref, config)
+        except SecretUnreadable as exc:
+            self._minted[ref] = (None, now + EXCHANGE_RETRY, digest, str(exc))
+            raise
+        if rotated and rotated != config.get("refresh_token"):
+            # The issuer rotated the refresh token: the old one is spent. Keep
+            # the new one, in the vault when it can be written.
+            updated = json.dumps({**json.loads(config_text), "refresh_token": rotated})
+            self._rotated[ref] = (digest, updated)
+            if self._persist is not None:
+                try:
+                    self._persist(ref + EXCHANGE_SUFFIX, updated)
+                except OSError:
+                    pass                                  # kept in memory, above
+            digest = _digest(updated)
+        # Re-mint a little early: a token that expires between this line and
+        # the target is a failure that looks like the target's.
+        self._minted[ref] = (token, now + max(lifetime - EXCHANGE_SKEW, 0.0), digest, None)
+        return token
+
+    def _ask_issuer(self, ref: str, config: dict) -> tuple[str, float, Optional[str]]:
         form = {"grant_type": config["grant_type"],
                 "client_id": config["client_id"],
                 "client_secret": config["client_secret"]}
@@ -275,10 +340,27 @@ class ChainProvider:
             lifetime = float(answer.get("expires_in", 3600))
         except (TypeError, ValueError):
             lifetime = 3600.0
-        # Re-mint a little early: a token that expires between this line and
-        # the target is a failure that looks like the target's.
-        self._minted[ref] = (token, now + max(lifetime - EXCHANGE_SKEW, 0.0))
-        return token
+        if not math.isfinite(lifetime) or lifetime <= 0:
+            lifetime = 3600.0
+        lifetime = min(lifetime, EXCHANGE_MAX_LIFETIME)
+        rotated = answer.get("refresh_token") if isinstance(answer, dict) else None
+        return token, lifetime, rotated if isinstance(rotated, str) and rotated else None
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def write_secret(directory: Path, ref: str, value: str) -> None:
+    """Replace one vault file atomically, 0600 from the first byte."""
+    if "/" in ref or ".." in ref or ref.startswith("."):
+        raise OSError(f"unsafe secret reference: {ref!r}")
+    directory.mkdir(parents=True, exist_ok=True)
+    tmp = directory / f".{ref}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(value)
+    os.replace(tmp, directory / ref)
 
 
 def default_provider() -> ChainProvider:
@@ -292,4 +374,6 @@ def default_provider() -> ChainProvider:
     verified-by: tests/test_taper.py::TestDeclaredExecution::test_the_broker_reads_the_vault_secret_set_writes
     """
     home = Path(os.environ.get("TAPER_HOME", "~/.taper")).expanduser()
-    return ChainProvider(KeychainProvider(), FileProvider(home / "secrets"), EnvProvider())
+    secrets_dir = home / "secrets"
+    return ChainProvider(KeychainProvider(), FileProvider(secrets_dir), EnvProvider(),
+                         persist=lambda ref, text: write_secret(secrets_dir, ref, text))

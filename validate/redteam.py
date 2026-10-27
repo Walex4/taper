@@ -202,7 +202,7 @@ def run(report: Report, tmp: Path) -> None:
                       proof=prove(token.proving_key(), wire, "pg.describe", permitted, now=NOW))
     ok = (d.allowed and d.plan.detail["statement_params"] == ["public", "events"]
           and "events" not in d.plan.detail["statement_text"]
-          and d.plan.detail["session_settings"]["default_transaction_read_only"] == "on")
+          and d.plan.detail["session_settings"].get("transaction_read_only") == "on")
     report.check("describe: a permitted request cannot carry rows or a write", ok,
                  "" if ok else d.reason)
 
@@ -609,6 +609,18 @@ def run(report: Report, tmp: Path) -> None:
     url = d.plan.detail["url"] if d.allowed else ""
     report.check("declared http: a query value cannot add a parameter",
                  d.allowed and "&method=" not in url and "%26method%3Ddelete" in url, url)
+    refused_at_load("a credential sent to a host a request chooses", path=["v1"],
+                    host="{name}", authorization={"ref": "t", "scheme": "Bearer"},
+                    **{k: v for k, v in http_base.items() if k != "host"})
+    ttok = Token.issue(root, {"graph.message": {"message_id": Any_(), "q": OneOf(["only"])}},
+                       ttl_seconds=3600, now=NOW,
+                       definitions={"graph.message": api.definition_hash()})
+    tw = ttok.serialize()
+    treq = {"message_id": "m1", "q": "anything"}
+    d = abroker.decide(tw, "graph.message", treq,
+                       proof=prove(ttok.proving_key(), tw, "graph.message", treq, now=NOW))
+    report.check("declared http: a grant constraining a text field is refused, not ignored",
+                 not d.allowed, d.reason if not d.allowed else "ALLOWED")
     intact, _ = abroker.audit.verify()
     report.check("declared http: every refusal is on an intact tape", intact)
 
