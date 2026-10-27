@@ -101,15 +101,24 @@ class TowerServer:
         server = self._server or self.start()
         try:
             while True:
-                conn, _ = server.accept()
+                try:
+                    conn, _ = server.accept()
+                except OSError:
+                    # close() from another thread unblocks accept() with EBADF.
+                    # That is how this loop is asked to stop, not a failure.
+                    if self._server is None:
+                        return
+                    raise
                 threading.Thread(target=self.handle, args=(conn,), daemon=True).start()
         finally:
             self.close()
 
     def close(self) -> None:
-        if self._server:
-            self._server.close()
-            self._server = None
+        # Detach before closing, so serve_forever never sees the EBADF from
+        # its own shutdown while _server still looks live.
+        server, self._server = self._server, None
+        if server:
+            server.close()
         if self.path.exists():
             try:
                 self.path.unlink()
