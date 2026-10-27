@@ -103,6 +103,11 @@ class BrokerServer:
         self.log(f"listening on {self.path} mode {oct(self.socket_mode)}")
         return server
 
+    # NOTE: tower/serve.py carries a second copy of this accept loop and its
+    # shutdown handshake, deliberately — the tower is a separate track that does
+    # not import from here. The two are kept in step by hand: a fix to the
+    # shutdown race (null _server before close, treat EBADF as the stop signal)
+    # was once applied to only one of them. Change one, change the other.
     def serve_forever(self) -> None:
         server = self._server or self.start()
         try:

@@ -97,6 +97,11 @@ class TowerServer:
                  f"as uid {os.getuid()}")
         return server
 
+    # NOTE: taper/ipc.py carries the twin of this accept loop and shutdown
+    # handshake. The tower does not import from there on purpose, so the two are
+    # kept in step by hand: the shutdown-race fix (null _server before close,
+    # treat EBADF as the stop signal) must be made in both or neither. Change
+    # one, change the other.
     def serve_forever(self) -> None:
         server = self._server or self.start()
         try:
