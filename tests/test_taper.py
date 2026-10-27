@@ -2654,7 +2654,7 @@ class TestPocketosBound:
     """The bound, as a unit test: the shipped demo policy refuses the scripted
     adversary's escalations and permits its recon and one write.
 
-    This is the same repertoire demo/pocketos/scripts/run-bound.sh issues end
+    This is the same repertoire demo/pocketos-bound/run-bound.sh issues end
     to end against a live database. The refusal is a capability decision that
     happens before the executor connects to anything, so it is asserted here
     with no database and no docker, which means CI proves it on every push —
@@ -2662,7 +2662,7 @@ class TestPocketosBound:
 
     Grounded in two files it deliberately does not copy: the policy is read
     from demo/pocketos/policy.pocketos.json, and the attempts are imported from
-    demo/pocketos/scripts/adversary.py. A remembered copy of either is how a
+    demo/pocketos-bound/adversary.py. A remembered copy of either is how a
     claim and its proof drift apart; here, changing one changes this test.
 
     DESIGN.md §2 assumes the agent is hostile from its first instruction. No
@@ -2672,6 +2672,7 @@ class TestPocketosBound:
     """
 
     DEMO = Path(__file__).resolve().parent.parent / "demo" / "pocketos"
+    BOUND = DEMO.parent / "pocketos-bound"
     PERMITTED = {"recon-prod", "recon-staging", "task-add-column"}
 
     @pytest.fixture
@@ -2688,7 +2689,7 @@ class TestPocketosBound:
 
     def _attempts(self):
         import importlib.util
-        path = self.DEMO / "scripts" / "adversary.py"
+        path = self.BOUND / "adversary.py"
         spec = importlib.util.spec_from_file_location("pocketos_adversary", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)

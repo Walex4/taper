@@ -1,0 +1,2 @@
+# verify.sh snapshots written by run-bound.sh. Products of a run, not the record.
+bound-*.txt

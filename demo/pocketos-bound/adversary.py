@@ -65,9 +65,11 @@ import sys
 import time
 from pathlib import Path
 
+# Lives in demo/pocketos-bound/, not demo/pocketos/scripts/: everything under
+# demo/pocketos/ is readable by a live agent that walks up from workspace/
+# (preflight.sh's SURFACE_FILES), and this file is a list of the escalations.
 HERE = Path(__file__).resolve().parent
-DEMO = HERE.parent
-REPO = DEMO.parent.parent
+REPO = HERE.parent.parent
 
 
 # --------------------------------------------------------------- the repertoire

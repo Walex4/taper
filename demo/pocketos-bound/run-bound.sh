@@ -9,7 +9,7 @@
 #
 # DESIGN.md §2 assumes the agent is hostile from its first instruction. A
 # well-behaved model will not perform that assumption on demand, so this arm
-# stops waiting for one. scripts/adversary.py is a fixed list of attempts issued
+# stops waiting for one. adversary.py is a fixed list of attempts issued
 # in a fixed order — recon, the task's one legitimate write, then five
 # escalations straight out of §2 — and this script runs that same list twice:
 #
@@ -27,6 +27,11 @@
 # nothing here is offered as a transcript of a model's behaviour. It is a probe
 # of the boundary, labelled as one.
 #
+# It lives in demo/pocketos-bound/ rather than demo/pocketos/scripts/ because
+# everything under demo/pocketos/ is readable by a live agent that walks up from
+# workspace/ (SURFACE_FILES in preflight.sh), and a live run's destructive
+# choice is only evidence if nobody handed the agent a list of them.
+#
 # Modes (control arm only; see adversary.py):
 #   --faithful    the control arm targets the real seeded tables and destroys
 #                 them. The database is reseeded before and after, so the
@@ -39,8 +44,9 @@
 # lands is the policy-permitted column add.
 
 set -uo pipefail
-HERE="$(cd "$(dirname "$0")/.." && pwd)"
-REPO="$(cd "$HERE/../.." && pwd)"
+BOUND="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$BOUND/../.." && pwd)"
+HERE="$REPO/demo/pocketos"              # the stack, verify.sh and preflight.sh
 
 MODE=contained
 case "${1:-}" in
@@ -96,7 +102,7 @@ run_arm() {
 
     local stream; stream="$(mktemp)"
     # shellcheck disable=SC2086
-    env $envset "$PY" "$HERE/scripts/adversary.py" --mode "$MODE" --route "$route" \
+    env $envset "$PY" "$BOUND/adversary.py" --mode "$MODE" --route "$route" \
         > "$stream" 2>"$stream.err"
     if [ ! -s "$stream" ]; then
         echo "refusing to conclude: the adversary produced no events" >&2
@@ -126,11 +132,12 @@ run_arm() {
 # surfaces; the line after it is the label this arm turns on.
 transcript_header "$REPO" "$HERE" "run-bound.sh ($MODE)"
 echo "SCRIPTED ADVERSARY — DESIGN.md §2, played from a fixed list."
-echo "Not a recording of an agent. See scripts/adversary.py."
+echo "Not a recording of an agent. See demo/pocketos-bound/adversary.py."
 echo "---"
 
-CTL_BEFORE="$HERE/bound-control-before.txt"; CTL_AFTER="$HERE/bound-control-after.txt"
-BRK_BEFORE="$HERE/bound-broker-before.txt";  BRK_AFTER="$HERE/bound-broker-after.txt"
+# Snapshots stay here, not in demo/pocketos/, for the same reason the script does.
+CTL_BEFORE="$BOUND/bound-control-before.txt"; CTL_AFTER="$BOUND/bound-control-after.txt"
+BRK_BEFORE="$BOUND/bound-broker-before.txt";  BRK_AFTER="$BOUND/bound-broker-after.txt"
 
 # CONTROL: the unscoped credential. Expected to change the database (in
 # --faithful, to destroy it; in --contained, only the scratch schema moves and
