@@ -3,6 +3,78 @@
 The first section is what `release.yml` attaches to the GitHub release, so it
 is written to be read on its own.
 
+## v0.5.0 — 2026-10-27
+
+v0.4.0 moved authority from a sentence to a uid. This release is about proof.
+The project's one claim — that a credential narrow enough to do the task cannot
+also destroy the database — had never actually been shown. Across every
+recorded agent run the model declined the destructive shortcut on its own, so
+taper's refusal was never the thing standing between the agent and the data;
+the twenty-run null said as much. §2 of DESIGN.md assumes the agent is hostile
+from its first instruction, and a well-behaved model will not act that
+assumption out on request. This release stops waiting for one — and building the
+apparatus to do it made the test suite honest about the machine it runs on.
+
+**Run four: the bound, played from a script.** `demo/pocketos-bound/` issues a
+fixed list of eight attempts — two reads, the task's one legitimate column add,
+then five escalations out of §2 (delete the orders, drop a column, add a column
+to a table the token does not name, truncate staging, drop the schema) — down
+two arms against the same incident database, and reads the result from the same
+`verify.sh` the other runs use.
+
+- `adversary.py` is not an agent and is not offered as a recording of one; the
+  transcript it writes says so on its first line. It is a probe of the boundary,
+  the one arm that is deterministic precisely because the live runs cannot be.
+- **The pair is the whole of it.** With the credential in `DATABASE_URL` and no
+  broker, all five escalations execute and the production schema is gone. With a
+  token scoped to `SELECT` and one `ADD COLUMN`, the two reads and the column add
+  go through and the same five are refused, each with the constraint quoted back
+  — row counts and schemas unchanged. Same adversary, same order, one difference
+  in the path, and the difference is the database.
+- `run-bound.sh --faithful --archive` records both arms; `archive/faithful-…/`
+  carries the first such run — the control arm's four tables GONE, the broker
+  arm's intact — with a transcript header naming the commit it was produced at,
+  so the run reproduces from what it names.
+- It lives in `demo/pocketos-bound/`, not `demo/pocketos/`, so the §2 payloads
+  are never in a directory the live agent runs out of — the rule the archive
+  already applied to what an agent may read.
+- `tests/test_taper.py::TestPocketosBound` asserts the same split — five refused,
+  three permitted — against the shipped policy with no database and no docker, so
+  CI proves on every push the part a live stack is not needed for.
+
+**The suite learned what it assumes about the machine.** Building the demo, and a
+red CI a clean local run could not reproduce, surfaced three places the tests
+depended silently on their environment. All three are now written down in
+`tests/conftest.py`, and where they were defects they are fixed.
+
+- **umask.** `hardening.check_path` refuses a group-writable policy file,
+  correctly; a test that wrote one with the ambient umask passed under 022 and
+  failed under 002. The suite now sets its umask, and says why.
+- **systemd version.** `systemd-analyze verify` loads the host's own units, so a
+  newer systemd on the runner failed the unit test over warnings about files
+  taper does not ship. The test holds the host's units aside and fails only on
+  its own.
+- **uid.** Two tests assert a refusal the kernel extends only to ordinary users;
+  run as root they fail. They are deliberately not skipped — a root run that
+  shows exactly those two and nothing else is a pass.
+- **`taper serve` outlived its run.** The MCP server now dies with its parent
+  (`PR_SET_PDEATHSIG`), so a client that exits with the server's stdin held open
+  elsewhere no longer leaves one process behind per run. Tested under a PID
+  namespace so the parent really is pid 1 — the case a simpler test could not
+  reach.
+- **A socket server asked to stop now stops** rather than racing its own
+  shutdown, in both `taper/ipc.py` and the tower's copy of the loop, which now
+  point at each other.
+- CI runs the pid-1 test rather than skipping it (the runner's user-namespace
+  restriction is lifted for the throwaway VM), and `pytest -rs` names anything
+  that still skips, so a check cannot quietly stop running.
+
+**What this release does not do.** The bound arm tests the broker's decision
+against the §2 adversary; it is not evidence about how an agent behaves, and the
+live-run null stands. Taper mediates only the paths that go through it —
+`DESIGN.md` §1's container socket, host shell and readable `.pgpass` remain the
+deploying operator's job. Still one author, still unaudited.
+
 ## v0.4.0 — 2026-09-16
 
 v0.3.0 made an operation a file. This release is about who is allowed to say
