@@ -1163,6 +1163,12 @@ def _directives(unit: Path) -> list[tuple[str, str]]:
     return out
 
 
+# Where the host's own units live. systemd-analyze verify reports on them as
+# well as on the unit it was given; see test_the_units_are_valid.
+HOST_UNIT_DIRS = ("/usr/lib/systemd/", "/lib/systemd/", "/etc/systemd/",
+                  "/run/systemd/")
+
+
 class TestRenewalUnits:
     @pytest.mark.skipif(not HAS_ANALYZE, reason="no systemd-analyze")
     @pytest.mark.parametrize("unit", [
@@ -1187,10 +1193,13 @@ class TestRenewalUnits:
         assert result.returncode == 0, result.stderr
         # verify loads the host's units too, and a newer systemd than the one
         # they were written for warns about them (CPUAccounting= on the GitHub
-        # runner's walinuxagent.service). Those are not ours to fix. A warning
-        # about this unit names it - by path or by unit name - and still fails.
-        ours = [line for line in result.stderr.splitlines() if unit in line]
-        assert not ours, "\n".join(ours)
+        # runner's walinuxagent.service). Those are not ours to fix, so a line
+        # that points into a host unit directory is set aside. Everything else
+        # still fails - including a warning that does not name this unit,
+        # which a filter for our name would have let through.
+        rest = [line for line in result.stderr.splitlines()
+                if line.strip() and not line.startswith(HOST_UNIT_DIRS)]
+        assert not rest, "\n".join(rest)
 
     def test_no_unit_hardcodes_a_home_directory(self):
         """The leak this placeholder exists to prevent, pinned so it cannot
