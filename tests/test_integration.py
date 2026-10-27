@@ -1185,7 +1185,12 @@ class TestRenewalUnits:
         result = subprocess.run(["systemd-analyze", "verify", str(staged)],
                                 capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
-        assert not result.stderr.strip(), result.stderr
+        # verify loads the host's units too, and a newer systemd than the one
+        # they were written for warns about them (CPUAccounting= on the GitHub
+        # runner's walinuxagent.service). Those are not ours to fix. A warning
+        # about this unit names it - by path or by unit name - and still fails.
+        ours = [line for line in result.stderr.splitlines() if unit in line]
+        assert not ours, "\n".join(ours)
 
     def test_no_unit_hardcodes_a_home_directory(self):
         """The leak this placeholder exists to prevent, pinned so it cannot
