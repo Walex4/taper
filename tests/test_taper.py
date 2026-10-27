@@ -3126,3 +3126,13 @@ class TestDeclaredExecution:
         assert h1.get("X-Shopify-Access-Token") == "s3cr3t" and "Authorization" not in h1
         assert h2.get("Authorization") == "Bearer s3cr3t"
         assert h2.get("Content-Type") == "application/json" and b2 == '{"m":"hé"}'
+
+    def test_the_broker_reads_the_vault_secret_set_writes(self, tmp_path, monkeypatch):
+        from taper.secrets import default_provider
+        home = tmp_path / "elsewhere"
+        (home / "secrets").mkdir(parents=True)
+        (home / "secrets" / "mavsey.db").write_text("postgresql://x\n")
+        (home / "secrets" / "mavsey.db").chmod(0o600)
+        monkeypatch.setenv("TAPER_HOME", str(home))
+        monkeypatch.setenv("HOME", str(tmp_path / "someone"))
+        assert default_provider().get("mavsey.db") == "postgresql://x"

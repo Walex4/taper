@@ -282,5 +282,14 @@ class ChainProvider:
 
 
 def default_provider() -> ChainProvider:
-    """Keychain first, then a 0600 file, then env with a warning."""
-    return ChainProvider(KeychainProvider(), FileProvider(), EnvProvider())
+    """Keychain first, then a 0600 file, then env with a warning.
+
+    The file store is the one `taper secret set` writes: under $TAPER_HOME
+    when it is set. It used to be ~/.taper regardless, so a broker started
+    with TAPER_HOME pointing anywhere but its own home read a different vault
+    from the one its operator had just filled, and reported every secret as
+    not provisioned.
+    verified-by: tests/test_taper.py::TestDeclaredExecution::test_the_broker_reads_the_vault_secret_set_writes
+    """
+    home = Path(os.environ.get("TAPER_HOME", "~/.taper")).expanduser()
+    return ChainProvider(KeychainProvider(), FileProvider(home / "secrets"), EnvProvider())
