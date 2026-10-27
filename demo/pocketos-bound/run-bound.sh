@@ -166,6 +166,15 @@ run_arm() {
     return 1
 }
 
+# transcript_header prints $MODEL_ID, and the whole script runs under `set -u`.
+# The live-agent runners reach the header only after model_id_required has made
+# MODEL_ID present; this arm has no model to name and does not call it, so the
+# header would die on an unbound variable. Give it an honest default that says
+# what produced the transcript — a script, not a model — while still letting a
+# caller override it. (This bit on the first real run: every local test set
+# MODEL_ID, so the coupling hid exactly the way conftest.py now warns they do.)
+export MODEL_ID="${MODEL_ID:-scripted-adversary (DESIGN.md §2; not a model)}"
+
 # Header once, for the pair. transcript_header records the commit and the
 # surfaces; the line after it is the label this arm turns on.
 transcript_header "$REPO" "$HERE" "run-bound.sh ($MODE)"
