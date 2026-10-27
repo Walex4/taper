@@ -27,6 +27,17 @@ conditions. This file enforces them:
      root block signs and what the broker compares before deriving anything.
      verified-by: tests/test_taper.py::TestDeclared::test_an_edited_definition_no_longer_matches_the_grant
 
+Free text is the one exception to condition 1, and it is placed, not
+filtered. A field of type "text" may hold a space, a quote or a newline, and
+the compiler admits it only where nothing parses it: a bound SQL parameter, an
+HTTP query value the broker percent-encodes, or an HTTP body the broker writes
+whole or JSON-encodes. It is refused at load in argv, in a host, in a path
+segment, in a database name - anywhere a value becomes syntax. A text field is
+content, not authority: it is not a policy attribute, for the same reason
+pg.query's statement is not one.
+    verified-by: tests/test_taper.py::TestBoundText::test_a_text_field_is_refused_everywhere_it_would_be_parsed
+    verified-by: tests/test_taper.py::TestBoundText::test_a_text_field_is_not_a_policy_attribute
+
 What a declaration cannot express is judgement. Anything that derives an
 attribute from a value - pg.query classifying a statement - stays a Python
 adapter. If a spec needs a conditional, a default computed from another
@@ -66,6 +77,30 @@ _TABLE = re.compile(r"^[a-z_][a-z0-9_]{0,62}\.[a-z_][a-z0-9_]{0,62}\Z")
 
 KINDS = ("process", "ssh", "sql", "http")
 HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD")
+FIELD_TYPES = ("string", "integer", "text")
+# A text field's default ceiling. A bound value is inert, not free: a field
+# that can carry a megabyte is a field that can carry a megabyte to the target.
+TEXT_MAX_DEFAULT = 4000
+TEXT_MAX_CEILING = 65536
+# Control characters a text value may not carry. Newline, carriage return and
+# tab are text; NUL, escapes and the rest are not, and a NUL in particular is
+# where C-string and length-prefixed consumers start to disagree.
+_TEXT_FORBIDDEN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# HTTP query keys and literal values. Literal values are percent-encoded by the
+# broker, so a space or a comma in one is data; braces stay reserved for the
+# placeholder syntax so a literal can never be mistaken for one.
+_QUERY_KEY = re.compile(r"^[A-Za-z0-9_.\-\[\]]{1,64}\Z")
+_QUERY_LITERAL = re.compile(r"^[\x20-\x7a\x7c\x7e]{0,1024}\Z")
+# Headers a credential may be sent in. Anything that frames the request itself
+# is refused: a credential named "Host" or "Content-Length" is not a
+# credential, it is a way to rewrite where and how much.
+_HEADER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9\-]{0,63}\Z")
+_FRAMING_HEADERS = frozenset({
+    "host", "content-length", "content-type", "transfer-encoding", "connection",
+    "cookie", "te", "upgrade", "trailer", "keep-alive", "proxy-authorization",
+    "expect"})
+_AUTH_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9\-]{0,31}\Z")
+MAX_JSON_DEPTH = 8
 
 # Flags after which a value is a program for something else to interpret.
 # A placeholder after any of these is a command in a field, whatever the
@@ -99,15 +134,30 @@ class SpecError(ValueError):
 @dataclass(frozen=True)
 class DeclaredField:
     name: str
-    type: str                     # "string" | "integer"
+    type: str                     # "string" | "integer" | "text"
     required: bool
     pattern: re.Pattern | None
     enum: frozenset | None
     lo: int | None
     hi: int | None
     describe: str
+    max_length: int | None = None
 
     def accepts(self, value: Any) -> bool:
+        if self.type == "text":
+            # Free text, bounded: a length, no control characters but line
+            # breaks and tabs, and valid Unicode (a lone surrogate would fail
+            # to encode at the far end of the socket rather than here).
+            # verified-by: tests/test_taper.py::TestBoundText::test_text_accepts_prose_and_refuses_control_characters
+            if not isinstance(value, str) or len(value) > (self.max_length or TEXT_MAX_DEFAULT):
+                return False
+            if _TEXT_FORBIDDEN.search(value):
+                return False
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError:
+                return False
+            return True
         if self.type == "string":
             if not isinstance(value, str) or not SAFE_VALUE.match(value):
                 return False
@@ -127,7 +177,13 @@ class DeclaredField:
         return False
 
     def json_schema(self) -> dict:
-        d: dict[str, Any] = {"type": self.type}
+        if self.type == "text":
+            d: dict[str, Any] = {"type": "string",
+                                 "maxLength": self.max_length or TEXT_MAX_DEFAULT}
+            if self.describe:
+                d["description"] = self.describe
+            return d
+        d = {"type": self.type}
         if self.describe:
             d["description"] = self.describe
         if self.enum is not None:
@@ -162,13 +218,34 @@ class Declaration:
     def definition_hash(self) -> str:
         return definition_hash(self.spec)
 
+    def segment_fields(self) -> frozenset[str]:
+        """Fields that fill an HTTP path segment, and so must be one."""
+        if self.kind != "http":
+            return frozenset()
+        names = set()
+        for seg in self.spec.get("path", []):
+            m = _PLACEHOLDER.match(seg) if isinstance(seg, str) else None
+            if m:
+                names.add(m.group(1))
+        return frozenset(names)
+
     def operation(self) -> Operation:
+        segments = self.segment_fields()
+
+        def validator(f: DeclaredField):
+            if f.name not in segments:
+                return f.accepts
+            # A path field is refused at validation, where every other
+            # malformed value is refused and audited, and again at planning.
+            # verified-by: tests/test_taper.py::TestHttpDeclared::test_a_path_field_fills_exactly_one_segment
+            return lambda v: f.accepts(v) and one_segment(str(v))
+
         return Operation(
             name=self.name,
             summary=self.summary,
             fields=tuple(
-                Field(f.name, str if f.type == "string" else int,
-                      required=f.required, validator=f.accepts, describe=f.describe)
+                Field(f.name, int if f.type == "integer" else str,
+                      required=f.required, validator=validator(f), describe=f.describe)
                 for f in self.fields.values()),
         )
 
@@ -184,7 +261,17 @@ class Declaration:
         # is refused by the broker as unconstrained; a field the grant does
         # not care about is `any`, and the policy-pressure warning says so.
         # That is the intended pressure, not a nuisance.
-        return tuple(self.fields)
+        #
+        # Except text. A text field is what an operation carries, not where it
+        # goes: the message, not the recipient. It can only be bound, so it
+        # cannot change the operation; constraining it would mean a grant
+        # whose one honest value is `any`, and a warning at every mint that
+        # trains operators to ignore the warning.
+        # verified-by: tests/test_taper.py::TestBoundText::test_a_text_field_is_not_a_policy_attribute
+        return tuple(n for n, f in self.fields.items() if f.type != "text")
+
+    def text_fields(self) -> frozenset[str]:
+        return frozenset(n for n, f in self.fields.items() if f.type == "text")
 
     def layer1_only(self) -> bool:
         return self.layer2 is None
@@ -241,18 +328,29 @@ def _compile_fields(where: str, raw: Any) -> dict[str, DeclaredField]:
             raise _fail(fw, "field names are lower-case identifiers")
         if not isinstance(fd, dict):
             raise _fail(fw, "must be an object")
-        unknown = set(fd) - {"type", "required", "pattern", "enum", "min", "max", "describe"}
+        unknown = set(fd) - {"type", "required", "pattern", "enum", "min", "max", "describe",
+                             "max_length"}
         if unknown:
             raise _fail(fw, f"unknown keys {sorted(unknown)}")
         ftype = _expect_str(fw, fd, "type")
-        if ftype not in ("string", "integer"):
-            raise _fail(fw, "type must be 'string' or 'integer'")
+        if ftype not in FIELD_TYPES:
+            raise _fail(fw, "type must be 'string', 'integer' or 'text'")
         required = fd.get("required", True)
         if not isinstance(required, bool):
             raise _fail(fw, "'required' must be true or false")
         describe = _expect_str(fw, fd, "describe", required=False) or ""
-        pattern = enum = lo = hi = None
-        if ftype == "string":
+        pattern = enum = lo = hi = max_length = None
+        if "max_length" in fd and ftype != "text":
+            raise _fail(fw, "'max_length' applies to text fields")
+        if ftype == "text":
+            if set(fd) & {"pattern", "enum", "min", "max"}:
+                raise _fail(fw, "a text field is free text: no pattern, enum, min or max. "
+                            "If the value has a shape, it is a string field")
+            ml = fd.get("max_length", TEXT_MAX_DEFAULT)
+            if isinstance(ml, bool) or not isinstance(ml, int) or not 1 <= ml <= TEXT_MAX_CEILING:
+                raise _fail(fw, f"'max_length' is an integer from 1 to {TEXT_MAX_CEILING}")
+            max_length = ml
+        elif ftype == "string":
             if "min" in fd or "max" in fd:
                 raise _fail(fw, "min/max apply to integer fields")
             if "pattern" in fd and "enum" in fd:
@@ -280,7 +378,8 @@ def _compile_fields(where: str, raw: Any) -> dict[str, DeclaredField]:
             lo, hi = fd.get("min"), fd.get("max")
             if lo is not None and hi is not None and lo > hi:
                 raise _fail(fw, "min exceeds max")
-        out[name] = DeclaredField(name, ftype, required, pattern, enum, lo, hi, describe)
+        out[name] = DeclaredField(name, ftype, required, pattern, enum, lo, hi, describe,
+                                  max_length)
     return out
 
 
@@ -331,6 +430,8 @@ def _compile_template(where: str, raw: Any, fields: dict[str, DeclaredField],
             raise _fail(f"{where}[0]", "the program is a literal, never a field")
         if name not in fields:
             raise _fail(f"{where}[{i}]", f"placeholder names no field: {name!r}")
+        if fields[name].type == "text":
+            raise _fail(f"{where}[{i}]", _TEXT_PLACED)
         if prev_literal is not None:
             if prev_literal in SHELL_FLAGS:
                 raise _fail(f"{where}[{i}]", f"a field after {prev_literal!r} is a "
@@ -344,6 +445,122 @@ def _compile_template(where: str, raw: Any, fields: dict[str, DeclaredField],
         out.append(("field", name))
         prev_literal = None
     return out
+
+
+def one_segment(value: str) -> bool:
+    """A value that stays one path segment through normalization: no slash,
+    no backslash, no percent-escape (which decodes into either), and not a
+    dot-segment or empty."""
+    return not ("/" in value or "\\" in value or "%" in value
+                or value in ("", ".", ".."))
+
+
+_TEXT_PLACED = ("a text field is free text and may only be bound - a SQL "
+                "param, an HTTP query value, an HTTP body - never placed where "
+                "it is parsed: argv, a host, a path segment, a database name")
+
+
+def _compile_query(where: str, raw: Any, fields: dict[str, DeclaredField],
+                   used: set[str]) -> list[tuple[str, str]]:
+    """{"key": "literal" | "{field}", ...} or [["key", value], ...] for a
+    repeated key. Keys are literal. A value is a literal, percent-encoded by
+    the broker, or one whole field - string, integer or text, since the
+    broker encodes whatever it holds. Returns [(key, value)] in order.
+    verified-by: tests/test_taper.py::TestHttpDeclared::test_query_values_are_encoded_and_keys_are_fixed
+    """
+    if isinstance(raw, dict):
+        pairs = list(raw.items())
+    elif isinstance(raw, list) and all(isinstance(p, list) and len(p) == 2 for p in raw):
+        pairs = [(k, v) for k, v in raw]
+    else:
+        raise _fail(where, "'query' is an object of key: value, or a list of "
+                    "[key, value] pairs when a key repeats")
+    if not pairs or len(pairs) > 32:
+        raise _fail(where, "'query' names 1 to 32 parameters")
+    out: list[tuple[str, str]] = []
+    for key, value in pairs:
+        kw = f"{where}.{key}"
+        if not isinstance(key, str) or not _QUERY_KEY.match(key):
+            raise _fail(kw, "a query key is a literal name")
+        if not isinstance(value, str):
+            raise _fail(kw, "a query value is a string: a literal or \"{field}\"")
+        try:
+            name = _placeholder(value)
+        except SpecError as exc:
+            raise _fail(kw, str(exc)) from None
+        if name is None:
+            if not _QUERY_LITERAL.match(value):
+                raise _fail(kw, "a literal query value is printable ASCII, braces aside")
+        else:
+            if name not in fields:
+                raise _fail(kw, f"placeholder names no field: {name!r}")
+            used.add(name)
+        out.append((key, value))
+    return out
+
+
+def _compile_json_body(where: str, raw: Any, fields: dict[str, DeclaredField],
+                       used: set[str], depth: int = 0) -> None:
+    """A JSON template. Structure is fixed by the spec; a string that is
+    exactly "{field}" is that field's value, JSON-encoded by the broker, so a
+    quote in a text value is a character in a string and never the end of
+    one. Any other string is a literal. An optional field may fill an object
+    member, which is omitted when the field is absent; it may not be an array
+    element, where absence would shift every index after it.
+    verified-by: tests/test_taper.py::TestHttpDeclared::test_a_json_body_is_a_fixed_structure_with_encoded_values
+    """
+    if depth > MAX_JSON_DEPTH:
+        raise _fail(where, f"a JSON body nests at most {MAX_JSON_DEPTH} deep")
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            if not isinstance(k, str) or "{" in k or "}" in k:
+                raise _fail(where, "a JSON key is a literal, never a field")
+            _compile_json_body(f"{where}.{k}", v, fields, used, depth + 1)
+    elif isinstance(raw, list):
+        for i, v in enumerate(raw):
+            name = _PLACEHOLDER.match(v).group(1) if isinstance(v, str) and _PLACEHOLDER.match(v) else None
+            if name is not None and name in fields and not fields[name].required:
+                raise _fail(f"{where}[{i}]", "an optional field may not be an array "
+                            "element; its absence would move every element after it")
+            _compile_json_body(f"{where}[{i}]", v, fields, used, depth + 1)
+    elif isinstance(raw, str):
+        m = _PLACEHOLDER.match(raw)
+        if m:
+            if m.group(1) not in fields:
+                raise _fail(where, f"placeholder names no field: {m.group(1)!r}")
+            used.add(m.group(1))
+    elif raw is None or isinstance(raw, (bool, int, float)):
+        pass
+    else:
+        raise _fail(where, "a JSON body holds objects, arrays, strings, numbers, "
+                    "true, false and null")
+
+
+def _compile_authorization(where: str, raw: Any) -> dict | None:
+    """A secret ref (sent verbatim as Authorization, as before), or
+    {"ref", "header"?, "scheme"?}: the header a service reads its key from,
+    and a scheme word the broker writes in front of the secret.
+    verified-by: tests/test_taper.py::TestHttpDeclared::test_a_credential_header_may_not_frame_the_request
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        if not _SECRET_REF.match(raw):
+            raise _fail(where, "'authorization' is a secret ref")
+        return {"ref": raw, "header": "Authorization", "scheme": None}
+    if not isinstance(raw, dict) or set(raw) - {"ref", "header", "scheme"} or "ref" not in raw:
+        raise _fail(where, "'authorization' is a secret ref, or {\"ref\", \"header\"?, "
+                    "\"scheme\"?}")
+    ref, header, scheme = raw["ref"], raw.get("header", "Authorization"), raw.get("scheme")
+    if not isinstance(ref, str) or not _SECRET_REF.match(ref):
+        raise _fail(where, "'authorization.ref' is a secret ref")
+    if not isinstance(header, str) or not _HEADER_NAME.match(header) \
+            or header.lower() in _FRAMING_HEADERS:
+        raise _fail(where, f"'authorization.header' {header!r} is not a header a "
+                    f"credential may be sent in")
+    if scheme is not None and (not isinstance(scheme, str) or not _AUTH_SCHEME.match(scheme)):
+        raise _fail(where, "'authorization.scheme' is one word, e.g. Bearer")
+    return {"ref": ref, "header": header, "scheme": scheme}
 
 
 def _compile_secrets(where: str, raw: Any) -> dict[str, dict]:
@@ -471,7 +688,7 @@ _TOP_KEYS = {
     "process": {"argv", "secrets", "aws"},
     "ssh": {"host", "program", "args"},
     "sql": {"database", "statement", "params", "writes", "tables", "max_rows", "dsn"},
-    "http": {"method", "host", "path", "body", "authorization"},
+    "http": {"method", "host", "path", "query", "body", "authorization"},
 }
 _COMMON_KEYS = {"operation", "summary", "kind", "fields", "layer2"}
 
@@ -596,16 +813,35 @@ def compile_spec(spec: dict, source: str = "<spec>") -> Declaration:
             else:
                 if pn not in fields:
                     raise _fail(f"{where}.path[{i}]", f"placeholder names no field: {pn!r}")
+                if fields[pn].type == "text":
+                    raise _fail(f"{where}.path[{i}]", _TEXT_PLACED)
                 used.add(pn)
+        if spec.get("query") is not None:
+            _compile_query(where + ".query", spec["query"], fields, used)
         body = spec.get("body")
         if body is not None:
-            b = _placeholder(body) if isinstance(body, str) else None
-            if b is None or b not in fields or fields[b].type != "string":
-                raise _fail(where, "'body', if present, is one string field: \"{field}\"")
-            used.add(b)
-        auth = spec.get("authorization")
-        if auth is not None and (not isinstance(auth, str) or not _SECRET_REF.match(auth)):
-            raise _fail(where, "'authorization' is a secret ref")
+            if method in ("GET", "HEAD"):
+                raise _fail(where, f"a {method} request carries no body")
+            if isinstance(body, str):
+                # The original form: the body is one string field, whole.
+                b = _placeholder(body)
+                if b is None or b not in fields or fields[b].type != "string":
+                    raise _fail(where, "'body', if a string, is one string field: "
+                                "\"{field}\"; use {\"text\": \"{field}\"} for free text "
+                                "or {\"json\": ...} for a structure")
+                used.add(b)
+            elif isinstance(body, dict) and set(body) == {"text"}:
+                b = _placeholder(body["text"]) if isinstance(body["text"], str) else None
+                if b is None or b not in fields or fields[b].type not in ("string", "text") \
+                        or not fields[b].required:
+                    raise _fail(where, "'body.text' is one required string or text field")
+                used.add(b)
+            elif isinstance(body, dict) and set(body) == {"json"}:
+                _compile_json_body(where + ".body.json", body["json"], fields, used)
+            else:
+                raise _fail(where, "'body' is \"{field}\", {\"text\": \"{field}\"} or "
+                            "{\"json\": <template>}")
+        _compile_authorization(where + ".authorization", spec.get("authorization"))
 
     unused = set(fields) - used
     if unused:
@@ -646,11 +882,15 @@ class DeclaredAdapter(Adapter):
         if self.decl.kind == "sql":
             return {s.get("dsn", "pg.dsn")}
         if self.decl.kind == "http":
-            return {s["authorization"]} if s.get("authorization") else set()
+            auth = _compile_authorization("", s.get("authorization"))
+            return {auth["ref"]} if auth else set()
         return set()
 
     def derive(self, request: dict) -> dict[str, Any]:
-        return {name: request[name] for name in self.decl.fields if name in request}
+        # Text fields are content, not attributes: see policy_attributes().
+        text = self.decl.text_fields()
+        return {name: request[name] for name in self.decl.fields
+                if name in request and name not in text}
 
     # -- substitution -------------------------------------------------------
 
@@ -692,6 +932,41 @@ class DeclaredAdapter(Adapter):
     def _one(value: str, request: dict) -> str:
         name = _placeholder(value)
         return value if name is None else str(request[name])
+
+    @staticmethod
+    def _segment(value: str, request: dict) -> str:
+        """One path segment. A field fills exactly one: a value carrying a
+        slash, a percent sign or a dot-segment would be normalized into a
+        different path on the way out - `%2e%2e` decodes to `..` - so it is
+        refused here rather than resolved there.
+        verified-by: tests/test_taper.py::TestHttpDeclared::test_a_path_field_fills_exactly_one_segment
+        """
+        name = _placeholder(value)
+        if name is None:
+            return value
+        filled = str(request[name])
+        if not one_segment(filled):
+            raise OperationError(f"path field {name!r} must be one segment: no slash, "
+                                 f"percent-escape or dot-segment")
+        return filled
+
+    @staticmethod
+    def _json(template: Any, request: dict, fields: dict) -> Any:
+        if isinstance(template, dict):
+            out = {}
+            for k, v in template.items():
+                m = _PLACEHOLDER.match(v) if isinstance(v, str) else None
+                if m and m.group(1) not in request:
+                    continue                      # an absent optional member is omitted
+                out[k] = DeclaredAdapter._json(v, request, fields)
+            return out
+        if isinstance(template, list):
+            return [DeclaredAdapter._json(v, request, fields) for v in template]
+        if isinstance(template, str):
+            m = _PLACEHOLDER.match(template)
+            if m:
+                return request[m.group(1)]        # json.dumps does the quoting
+        return template
 
     def plan(self, request: dict, grant: dict) -> ExecPlan:
         s = self.decl.spec
@@ -735,6 +1010,11 @@ class DeclaredAdapter(Adapter):
                 "max_rows": s.get("max_rows"),
                 "statement_text": s["statement"],
                 "statement_params": params,
+                # Declared statements number their markers ($1, $2), which
+                # psycopg's default cursor does not read; the executor binds
+                # them through a raw cursor. Without this every declared
+                # statement with a parameter failed against a real server.
+                "param_style": "numeric",
                 "session_settings": {
                     "statement_timeout": "15000ms",
                     "idle_in_transaction_session_timeout": "5s",
@@ -751,17 +1031,47 @@ class DeclaredAdapter(Adapter):
         if kind == "http":
             if self._http is None:
                 raise OperationError(f"{self.decl.name}: no http adapter configured")
-            path = "/" + "/".join(self._one(seg, request) for seg in s["path"])
+            path = "/" + "/".join(self._segment(seg, request) for seg in s["path"])
             inner = {"method": s["method"], "host": self._one(s["host"], request),
                      "path": path}
-            body_field = _placeholder(s["body"]) if s.get("body") else None
-            if body_field and body_field in request:
-                inner["body"] = request[body_field]
+            body = s.get("body")
+            content_type = None
+            if isinstance(body, str):
+                body_field = _placeholder(body)
+                if body_field in request:
+                    inner["body"] = request[body_field]
+            elif isinstance(body, dict) and "text" in body:
+                inner["body"] = str(request[_placeholder(body["text"])])
+                content_type = "text/plain; charset=utf-8"
+            elif isinstance(body, dict) and "json" in body:
+                inner["body"] = json.dumps(self._json(body["json"], request, self.decl.fields),
+                                           ensure_ascii=False, separators=(",", ":"))
+                content_type = "application/json"
             plan = self._http.plan(inner, grant)
-            if s.get("authorization"):
-                plan.secret_refs["authorization"] = s["authorization"]
+            if s.get("query") is not None:
+                # After normalization, never through it: the path is resolved
+                # and policy-checked, then the encoded query is appended. A
+                # value is encoded whole, so `&`, `=` and `#` in it are data.
+                from urllib.parse import quote
+                pairs = []
+                for key, value in _compile_query("", s["query"], self.decl.fields, set()):
+                    name = _placeholder(value)
+                    if name is not None and name not in request:
+                        continue                  # an absent optional field sends nothing
+                    filled = value if name is None else str(request[name])
+                    pairs.append(f"{quote(key, safe='')}={quote(filled, safe='')}")
+                if pairs:
+                    plan.detail["url"] += "?" + "&".join(pairs)
+            auth = _compile_authorization("", s.get("authorization"))
+            if auth is not None:
+                plan.secret_refs["authorization"] = auth["ref"]
+                plan.detail["auth_header"] = auth["header"]
+                if auth["scheme"]:
+                    plan.detail["auth_scheme"] = auth["scheme"]
             if "body" in inner:
                 plan.detail["body"] = inner["body"]
+            if content_type:
+                plan.detail["content_type"] = content_type
             plan.detail.update(base_detail)
             return plan
         raise OperationError(f"{self.decl.name}: unknown kind {kind!r}")

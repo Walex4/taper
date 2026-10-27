@@ -3,6 +3,32 @@
 The first section is what `release.yml` attaches to the GitHub release, so it
 is written to be read on its own.
 
+## Unreleased
+
+**Declared operations reach an API read, and free text has a place.** The
+first deployment outside the demo — an inbox agent that reads Instagram,
+Facebook and Shopify and writes one row per message — did not fit the frozen
+grammar, and DESIGN.md §7 now records why it moved and what it still refuses.
+
+- `text` fields: free text, bounded, admitted only where bound (SQL params,
+  HTTP query values, HTTP bodies); refused at load in argv, hosts, path
+  segments and database names. Not a policy attribute.
+- HTTP `query` with literal keys and encoded values; `body` as
+  `{"text": ...}` or a `{"json": ...}` template; `authorization` with a named
+  header and scheme, framing headers refused.
+- `<ref>.oauth2` in the vault: an access token minted at use from a refresh
+  token or client credentials, cached, never stored long-lived. `taper doctor`
+  counts it as present without contacting the issuer.
+- **Fixed:** declared SQL statements with `$n` markers failed against a real
+  server (psycopg's default cursor reads `%s`); they now bind through a raw
+  cursor in the same transaction.
+- **Fixed:** the HTTP executor followed redirects, carrying the credential to
+  whatever host `Location` named. Redirects are now returned, not followed.
+- **Fixed:** a path field could leave its segment (`%2e%2e` decoded to `..`
+  during normalization). Refused at validation and again at planning; an
+  adapter that refuses a plan is now a recorded denial rather than an error.
+- Red team: 17 new cases, 248 in all.
+
 ## v0.4.0 — 2026-09-16
 
 v0.3.0 made an operation a file. This release is about who is allowed to say

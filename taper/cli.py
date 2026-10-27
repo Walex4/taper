@@ -1329,7 +1329,10 @@ def cmd_doctor(args) -> int:
             missing, unusable = [], []
             for ref in sorted(refs):
                 try:
-                    if provider.get(ref) is None:
+                    # has(), not get(): a ref minted by token exchange is
+                    # present when its `.oauth2` is, and doctor must not
+                    # contact an issuer to find that out.
+                    if not provider.has(ref):
                         missing.append(ref)
                 except SecretUnreadable as exc:
                     unusable.append(f"{ref} ({exc})")

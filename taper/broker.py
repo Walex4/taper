@@ -248,8 +248,17 @@ class Broker:
                 self._record(decision, peer)
                 return decision
 
-        # 5. Plan.
-        plan = adapter.plan(clean, granted)
+        # 5. Plan. An adapter that cannot build a plan from a request policy
+        # allowed refuses it here, on the tape, rather than raising through
+        # the socket as an error the agent sees and the audit log does not.
+        # verified-by: tests/test_taper.py::TestHttpDeclared::test_a_plan_the_adapter_refuses_is_a_recorded_denial
+        try:
+            plan = adapter.plan(clean, granted)
+        except ops.OperationError as exc:
+            decision = Decision(False, str(exc), operation, attributes,
+                                token_ids=token_ids, subject=subject, workload=workload)
+            self._record(decision, peer)
+            return decision
         decision = Decision(True, "ok", operation, attributes, plan=plan,
                             token_ids=token_ids, subject=subject, workload=workload)
         self._record(decision, peer)

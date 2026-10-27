@@ -27,7 +27,7 @@ import taper.chain as chain_mod                                                 
 from taper.adapters import (HTTPAdapter, PostgresAdapter, PostgresDescribeAdapter,  # noqa: E402
                             SSHAdapter)
 from taper.broker import Broker                                                  # noqa: E402
-from taper.caps import Never, OneOf, Prefix, Range, Subset                       # noqa: E402
+from taper.caps import Any_, Never, OneOf, Prefix, Range, Subset                 # noqa: E402
 from taper.chain import ChainError, Token, _b64, _unb64, verify                              # noqa: E402
 from taper.pop import prove                                                      # noqa: E402
 
@@ -558,6 +558,59 @@ def run(report: Report, tmp: Path) -> None:
                     wire_=_b64(json.dumps(data).encode()), tok=child)
     intact, _ = dbroker.audit.verify()
     report.check("declared: every refusal is on an intact tape", intact)
+
+    # bound text and API reads: free text only where nothing parses it, a
+    # path field is one segment, a query value is data
+    text_fields = {**base_spec()["fields"], "note": {"type": "text"}}
+    refused_at_load("a text field as an argv element", fields=text_fields,
+                    argv=["kubectl", "get", "{resource}", "--namespace", "{namespace}", "{note}"])
+    http_base = dict(kind="http", method="GET", host="graph.example.com", argv=None,
+                     secrets=None, fields=text_fields)
+    refused_at_load("a text field as a path segment", path=["v1", "{note}"], **http_base)
+    refused_at_load("a brace in a query literal", path=["v1"],
+                    query={"fields": "messages{message}"}, **http_base)
+    refused_at_load("a field inside a query literal", path=["v1"],
+                    query={"fields": "id,{name}"}, **http_base)
+    refused_at_load("a credential sent as the Host header", path=["v1"],
+                    authorization={"ref": "t", "header": "Host"}, **http_base)
+    refused_at_load("a credential header with a line break", path=["v1"],
+                    authorization={"ref": "t", "header": "X-A\r\nX-B"}, **http_base)
+    refused_at_load("a body on a GET", path=["v1"], body={"text": "{note}"}, **http_base)
+    refused_at_load("an optional field as a JSON array element", path=["v1"],
+                    body={"json": {"a": ["{name}"]}}, **{**http_base, "method": "POST"})
+
+    api = _compile({
+        "operation": "graph.message", "summary": "read one message", "kind": "http",
+        "fields": {"message_id": {"type": "string"},
+                   "q": {"type": "text", "required": False}},
+        "method": "GET", "host": "graph.example.com", "path": ["v1", "{message_id}"],
+        "query": {"fields": "id,message", "q": "{q}"},
+        "authorization": {"ref": "graph.token", "scheme": "Bearer"},
+        "layer2": {"enforced_by": "token scope", "check": "debug_token"}})
+    _ops.REGISTRY[api.name] = api.operation()
+    _ops.POLICY_ATTRIBUTES[api.name] = api.policy_attributes()
+    from taper.adapters import HTTPAdapter as _HTTPAdapter
+    abroker = Broker(root_pub=root.public_key(),
+                     adapters={api.name: _DA(api, http_adapter=_HTTPAdapter())},
+                     audit_path=tmp / "api-audit.jsonl", clock=lambda: NOW)
+    atok = Token.issue(root, {"graph.message": {"message_id": Any_()}}, ttl_seconds=3600,
+                       now=NOW, definitions={"graph.message": api.definition_hash()})
+    aw = atok.serialize()
+
+    def api_decide(request):
+        return abroker.decide(aw, "graph.message", request,
+                              proof=prove(atok.proving_key(), aw, "graph.message", request,
+                                          now=NOW))
+    for bad in ("..", "%2e%2e", "me/..", "a/b", "%2F", "..%2Fadmin", "x\\y"):
+        d = api_decide({"message_id": bad})
+        report.check(f"declared http: path field {bad!r} stays one segment", not d.allowed,
+                     d.reason if not d.allowed else f"ALLOWED url={d.plan.detail['url']}")
+    d = api_decide({"message_id": "m1", "q": "x&method=delete#&access_token=stolen"})
+    url = d.plan.detail["url"] if d.allowed else ""
+    report.check("declared http: a query value cannot add a parameter",
+                 d.allowed and "&method=" not in url and "%26method%3Ddelete" in url, url)
+    intact, _ = abroker.audit.verify()
+    report.check("declared http: every refusal is on an intact tape", intact)
 
     # ---------------------------------------------------------------------
     section("11. Tower for SSH and AWS — a credential for one operation carries no other")
