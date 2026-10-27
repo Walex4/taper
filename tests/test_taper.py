@@ -2648,3 +2648,84 @@ class TestIdP:
                 continue
             with pytest.raises(m.IdPError, match="max_ttl"):
                 m.Mapping.load(path)
+
+
+class TestPocketosBound:
+    """The bound, as a unit test: the shipped demo policy refuses the scripted
+    adversary's escalations and permits its recon and one write.
+
+    This is the same repertoire demo/pocketos/scripts/run-bound.sh issues end
+    to end against a live database. The refusal is a capability decision that
+    happens before the executor connects to anything, so it is asserted here
+    with no database and no docker, which means CI proves it on every push —
+    where the end-to-end run cannot.
+
+    Grounded in two files it deliberately does not copy: the policy is read
+    from demo/pocketos/policy.pocketos.json, and the attempts are imported from
+    demo/pocketos/scripts/adversary.py. A remembered copy of either is how a
+    claim and its proof drift apart; here, changing one changes this test.
+
+    DESIGN.md §2 assumes the agent is hostile from its first instruction. No
+    live run has exercised that assumption, because a careful model will not
+    act it out. This does, against the real policy — so the boundary the
+    project claims has a test that is about the adversary it claims to stop.
+    """
+
+    DEMO = Path(__file__).resolve().parent.parent / "demo" / "pocketos"
+    PERMITTED = {"recon-prod", "recon-staging", "task-add-column"}
+
+    @pytest.fixture
+    def pocketos_token(self, root):
+        policy = json.loads((self.DEMO / "policy.pocketos.json").read_text())
+        caps = caps_from_json(policy["capabilities"])
+        return Token.issue(root, caps, ttl_seconds=3600, now=NOW)
+
+    @pytest.fixture
+    def pocketos_broker(self, root, tmp_path):
+        return Broker(root_pub=root.public_key(),
+                      adapters=adapters.default_adapters(),
+                      audit_path=tmp_path / "audit.jsonl", clock=lambda: NOW)
+
+    def _attempts(self):
+        import importlib.util
+        path = self.DEMO / "scripts" / "adversary.py"
+        spec = importlib.util.spec_from_file_location("pocketos_adversary", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.ATTEMPTS
+
+    def _op(self, a):
+        return a["tool"].replace("_", ".", 1)        # pg_query -> pg.query
+
+    def _request(self, a):
+        return a["args"]("production", "staging")    # the brokered-arm arguments
+
+    def test_the_repertoire_splits_exactly_as_the_policy_says(
+            self, pocketos_broker, pocketos_token):
+        for a in self._attempts():
+            d = decide(pocketos_broker, pocketos_token, self._op(a), self._request(a))
+            if a["id"] in self.PERMITTED:
+                assert d.allowed, f"{a['id']} should be permitted but: {d.reason}"
+            else:
+                assert not d.allowed, \
+                    f"{a['id']} should be refused but the broker allowed it"
+
+    def test_every_attempt_is_accounted_for(self):
+        """If someone adds an attempt to the repertoire, it must be classified
+        here as permitted or not — an unlisted id would otherwise ride through
+        the split test as a refusal by default and no one would notice."""
+        ids = {a["id"] for a in self._attempts()}
+        assert self.PERMITTED <= ids, "a permitted id is missing from the script"
+        escalations = ids - self.PERMITTED
+        assert len(escalations) == 5, f"expected 5 escalations, found {escalations}"
+
+    def test_each_refusal_names_the_constraint_it_broke(
+            self, pocketos_broker, pocketos_token):
+        """Not merely denied: the reason names the field that refused it, so a
+        reword that turns a specific refusal into a blank denial fails here."""
+        for a in self._attempts():
+            if a["id"] in self.PERMITTED:
+                continue
+            d = decide(pocketos_broker, pocketos_token, self._op(a), self._request(a))
+            named = any(k in d.reason for k in ("statement_kind", "table", "tables"))
+            assert named, f"{a['id']} refused without naming a constraint: {d.reason}"
