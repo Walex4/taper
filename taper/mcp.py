@@ -259,10 +259,65 @@ class Server:
                 "error": {"code": code, "message": message}}
 
 
+def _die_with_parent() -> None:
+    """Ask the kernel to kill this process when its parent dies (Linux only).
+
+    The MCP client — `claude`, here — launches `taper serve` and talks to it
+    over a pipe. When the run ends the client should close that pipe and the
+    `for line in sys.stdin` loop below sees EOF and returns. But the demo leaves
+    one `taper serve` behind per run: the write end of this process's stdin is
+    held open past the client's exit (a shell in the confinement wrapper's
+    process group still has it), so EOF never arrives and the loop blocks
+    forever, reparented to init.
+
+    PR_SET_PDEATHSIG keys off the PARENT dying rather than the pipe closing, so
+    it covers that case regardless of who else holds the fd. It is a no-op while
+    the parent lives, so it cannot shorten a healthy session. Linux only, and a
+    best effort: any failure is swallowed, because a serve that could not arm
+    the signal must still serve.
+
+    One caveat it does NOT cover: a client that exits but leaves this process
+    reparented while still itself alive somewhere. If an orphan survives with
+    this in place, check its PPID — a PPID of 1 is the case this fixes; a live
+    client PID is a different bug (the client not reaping), to fix there.
+
+    verified-by: tests/test_integration.py::TestServeDiesWithParent::test_a_grandchild_does_not_outlive_the_parent_that_armed_it
+    verified-by: tests/test_integration.py::TestServeDiesWithParent::test_a_live_pid_1_parent_is_not_treated_as_death
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    start_ppid = os.getppid()
+    try:
+        import ctypes
+        import signal as _signal
+        PR_SET_PDEATHSIG = 1
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(
+            PR_SET_PDEATHSIG, _signal.SIGTERM, 0, 0, 0)
+    except Exception:                                     # noqa: BLE001
+        return
+    # The signal only fires for a death AFTER it was armed, so cover the sliver
+    # between this process starting and the line above: if the parent is gone
+    # already, getppid() no longer reads the pid we were launched under (it is
+    # init, or a new reaper). Compare against the captured pid, NOT against 1 —
+    # a container where the client runs as pid 1 makes 1 a VALID living parent,
+    # and treating that as death would make serve exit the instant it started.
+    if os.getppid() != start_ppid:
+        sys.stderr.write("taper serve: parent exited during startup; stopping\n")
+        raise SystemExit(0)
+    # Caveat worth knowing: PR_SET_PDEATHSIG keys on the parent THREAD that
+    # spawned this process, not the whole parent process, so a multithreaded
+    # client that spawns serve from a thread it later retires could trip it
+    # early. The stdin-EOF loop below remains the primary lifecycle signal; this
+    # is the backstop for the one case EOF misses — the write end held open past
+    # the client's exit. If early exits are ever seen, replace this with a
+    # thread that polls getppid() against start_ppid instead.
+
+
 def serve(root_pub: Optional[Ed25519PublicKey] = None,
           audit_path: Optional[Path] = None,
           token_env: str = "TAPER_TOKEN",
           socket_path: Optional[Path] = None) -> int:
+    _die_with_parent()
     token = os.environ.get(token_env, "").strip()
     if not token:
         print(f"no capability token in ${token_env}", file=sys.stderr)

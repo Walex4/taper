@@ -49,11 +49,26 @@ REPO="$(cd "$BOUND/../.." && pwd)"
 HERE="$REPO/demo/pocketos"              # the stack, verify.sh and preflight.sh
 
 MODE=contained
-case "${1:-}" in
-    --faithful)  MODE=faithful ;;
-    --contained|"") MODE=contained ;;
-    *) echo "usage: run-bound.sh [--faithful|--contained]" >&2; exit 2 ;;
-esac
+ARCHIVE=0
+for arg in "$@"; do
+    case "$arg" in
+        --faithful)  MODE=faithful ;;
+        --contained) MODE=contained ;;
+        --archive)   ARCHIVE=1 ;;
+        *) echo "usage: run-bound.sh [--faithful|--contained] [--archive]" >&2; exit 2 ;;
+    esac
+done
+
+# --archive keeps each arm's raw stream and rendered transcript, so a run leaves
+# the durable paired record the README points at — the same two files per arm
+# the other runs archive (.jsonl is the evidence, .txt is what a person reads).
+# Written under archive/<mode>-<utc>/, which is tracked; the loose bound-*.txt
+# snapshots stay gitignored. Nothing here reseeds the archive away.
+ARCHIVE_DIR=""
+if [ "$ARCHIVE" -eq 1 ]; then
+    ARCHIVE_DIR="$BOUND/archive/${MODE}-$(date -u +%Y%m%d-%H%M%S)"
+    mkdir -p "$ARCHIVE_DIR"
+fi
 
 # shellcheck source=preflight.sh
 . "$HERE/scripts/preflight.sh"
@@ -78,6 +93,19 @@ reseed() {
 }
 
 snapshot() { bash "$VERIFY" "$@"; }
+
+# Map a run_arm return code to a word for the archive README. 2 means the arm
+# did not run (e.g. the broker side with no token) — it must NOT be recorded as
+# a result, which the old two-branch form did, writing "CHANGED" for a broker
+# failure that never happened and "intact" for a skipped control side.
+_outcome() {
+    case "$1" in
+        0) echo "intact" ;;
+        1) echo "changed" ;;
+        2) echo "did not run" ;;
+        *) echo "unknown ($1)" ;;
+    esac
+}
 
 # The destruction check compares ROW COUNTS and the schema list, not column
 # counts — because the broker arm is MEANT to let exactly one write through (the
@@ -109,13 +137,23 @@ run_arm() {
         [ -s "$stream.err" ] && sed 's/^/  /' "$stream.err" >&2
         return 2
     fi
-    python3 "$HERE/scripts/render-stream.py" "$stream" "$HERE/workspace"
+    # Render once. When archiving, keep both the raw stream and the rendered
+    # transcript under the arm's name; otherwise render straight to the console.
+    if [ -n "$ARCHIVE_DIR" ]; then
+        cp "$stream" "$ARCHIVE_DIR/$route.jsonl"
+        python3 "$HERE/scripts/render-stream.py" "$stream" "$HERE/workspace" \
+            | tee "$ARCHIVE_DIR/$route.txt"
+        cp "$before" "$ARCHIVE_DIR/$route-before.txt"
+    else
+        python3 "$HERE/scripts/render-stream.py" "$stream" "$HERE/workspace"
+    fi
 
     snapshot | tee "$after" >/dev/null
     if grep -q '^  UNREACHABLE' "$after"; then
         echo "refusing to conclude: AFTER snapshot could not reach the database" >&2
         return 2
     fi
+    [ -n "$ARCHIVE_DIR" ] && cp "$after" "$ARCHIVE_DIR/$route-after.txt"
 
     if diff -u --label before --label after \
             <(_destruction_sig "$before") <(_destruction_sig "$after") >/dev/null; then
@@ -127,6 +165,15 @@ run_arm() {
          <(_destruction_sig "$before") <(_destruction_sig "$after") | sed 's/^/  /'
     return 1
 }
+
+# transcript_header prints $MODEL_ID, and the whole script runs under `set -u`.
+# The live-agent runners reach the header only after model_id_required has made
+# MODEL_ID present; this arm has no model to name and does not call it, so the
+# header would die on an unbound variable. Give it an honest default that says
+# what produced the transcript — a script, not a model — while still letting a
+# caller override it. (This bit on the first real run: every local test set
+# MODEL_ID, so the coupling hid exactly the way conftest.py now warns they do.)
+export MODEL_ID="${MODEL_ID:-scripted-adversary (DESIGN.md §2; not a model)}"
 
 # Header once, for the pair. transcript_header records the commit and the
 # surfaces; the line after it is the label this arm turns on.
@@ -179,6 +226,29 @@ echo "BROKER  (taper):      the same five were refused, each with the"
 echo "                      constraint quoted back; recon and the one"
 echo "                      permitted column add went through."
 echo
+
+# The archive's own README: what this run was and where its files are. Written
+# before the verdict's several exits so it lands whatever the outcome; the
+# verdict itself is in each arm's .txt and on the console.
+if [ -n "$ARCHIVE_DIR" ]; then
+    commit="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    {
+        echo "# Bound run — $MODE — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo
+        echo "Produced by \`demo/pocketos-bound/run-bound.sh --$MODE --archive\`"
+        echo "against taper $commit. The scripted DESIGN.md §2 adversary, issued"
+        echo "down both arms; see ../README.md. Not a recording of an agent."
+        echo
+        echo "- \`unscoped.jsonl\` / \`.txt\` — control: the credential, no broker."
+        echo "- \`brokered.jsonl\` / \`.txt\` — broker: the scoped token."
+        echo "- \`*-before.txt\` / \`*-after.txt\` — the database each arm saw."
+        echo
+        echo "control arm seeded tables: $(_outcome "${control:-2}")"
+        echo "broker arm seeded tables:  $(_outcome "${broker:-2}")"
+    } > "$ARCHIVE_DIR/README.md"
+    echo "archived to: ${ARCHIVE_DIR#"$REPO"/}"
+    echo
+fi
 if [ "${control:-2}" -eq 2 ] || [ "${broker:-2}" -eq 2 ]; then
     echo "VERDICT: incomplete — one arm did not run (see above)." >&2
     exit 1

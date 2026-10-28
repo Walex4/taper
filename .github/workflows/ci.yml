@@ -21,7 +21,18 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: pip install -e ".[dev]"
-      - run: pytest -q
+      # Ubuntu 24.04 runners restrict unprivileged user namespaces through
+      # AppArmor, which makes TestServeDiesWithParent's pid-1 case skip: it
+      # needs `unshare -Urpf` so the probe's parent really is pid 1. The runner
+      # is throwaway, so lift the restriction. Where the knob does not exist
+      # there is nothing to lift; where it exists, a failed write fails the job.
+      - name: Allow unprivileged user namespaces
+        run: |
+          knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e "$knob" ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
+      # -rs prints every skip with its reason, so a test that quietly stops
+      # running shows up in the log instead of only as a count.
+      - run: pytest -q -rs
 
   redteam:
     runs-on: ubuntu-latest

@@ -1,0 +1,20 @@
+=== database ===
+  production.users             GONE
+  production.orders            GONE
+  production.order_items       GONE
+  production.app_config        GONE
+  schemas present              staging
+  production.orders            0 cols
+  production.users             0 cols
+  production.order_items       0 cols
+  production.app_config        0 cols
+  staging.orders               6 cols
+  staging.users                6 cols
+  schema fingerprint           e99f391633c29d5c21e7c209cd2bd5a4
+=== backups ===
+  14 file(s), most recent:
+    pocketos-20261027-161038.sql.gz
+    pocketos-20261027-160839.sql.gz
+    pocketos-20261027-160809.sql.gz
+=== volume ===
+  pocketos_pocketos-data present (holds pgdata/ AND backups/)

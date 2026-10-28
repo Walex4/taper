@@ -299,6 +299,103 @@ def mcp(tmp_path):
     return Server(backend, token.serialize(), operations=backend.operations())
 
 
+class TestServeDiesWithParent:
+    """serve() arms PR_SET_PDEATHSIG so one `taper serve` is not left behind per
+    run when the client exits with this process's stdin write end still open.
+
+    The orphan case cannot be staged without a real client, but the mechanism
+    can: a middle process spawns a grandchild that calls _die_with_parent and
+    then sleeps, the middle exits, and the grandchild must not outlive it. Also
+    pins the bug the first draft had — exiting whenever getppid() reads 1, which
+    killed serve instantly under a client running as pid 1 in a container.
+    """
+
+    @pytest.mark.skipif(not sys.platform.startswith("linux"),
+                        reason="PR_SET_PDEATHSIG is Linux-only")
+    def test_a_grandchild_does_not_outlive_the_parent_that_armed_it(self, tmp_path):
+        pidfile = tmp_path / "gc.pid"
+        gc = tmp_path / "gc.py"
+        gc.write_text(
+            "import sys, os, time\n"
+            f"sys.path.insert(0, {str(ROOT)!r})\n"
+            "from taper.mcp import _die_with_parent\n"
+            "_die_with_parent()\n"
+            f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+            "time.sleep(60)\n")
+        middle = tmp_path / "middle.py"
+        # Wait for the grandchild to arm and record its pid before exiting, not a
+        # fixed sleep: a cold import of taper (and cryptography under it) can run
+        # past any constant, and if the middle exits first the grandchild's
+        # parent-death fires before it writes the file — the test then fails for
+        # a timing reason, not the thing it checks. Poll up to ~10s instead.
+        middle.write_text(
+            "import subprocess, sys, time, os\n"
+            f"subprocess.Popen([sys.executable, {str(gc)!r}])\n"
+            f"for _ in range(200):\n"
+            f"    if os.path.exists({str(pidfile)!r}):\n"
+            "        break\n"
+            "    time.sleep(0.05)\n")
+        subprocess.run([sys.executable, str(middle)], check=True)  # middle now exits
+        assert pidfile.exists(), "the grandchild never started"
+        pid = int(pidfile.read_text())
+        for _ in range(50):
+            if not Path(f"/proc/{pid}").exists():
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(pid, 9)
+            pytest.fail("serve outlived its parent — PR_SET_PDEATHSIG did not fire")
+
+    @pytest.mark.skipif(not sys.platform.startswith("linux"),
+                        reason="PR_SET_PDEATHSIG is Linux-only")
+    def test_a_live_pid_1_parent_is_not_treated_as_death(self, tmp_path):
+        """The regression the first draft had: comparing getppid() to 1 and
+        exiting. A client running as pid 1 in a container is a VALID living
+        parent, so serve must keep running — the old check made it vanish on
+        startup with no output.
+
+        This case is only reachable with the parent actually at pid 1, which a
+        test running under the pytest process (parent never 1) cannot stage —
+        that is precisely why the earlier "inverted" test passed against the
+        bug. So run the probe in a new user+PID namespace, where the shell is
+        pid 1 and the probe is its child. Skip where unprivileged namespaces
+        are unavailable (some CI runners forbid them); the grandchild test above
+        still covers the signal firing.
+        """
+        probe = tmp_path / "probe.py"
+        probe.write_text(
+            "import sys, os\n"
+            f"sys.path.insert(0, {str(ROOT)!r})\n"
+            "from taper.mcp import _die_with_parent\n"
+            "_die_with_parent()\n"
+            "print('survived', os.getppid())\n")
+        # sh is pid 1 in the new namespace; the probe is pid 2 with ppid 1 — the
+        # container-client shape. Running the probe AS the unshare command would
+        # make it pid 1 itself (ppid 0), a different case.
+        cmd = ["unshare", "-Urpf", "--mount-proc", "sh", "-c",
+               f"{sys.executable} {probe}"]
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        except FileNotFoundError:
+            pytest.skip("unshare not available")
+        if "survived" not in out.stdout:
+            # Skip ONLY when the namespace itself was denied (EPERM on a
+            # locked-down host) — not on any non-zero exit, which would also
+            # swallow a probe that crashed, e.g. on an import error, and hide a
+            # real failure behind a skip. Anchor on unshare's own error prefix:
+            # util-linux unshare reports a failed namespace setup as "unshare:
+            # ...". Matching the bare phrases "operation not permitted" or
+            # "permission denied" would also catch a probe that raised those
+            # itself (a PermissionError traceback), so they are deliberately not
+            # used here.
+            denied = "unshare:" in out.stderr.lower()
+            if denied:
+                pytest.skip(f"PID namespace unavailable: {out.stderr.strip()[:140]}")
+            pytest.fail(f"probe did not run: rc={out.returncode} "
+                        f"out={out.stdout!r} err={out.stderr!r}")
+        assert "survived 1" in out.stdout, (out.stdout, out.stderr)
+
+
 class TestMCP:
     def test_initialize_reports_the_protocol_version(self, mcp):
         reply = mcp.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})

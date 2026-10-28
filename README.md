@@ -7,7 +7,7 @@ so a subagent cannot exceed its parent.
 
 > ## Status: unaudited. Not yet suitable for production credentials.
 >
-> No external security review has been done. This is about four and a half thousand lines
+> No external security review has been done. This is about seven thousand lines
 > of Python written by one person, and the broker is the thing that holds your
 > credentials — so the failure mode of trusting it too early is the failure
 > mode it exists to prevent.
@@ -119,7 +119,7 @@ strictly smaller one, signed offline, and a widening block is rejected
 structurally rather than by policy. Shell injection is not filtered, it is
 inexpressible, because the SSH adapter builds `argv` directly. And Taper is
 never the only boundary: the database role and `sshd` are configured to refuse
-the dangerous operation on their own. It is unaudited, about four and a half thousand
+the dangerous operation on their own. It is unaudited, about seven thousand
 lines, and the measured result so far is deliberately modest — in a rebuild of
 the PocketOS incident, both arms did the job ten out of ten. Taper does not
 stop an agent working; it bounds what else it could have done.
