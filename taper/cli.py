@@ -392,6 +392,15 @@ def cmd_grant(args) -> int:
             print(f"{YELLOW}!{OFF} {name}: no built-in or declared operation by that "
                   f"name; the broker will refuse it. Declare it in {OPS}.",
                   file=sys.stderr)
+        # verified-by: tests/test_taper.py::TestBoundText::test_a_grant_that_constrains_a_text_field_is_refused
+        from .broker import GRANT_ONLY_ATTRIBUTES
+        unchecked = sorted(set(caps[name]) - set(_ops.POLICY_ATTRIBUTES.get(name, ()))
+                           - GRANT_ONLY_ATTRIBUTES)
+        if unchecked and name in _ops.POLICY_ATTRIBUTES:
+            sys.exit(f"{RED}refused:{OFF} the policy constrains {name}."
+                     f"{', '.join(unchecked)}, which the broker never checks (a text "
+                     f"field is content, not an attribute). Remove the constraint, or "
+                     f"make the field a string with a pattern if it chooses a target.")
     signer, root_pub, how = root_signer()
     try:
         token = Token.issue(None, caps, ttl_seconds=ttl,
@@ -1329,7 +1338,10 @@ def cmd_doctor(args) -> int:
             missing, unusable = [], []
             for ref in sorted(refs):
                 try:
-                    if provider.get(ref) is None:
+                    # has(), not get(): a ref minted by token exchange is
+                    # present when its `.oauth2` is, and doctor must not
+                    # contact an issuer to find that out.
+                    if not provider.has(ref):
                         missing.append(ref)
                 except SecretUnreadable as exc:
                     unusable.append(f"{ref} ({exc})")

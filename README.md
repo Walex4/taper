@@ -547,6 +547,35 @@ at all; and `layer2` is required — name what refuses this on the target with
 the broker removed, or write `null` and hear "layer 1 only" at every mint.
 `taper ops check` says exactly why a file is refused.
 
+Free text has one place in this grammar: where nothing parses it. A field of
+type `text` can hold a sentence, and the loader admits it only as a bound SQL
+parameter, an HTTP query value or an HTTP body — never in argv, a host or a
+path. HTTP declarations can also fix query keys, write a JSON body whose
+structure is the operator's and whose values the broker encodes, and name the
+header a credential goes in:
+
+```json
+{
+  "operation": "meta.message",
+  "summary": "Read one Instagram or Messenger message: sender, time, text.",
+  "kind": "http",
+  "fields": {"message_id": {"type": "string", "pattern": "[A-Za-z0-9_=-]{1,300}"}},
+  "method": "GET",
+  "host": "graph.facebook.com",
+  "path": ["v26.0", "{message_id}"],
+  "query": {"fields": "id,created_time,from,to,message"},
+  "authorization": {"ref": "meta.page.token", "scheme": "Bearer"},
+  "layer2": {"enforced_by": "the Page token's permissions", "check": "debug_token"}
+}
+```
+
+A vault entry named `<ref>.oauth2` makes `<ref>` a short-lived token minted at
+use from a refresh token or client credentials: the long-lived half stays in the
+vault and only the broker ever exchanges it. A grant that constrains a text
+field is refused, because text is content and policy never checks it; a field
+that chooses a target is a string with a pattern. DESIGN.md §7, "Revisited", says why the grammar moved
+and what it still refuses.
+
 The grant signs the hash of each declared operation's definition into the
 root block, beside the subject. Edit the file after minting — `get` becomes
 `delete` — and the broker refuses the operation until the grant is re-minted;
@@ -639,7 +668,7 @@ refuses anyone else before a token is even parsed. Set the socket's group to the
 ## Tests and validation
 
 ```bash
-make validate    # preflight + the test suite + 231 attacks + the algebra check. The release gate.
+make validate    # preflight + the test suite + 250 attacks + the algebra check. The release gate.
 ```
 
 Four layers, and they check different things:
@@ -647,7 +676,7 @@ Four layers, and they check different things:
 | Command | Checks | Needs |
 |---|---|---|
 | `pytest` | the code does what you meant — 273 tests | nothing |
-| `python validate/redteam.py` | the system refuses what someone *else* meant — 231 attacks | nothing |
+| `python validate/redteam.py` | the system refuses what someone *else* meant — 250 attacks | nothing |
 | `bash scripts/preflight.sh` | this machine can host a broker safely | nothing |
 | `python validate/check_postgres.py <dsn>` | **the database refuses on its own** | a real Postgres |
 | `bash validate/check_ssh.sh <host> <key>` | **sshd refuses on its own** | a real target host |

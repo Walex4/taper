@@ -304,6 +304,29 @@ Four conditions make it an improvement rather than a hole, and each is enforced 
 
 What this does not do: it does not make Taper a proxy, does not reach SaaS, and does not remove the need to configure each target to refuse on its own. The closest precedent is IAM, a catalog of typed actions with condition keys, and nobody argues IAM should accept shell strings.
 
+#### Revisited: bound text and API reads
+
+*Recorded 27 October 2026. This reopens the "grammar is frozen" line above, and says why rather than doing it quietly.*
+
+The first deployment outside the demo was an inbox agent for a small shop: read Instagram and Facebook messages and comments, read new Shopify orders, write one row per message to a Postgres table, send one push notification. It is the threat model of §2 in its plainest form — every input is text a stranger wrote — and it did not fit the frozen grammar in three places:
+
+- **Reads need query parameters.** Meta's Graph API returns a message's text only when `fields=` asks for it; Gmail filters with `q=`; Shopify with `created_at_min=`. A declared path is segments, so the only route was the built-in `http.request` with a path prefix — one capability per operation, so `GET` on the Graph host and `POST` on the notification host would share one method constraint, and the Graph API honours a `method=post` query parameter that a prefix cannot see.
+- **Writes carry prose.** An inbox row has a summary; a notification has a message. The safe alphabet makes a space inexpressible, which is right for argv and wrong for a bound parameter.
+- **Some services read their key from another header**, and some issue no long-lived key at all (a Google refresh token, a Shopify app's day-long client-credentials token).
+
+The frozen-grammar answer is a Python adapter per service. The alternative taken is four additions, each holding to the purpose of condition 1 — *a value never becomes syntax* — rather than to its letter:
+
+1. **A `text` field** may hold a space, a quote or a newline, bounded by `max_length` and refused control characters. The loader admits it only where it is bound: a SQL parameter, an HTTP query value, an HTTP body. It is refused in argv, a host, a path segment and a database name. It is not a policy attribute — content, not authority — exactly as `pg.query`'s statement is not one.
+2. **`query`** is an object (or a list of pairs, for a repeated key) whose keys are literals and whose values are literals or one whole field. The broker percent-encodes each value after the path is normalized, so `&method=delete` in a value is data. A literal may not contain a brace, so it can never be mistaken for a placeholder.
+3. **`body`** may be `{"text": "{field}"}`, written whole, or `{"json": <template>}`: a structure fixed by the operator in which a string that is exactly `{field}` is replaced by the value and the broker JSON-encodes the result. A quote in a text value is a character in a string, never the end of one. A body on `GET` or `HEAD` is refused.
+4. **`authorization`** may name the header (`X-Shopify-Access-Token`) and a scheme word (`Bearer`). A header that frames the request — `Host`, `Content-Length`, `Cookie` and their kin — is refused. A vault entry `<ref>.oauth2` makes `<ref>` a token minted at the moment of use from a refresh token or client credentials, in the broker's process, cached until shortly before it expires (at most a day). The long-lived half still lives in the vault; what changes is that nothing short-lived is stored, a rotated refresh token is written back, a 401 drops the cached token, and a failed exchange is not retried for a minute.
+
+Three rules keep text from becoming authority. A text field is content and is never a policy attribute, so **a grant that constrains one is refused** — at mint and by the broker — rather than half-honoured: `to: one_of ["wale"]` on a text field would otherwise let any recipient through. It follows that **text must never choose a target**: a recipient, a row to update, a host. A value that chooses is a `string` with a pattern, and the grant constrains it. And **a credential is bound to a literal host**: `authorization` with a host taken from a field is refused at load.
+
+Defects found on the way, fixed in the same change: a declared SQL statement's `$1` markers were handed to psycopg's default cursor, which reads `%s`, so every declared statement with a parameter failed against a real server while every fake passed. Reads were not read-only: `default_transaction_read_only` set inside the transaction governs the *next* transaction, so a "read" that wrote went through, and skipped the invariants probe as it did; reads now set `transaction_read_only` on the transaction they run in, checked against a real server. And a declared SQL statement's `$1` markers were handed to psycopg's default cursor, which reads `%s`, so every declared statement with a parameter failed against a real server while every fake passed; the HTTP executor followed redirects, which re-sends the request — `Authorization` included — to wherever `Location` points. A path field is now also checked to stay one segment: `%2e%2e` in a value decoded to `..` during normalization.
+
+What this still does not do: it does not make Taper a proxy. Each operation is still one method, one host, fixed segments, fixed keys and a fixed body shape, chosen by the operator before any request exists, with its definition signed into the grant. What it does reach now is a SaaS read, and the honest layer-2 note for one is often weaker than a database role: Meta has no read-only messaging permission, so for those operations the broker's method is the only thing that says no to a send.
+
 ## Trust boundaries
 
 Three layers. The design's central commitment is that the broker is never the only one.

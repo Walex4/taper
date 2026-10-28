@@ -988,13 +988,65 @@ class TestExecutor:
                 del sys.modules["psycopg"]
         return executed, result
 
+    def test_a_read_makes_its_own_transaction_read_only(self, tmp_path):
+        """default_transaction_read_only, set locally inside the transaction
+        the statement runs in, governs transactions not yet begun - so a
+        "read" that wrote went through. transaction_read_only governs this
+        one. Checked against a real server when one can be started here."""
+        import os, shutil, subprocess, tempfile
+        plan = PostgresAdapter().plan({"database": "d", "statement": "SELECT a FROM public.t"}, {})
+        assert plan.detail["session_settings"]["transaction_read_only"] == "on"
+        assert "default_transaction_read_only" not in plan.detail["session_settings"]
+        write = PostgresAdapter().plan({"database": "d", "statement": "INSERT INTO t VALUES (1)"}, {})
+        assert "transaction_read_only" not in write.detail["session_settings"]
+
+        bins = sorted(Path("/usr/lib/postgresql").glob("*/bin")) if Path("/usr/lib/postgresql").is_dir() else []
+        try:
+            import psycopg
+        except ImportError:
+            psycopg = None
+        if not bins or psycopg is None:
+            pytest.skip("no PostgreSQL server binaries or psycopg to check against")
+        pg = bins[-1]
+        base = Path(tempfile.mkdtemp(prefix="taper-ro-"))
+        run = (lambda argv: subprocess.run(["runuser", "-u", "postgres", "--", *argv], check=True,
+                                           capture_output=True)) if os.geteuid() == 0 else \
+              (lambda argv: subprocess.run(argv, check=True, capture_output=True))
+        if os.geteuid() == 0:
+            shutil.chown(base, "postgres")
+        import socket as _s
+        with _s.socket() as s:
+            s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]
+        run([str(pg / "initdb"), "-D", str(base / "d"), "-U", "postgres", "--auth=trust"])
+        run([str(pg / "pg_ctl"), "-D", str(base / "d"), "-w", "-l", str(base / "log"),
+             "-o", f"-p {port} -k {base} -c listen_addresses=127.0.0.1", "start"])
+        try:
+            dsn = f"postgresql://postgres@127.0.0.1:{port}/postgres"
+            with psycopg.connect(dsn, autocommit=True) as conn:
+                conn.execute("CREATE TABLE t (a int)")
+            from taper.adapters.base import ExecPlan
+            from taper.execute import Executor
+            from taper.secrets import ChainProvider
+
+            class Fixed:
+                def get(self, ref): return dsn
+            sneaky = ExecPlan(kind="sql", secret_refs={"dsn": "pg.dsn"},
+                              detail={**plan.detail, "statement_text": "INSERT INTO t VALUES (1)"})
+            result = Executor(ChainProvider(Fixed()), require_invariants=False).run(sneaky)
+            assert not result.ok and "read-only" in result.stderr
+            with psycopg.connect(dsn) as conn:
+                assert conn.execute("SELECT count(*) FROM t").fetchone() == (0,)
+        finally:
+            run([str(pg / "pg_ctl"), "-D", str(base / "d"), "-m", "immediate", "stop"])
+            shutil.rmtree(base, ignore_errors=True)
+
     def test_session_settings_bind_rather_than_interpolate(self):
         """`SET LOCAL x = %s` is a syntax error: Postgres parses SET before any
         parameter is bound, so it failed at "$1" and aborted the transaction
         before the permitted statement ran. Every denial still looked right,
         which is why it survived — only the ALLOWED path was broken."""
         executed, result = self._run(settings={"statement_timeout": "15000ms",
-                                               "default_transaction_read_only": "on"})
+                                               "transaction_read_only": "on"})
 
         setting_calls = [(sql, params) for sql, params in executed
                          if "set_config" in sql or "SET LOCAL" in sql.upper()]
@@ -1009,7 +1061,7 @@ class TestExecutor:
             assert params[0] not in sql
 
         applied = {params[0] for _, params in setting_calls}
-        assert applied == {"statement_timeout", "default_transaction_read_only"}
+        assert applied == {"statement_timeout", "transaction_read_only"}
         # is_local — the third argument is what makes set_config a SET LOCAL
         # rather than a session-wide SET that outlives this transaction on a
         # pooled connection. It is a literal in the SQL, not a bound parameter.
@@ -1340,7 +1392,7 @@ class TestDescribeAdapter:
 
     def test_the_transaction_is_read_only(self):
         plan = self._plan()
-        assert plan.detail["session_settings"]["default_transaction_read_only"] == "on"
+        assert plan.detail["session_settings"]["transaction_read_only"] == "on"
         assert plan.detail["max_rows"] == 1
         # and the statement reads the catalogue, not the table
         text = plan.detail["statement_text"].lower()
@@ -1898,7 +1950,7 @@ class TestDeclared:
         assert plan.kind == "sql"
         assert plan.detail["statement_text"] == spec["statement"]
         assert plan.detail["statement_params"] == [42]
-        assert plan.detail["session_settings"]["default_transaction_read_only"] == "on"
+        assert plan.detail["session_settings"]["transaction_read_only"] == "on"
         assert "invariants" not in plan.detail                # a read asks nothing
         with pytest.raises(SpecError, match="fixed text"):
             compile_spec({**spec, "statement": "SELECT * FROM {table}"})
@@ -1910,7 +1962,7 @@ class TestDeclared:
                   "params": ["customer"]}
         plan = DeclaredAdapter(compile_spec(writer)).plan({"database": "shop", "customer": 7}, {})
         assert plan.detail["invariants"]["subjects"] == [["production", "orders"]]
-        assert plan.detail["session_settings"]["default_transaction_read_only"] == "off"
+        assert "transaction_read_only" not in plan.detail["session_settings"]
 
     def test_an_http_declaration_is_method_host_and_segments(self):
         from taper.declared import DeclaredAdapter, SpecError, compile_spec
@@ -2730,3 +2782,688 @@ class TestPocketosBound:
             d = decide(pocketos_broker, pocketos_token, self._op(a), self._request(a))
             named = any(k in d.reason for k in ("statement_kind", "table", "tables"))
             assert named, f"{a['id']} refused without naming a constraint: {d.reason}"
+
+
+# ------------------------------------------------- bound text and API reads
+
+def _api_spec(**overrides):
+    """A read-only API declaration in the shape the Mavsey agent uses."""
+    spec = {
+        "operation": "meta.message", "summary": "Read one message.", "kind": "http",
+        "fields": {"message_id": {"type": "string", "pattern": "[A-Za-z0-9_=-]{1,200}"}},
+        "method": "GET", "host": "graph.facebook.com",
+        "path": ["v26.0", "{message_id}"],
+        "query": {"fields": "id,created_time,from,to,message"},
+        "authorization": {"ref": "meta.page.token", "scheme": "Bearer"},
+        "layer2": {"enforced_by": "the token's permissions", "check": "debug_token"},
+    }
+    spec.update(overrides)
+    return {k: v for k, v in spec.items() if v is not None}
+
+
+def _upsert_spec(**overrides):
+    spec = {
+        "operation": "inbox.upsert", "summary": "Write one inbox row.", "kind": "sql",
+        "fields": {"id": {"type": "string", "pattern": "[a-z0-9_.:-]{1,120}"},
+                   "summary": {"type": "text", "max_length": 500},
+                   "status": {"type": "string", "enum": ["needs_reply", "replied"]}},
+        "database": "postgres",
+        "statement": "INSERT INTO shop.inbox (id, summary, status) VALUES ($1, $2, $3) "
+                     "ON CONFLICT (id) DO UPDATE SET summary = $2, status = $3",
+        "params": ["id", "summary", "status"], "tables": ["shop.inbox"], "writes": True,
+        "layer2": {"enforced_by": "role: INSERT, UPDATE on shop.inbox", "check": "psql"},
+    }
+    spec.update(overrides)
+    return spec
+
+
+class TestBoundText:
+    """Free text exists, and exists only where nothing parses it."""
+
+    def test_text_accepts_prose_and_refuses_control_characters(self):
+        from taper.declared import compile_spec
+        op = compile_spec(_upsert_spec()).operation()
+        prose = "Hi! She asked: \"is it $25?\" -- yes; ship to 'Phoenix' & smile\n(thanks)"
+        assert op.validate({"id": "a1", "summary": prose, "status": "replied"})
+        for bad in ("nul\x00here", "esc\x1b[31m", "bell\x07", "x" * 501, 42, None):
+            with pytest.raises(ops.OperationError):
+                op.validate({"id": "a1", "summary": bad, "status": "replied"})
+
+    def test_a_text_field_is_refused_everywhere_it_would_be_parsed(self):
+        from taper.declared import SpecError, compile_spec
+        text = {"note": {"type": "text"}}
+        with pytest.raises(SpecError, match="only be bound"):
+            compile_spec(_spec(fields={**_spec()["fields"], **text},
+                               argv=["kubectl", "get", "{resource}", "--namespace",
+                                     "{namespace}", "{note}"]))
+        with pytest.raises(SpecError, match="only be bound"):
+            compile_spec(_api_spec(fields={"message_id": {"type": "text"}}))
+        with pytest.raises(SpecError, match="host"):
+            compile_spec(_api_spec(fields={**_api_spec()["fields"], "h": {"type": "text"}},
+                                   host="{h}"))
+        with pytest.raises(SpecError, match="database"):
+            compile_spec(_upsert_spec(database="{summary}"))
+        with pytest.raises(SpecError, match="no pattern"):
+            compile_spec(_upsert_spec(fields={**_upsert_spec()["fields"],
+                                              "summary": {"type": "text", "pattern": "a+"}}))
+        # and where it is bound, it loads
+        assert compile_spec(_upsert_spec()).fields["summary"].type == "text"
+
+    def test_a_text_field_is_not_a_policy_attribute(self, root, tmp_path, monkeypatch):
+        """The grant names id and status; the summary is content. A request
+        with any summary is decided on id and status alone - and the summary
+        still reaches the statement, bound."""
+        from taper.declared import compile_spec
+        decl = compile_spec(_upsert_spec())
+        assert decl.policy_attributes() == ("id", "status")
+        broker = _declared_broker(root, tmp_path, decl, monkeypatch)
+        caps = {"inbox.upsert": {"id": Prefix("ig-"), "status": OneOf(["needs_reply"])}}
+        token = Token.issue(root, caps, ttl_seconds=3600, now=NOW,
+                            definitions={"inbox.upsert": decl.definition_hash()})
+        wire = token.serialize()
+
+        def decide(request):
+            return broker.decide(wire, "inbox.upsert", request,
+                                 proof=prove(token.proving_key(), wire, "inbox.upsert",
+                                             request, now=NOW))
+        request = {"id": "ig-1", "summary": "'); DROP TABLE shop.inbox; --",
+                   "status": "needs_reply"}
+        d = decide(request)
+        assert d.allowed, d.reason
+        assert "summary" not in d.attributes
+        assert d.plan.detail["statement_params"] == ["ig-1", request["summary"], "needs_reply"]
+        assert d.plan.detail["statement_text"] == _upsert_spec()["statement"]
+        assert d.plan.detail["param_style"] == "numeric"
+        assert not decide({**request, "status": "replied"}).allowed
+
+
+    def test_a_grant_that_constrains_a_text_field_is_refused(self, root, tmp_path, monkeypatch):
+        """A constraint policy never checks would be silently ignored: on a
+        text field that chooses a recipient, `one_of ["wale"]` would let any
+        recipient through. The broker refuses the grant instead."""
+        from taper.declared import compile_spec
+        decl = compile_spec(_upsert_spec())
+        broker = _declared_broker(root, tmp_path, decl, monkeypatch)
+        caps = {"inbox.upsert": {"id": Any_(), "status": Any_(),
+                                 "summary": OneOf(["only this"])}}
+        token = Token.issue(root, caps, ttl_seconds=3600, now=NOW,
+                            definitions={"inbox.upsert": decl.definition_hash()})
+        wire = token.serialize()
+        request = {"id": "ig-1", "summary": "anything else", "status": "replied"}
+        d = broker.decide(wire, "inbox.upsert", request,
+                          proof=prove(token.proving_key(), wire, "inbox.upsert", request, now=NOW))
+        assert not d.allowed and "never checks" in d.reason and "summary" in d.reason
+
+    def test_an_optional_field_cannot_be_the_whole_json_body(self):
+        from taper.declared import SpecError, compile_spec
+        with pytest.raises(SpecError, match="whole optional field"):
+            compile_spec(_api_spec(method="POST", query=None,
+                                   fields={**_api_spec()["fields"],
+                                           "v": {"type": "text", "required": False}},
+                                   body={"json": "{v}"}))
+
+
+class TestHttpDeclared:
+
+    def _plan(self, spec, request):
+        from taper.declared import DeclaredAdapter, compile_spec
+        return DeclaredAdapter(compile_spec(spec), http_adapter=HTTPAdapter()).plan(request, {})
+
+    def test_query_values_are_encoded_and_keys_are_fixed(self):
+        plan = self._plan(_api_spec(), {"message_id": "aWdf_ZAG-1="})
+        assert plan.detail["url"] == ("https://graph.facebook.com/v26.0/aWdf_ZAG-1="
+                                      "?fields=id%2Ccreated_time%2Cfrom%2Cto%2Cmessage")
+        spec = _api_spec(fields={"q": {"type": "text"},
+                                 "page": {"type": "string", "required": False,
+                                          "pattern": "[A-Za-z0-9]{1,64}"}},
+                         path=["gmail", "v1", "users", "me", "messages"],
+                         query=[["q", "{q}"], ["pageToken", "{page}"],
+                                ["labelIds", "INBOX"], ["labelIds", "UNREAD"]])
+        plan = self._plan(spec, {"q": "newer_than:2d &method=post#frag"})
+        assert plan.detail["url"].endswith(
+            "/gmail/v1/users/me/messages?q=newer_than%3A2d%20%26method%3Dpost%23frag"
+            "&labelIds=INBOX&labelIds=UNREAD")                  # the absent page sends nothing
+
+    def test_a_query_spec_is_refused_where_it_would_compose(self):
+        from taper.declared import SpecError, compile_spec
+        for query in ({"fields": "messages{message}"},          # a brace is a placeholder's
+                      {"fields": "id,{message_id}"},             # a field inside a literal
+                      {"{message_id}": "1"},                     # a key from a field
+                      {"a b": "1"},
+                      {"fields": "{nope}"}):
+            with pytest.raises(SpecError):
+                compile_spec(_api_spec(query=query))
+
+    def test_a_path_field_fills_exactly_one_segment(self):
+        from taper.declared import compile_spec
+        from taper.ops import OperationError
+        loose = _api_spec(fields={"message_id": {"type": "string"}})
+        op = compile_spec(loose).operation()
+        for bad in ("..", ".", "%2e%2e", "a/b", "%2F", "x\\y"):
+            with pytest.raises(OperationError, match="one segment"):
+                self._plan(loose, {"message_id": bad})
+            with pytest.raises(OperationError, match="failed validation"):
+                op.validate({"message_id": bad})
+        assert self._plan(loose, {"message_id": "m_1"}).detail["url"].startswith(
+            "https://graph.facebook.com/v26.0/m_1?")
+
+    def test_a_plan_the_adapter_refuses_is_a_recorded_denial(self, root, tmp_path, monkeypatch):
+        from taper.declared import DeclaredAdapter, compile_spec
+        decl = compile_spec(_api_spec())
+        broker = _declared_broker(root, tmp_path, decl, monkeypatch)
+
+        class Refusing(DeclaredAdapter):
+            def plan(self, request, grant):
+                raise ops.OperationError("the adapter refused this plan")
+        broker.adapters = {decl.name: Refusing(decl, http_adapter=HTTPAdapter())}
+        token = Token.issue(root, {"meta.message": {"message_id": Any_()}}, ttl_seconds=3600,
+                            now=NOW, definitions={"meta.message": decl.definition_hash()})
+        wire, request = token.serialize(), {"message_id": "m_1"}
+        d = broker.decide(wire, "meta.message", request,
+                          proof=prove(token.proving_key(), wire, "meta.message", request, now=NOW))
+        assert not d.allowed and "refused this plan" in d.reason
+        assert list(broker.audit.read())[-1]["body"]["allowed"] is False
+
+    def test_a_json_body_is_a_fixed_structure_with_encoded_values(self):
+        spec = _api_spec(
+            operation="notify.push", method="POST", host="alerts.example.com", path=[""],
+            fields={"title": {"type": "text", "max_length": 120},
+                    "message": {"type": "text", "max_length": 2000},
+                    "priority": {"type": "integer", "min": 1, "max": 5, "required": False}},
+            query=None,
+            body={"json": {"topic": "shop", "title": "{title}", "message": "{message}",
+                           "priority": "{priority}", "tags": ["inbox"]}},
+            authorization={"ref": "ntfy.token", "scheme": "Bearer"})
+        msg = 'She said "ship it", then }{ and \\u0000 as text'
+        plan = self._plan(spec, {"title": "2 need a reply", "message": msg})
+        body = json.loads(plan.detail["body"])
+        assert body == {"topic": "shop", "title": "2 need a reply", "message": msg,
+                        "tags": ["inbox"]}                       # absent priority omitted
+        assert plan.detail["content_type"] == "application/json"
+        assert plan.detail["url"] == "https://alerts.example.com/"
+        assert json.loads(self._plan(spec, {"title": "t", "message": "m", "priority": 4})
+                          .detail["body"])["priority"] == 4
+
+    def test_a_body_spec_is_refused_where_it_would_compose(self):
+        from taper.declared import SpecError, compile_spec
+        post = dict(method="POST", fields={**_api_spec()["fields"], "m": {"type": "text"},
+                                           "o": {"type": "text", "required": False}})
+        with pytest.raises(SpecError, match="carries no body"):
+            compile_spec(_api_spec(fields=post["fields"], body={"text": "{m}"}))
+        with pytest.raises(SpecError, match="array"):
+            compile_spec(_api_spec(**post, body={"json": {"list": ["{o}"]}}))
+        with pytest.raises(SpecError, match="key is a literal"):
+            compile_spec(_api_spec(**post, body={"json": {"{m}": 1}}))
+        with pytest.raises(SpecError, match="one string field"):
+            compile_spec(_api_spec(**post, body="{m}"))          # the old form stays strict
+        with pytest.raises(SpecError):
+            compile_spec(_api_spec(**post, body={"text": "{m}", "json": {}}))
+
+    def test_a_credential_header_may_not_frame_the_request(self):
+        from taper.declared import SpecError, compile_spec
+        plan = self._plan(_api_spec(authorization={"ref": "shop.token",
+                                                    "header": "X-Shopify-Access-Token"}),
+                          {"message_id": "1"})
+        assert plan.secret_refs == {"authorization": "shop.token"}
+        assert plan.detail["auth_header"] == "X-Shopify-Access-Token"
+        assert "auth_scheme" not in plan.detail
+        for header in ("Host", "content-length", "Cookie", "Transfer-Encoding", "X Bad",
+                       "X-Inject\r\nHost"):
+            with pytest.raises(SpecError, match="header"):
+                compile_spec(_api_spec(authorization={"ref": "t", "header": header}))
+        with pytest.raises(SpecError, match="scheme"):
+            compile_spec(_api_spec(authorization={"ref": "t", "scheme": "Bearer x"}))
+
+    def test_an_edited_query_no_longer_matches_the_grant(self):
+        from taper.declared import compile_spec
+        a = compile_spec(_api_spec()).definition_hash()
+        b = compile_spec(_api_spec(query={"fields": "id,message", "method": "delete"}))
+        assert a != b.definition_hash()
+
+
+    def test_a_credential_is_bound_to_a_literal_host(self):
+        from taper.declared import SpecError, compile_spec
+        with pytest.raises(SpecError, match="literal 'host'"):
+            compile_spec(_api_spec(host="{h}", fields={**_api_spec()["fields"],
+                                                       "h": {"type": "string"}}))
+        # without a credential a host may still be a field - held to the hostname grammar
+        loose = compile_spec(_api_spec(host="{h}", authorization=None,
+                                       fields={**_api_spec()["fields"], "h": {"type": "string"}}))
+        op = loose.operation()
+        assert op.validate({"message_id": "1", "h": "api.example.com"})
+        for bad in ("x@evil.example", "-oProxy", "evil.example:8443", "evil.example/x"):
+            with pytest.raises(ops.OperationError):
+                op.validate({"message_id": "1", "h": bad})
+
+
+class TestTokenExchange:
+
+    def _chain(self, vault, post, clock=lambda: NOW):
+        from taper.secrets import ChainProvider
+
+        class Vault:
+            def get(self, ref): return vault.get(ref)
+        return ChainProvider(Vault(), clock=clock, post=post)
+
+    def test_a_refresh_grant_is_exchanged_once_and_cached(self):
+        calls = []
+
+        def post(url, fields, style):
+            calls.append((url, dict(fields), style))
+            return 200, json.dumps({"access_token": f"ya29.{len(calls)}", "expires_in": 3599})
+        cfg = {"token_url": "https://oauth2.googleapis.com/token", "client_id": "cid",
+               "client_secret": "cs", "refresh_token": "rt"}
+        t = [NOW]
+        chain = self._chain({"gmail.token.oauth2": json.dumps(cfg)}, post, clock=lambda: t[0])
+        assert chain.has("gmail.token") and chain.get("gmail.token") is None
+        assert chain.require("gmail.token") == "ya29.1"
+        assert chain.require("gmail.token") == "ya29.1"           # cached
+        assert calls == [("https://oauth2.googleapis.com/token",
+                          {"grant_type": "refresh_token", "client_id": "cid",
+                           "client_secret": "cs", "refresh_token": "rt"}, "form")]
+        t[0] += 3599 - 60                                          # inside the skew
+        assert chain.require("gmail.token") == "ya29.2"
+
+    def test_concurrent_callers_share_one_exchange(self):
+        import threading
+        calls, started, release = [], threading.Event(), threading.Event()
+
+        def post(url, fields, style):
+            calls.append(fields["grant_type"])
+            started.set()
+            assert release.wait(5)
+            return 200, json.dumps({"access_token": f"shpat_{len(calls)}", "expires_in": 86399})
+        cfg = {"token_url": "https://shop.myshopify.com/admin/oauth/access_token",
+               "grant_type": "client_credentials", "client_id": "c", "client_secret": "s"}
+        chain = self._chain({"shop.token.oauth2": json.dumps(cfg)}, post)
+        got = []
+        first = threading.Thread(target=lambda: got.append(chain.require("shop.token")))
+        first.start()
+        assert started.wait(5)                     # the first caller is at the issuer
+        second = threading.Thread(target=lambda: got.append(chain.require("shop.token")))
+        second.start()
+        second.join(0.2)
+        assert second.is_alive()                   # waiting for it, not asking again
+        release.set()
+        first.join(5)
+        second.join(5)
+        assert calls == ["client_credentials"] and got == ["shpat_1", "shpat_1"]
+
+    def test_concurrent_callers_never_replay_a_rotated_refresh_token(self):
+        import threading
+        sent, started, release = [], threading.Event(), threading.Event()
+
+        def post(url, fields, style):
+            sent.append(fields["refresh_token"])
+            started.set()
+            assert release.wait(5)
+            n = len(sent)
+            return 200, json.dumps({"access_token": f"at{n}", "expires_in": 3600,
+                                    "refresh_token": f"rt{n + 1}"})
+        cfg = {"token_url": "https://issuer.example/token", "client_id": "c",
+               "client_secret": "s", "refresh_token": "rt1"}
+        t = [NOW]
+        chain = self._chain({"g.token.oauth2": json.dumps(cfg)}, post, clock=lambda: t[0])
+        got = []
+        a = threading.Thread(target=lambda: got.append(chain.require("g.token")))
+        a.start()
+        assert started.wait(5)
+        b = threading.Thread(target=lambda: got.append(chain.require("g.token")))
+        b.start()
+        b.join(0.2)
+        release.set()
+        a.join(5)
+        b.join(5)
+        # The second caller took the first one's token; rt1 was sent once.
+        assert sent == ["rt1"] and got == ["at1", "at1"]
+        t[0] += 3600                               # expired: the next exchange uses rt2
+        assert chain.require("g.token") == "at2" and sent == ["rt1", "rt2"]
+
+    def test_client_credentials_and_a_wrapped_answer(self):
+        def post(url, fields, style):
+            assert fields["grant_type"] == "client_credentials" and "refresh_token" not in fields
+            return 200, json.dumps({"data": {"access_token": "shpat_x", "expires_in": 86399}})
+        cfg = {"token_url": "https://shop.myshopify.com/admin/oauth/access_token",
+               "grant_type": "client_credentials", "client_id": "c", "client_secret": "s"}
+        assert self._chain({"shop.token.oauth2": json.dumps(cfg)}, post) \
+            .require("shop.token") == "shpat_x"
+
+    def test_an_exchange_config_must_name_an_https_issuer(self):
+        from taper.secrets import SecretUnreadable
+
+        def post(*a):
+            raise AssertionError("an issuer was contacted")
+        base = {"client_id": "c", "client_secret": "s", "refresh_token": "r"}
+        for cfg in ({**base, "token_url": "http://oauth2.googleapis.com/token"},
+                    {**base, "token_url": "file:///etc/passwd"},
+                    {**base, "token_url": "https://x", "grant_type": "password"},
+                    {"token_url": "https://x", "client_id": "c"},
+                    "not json"):
+            text = cfg if isinstance(cfg, str) else json.dumps(cfg)
+            with pytest.raises(SecretUnreadable):
+                self._chain({"t.oauth2": text}, post).require("t")
+
+    def test_a_refused_exchange_names_the_code_and_never_the_body(self):
+        from taper.secrets import SecretUnreadable
+
+        def post(url, fields, style):
+            return 400, json.dumps({"error": "invalid_grant",
+                                    "error_description": "echo: client_secret=cs"})
+        cfg = {"token_url": "https://issuer.example/token", "client_id": "c",
+               "client_secret": "cs", "refresh_token": "r"}
+        with pytest.raises(SecretUnreadable) as exc:
+            self._chain({"t.oauth2": json.dumps(cfg)}, post).require("t")
+        assert "invalid_grant" in str(exc.value) and "cs" not in str(exc.value).replace(
+            "invalid_grant", "")
+
+    def test_a_stored_value_wins_over_an_exchange(self):
+        def post(*a):
+            raise AssertionError("an issuer was contacted")
+        chain = self._chain({"t": "static", "t.oauth2": "{}"}, post)
+        assert chain.require("t") == "static"
+
+
+    def test_a_rotated_refresh_token_is_kept(self):
+        seen, written = [], {}
+
+        def post(url, fields, style):
+            seen.append(fields["refresh_token"])
+            return 200, json.dumps({"data": {"access_token": f"t{len(seen)}", "expires_in": 60,
+                                             "refresh_token": f"r{len(seen) + 1}"}})
+        from taper.secrets import ChainProvider
+        vault = {"tt.token.oauth2": json.dumps({"token_url": "https://issuer.example/token",
+                                                "client_id": "c", "client_secret": "s",
+                                                "refresh_token": "r1", "style": "json"})}
+
+        class Vault:
+            def get(self, ref): return vault.get(ref)
+        clock = [NOW]
+        chain = ChainProvider(Vault(), clock=lambda: clock[0], post=post,
+                              persist=lambda ref, text: written.__setitem__(ref, text))
+        assert chain.require("tt.token") == "t1"
+        assert json.loads(written["tt.token.oauth2"])["refresh_token"] == "r2"
+        clock[0] += 3600
+        assert chain.require("tt.token") == "t2" and seen == ["r1", "r2"]   # in memory, too
+        vault["tt.token.oauth2"] = written["tt.token.oauth2"]               # once persisted
+        clock[0] += 3600
+        assert chain.require("tt.token") == "t3" and seen[-1] == "r3"
+
+    def test_a_second_rotation_before_write_back_never_replays_a_spent_token(self):
+        """The issuer rotates on every use and the vault cannot be written:
+        each exchange must send the newest token, never the stored (spent) one."""
+        from taper.secrets import ChainProvider, SecretUnreadable
+        seen = []
+
+        def post(url, fields, style):
+            seen.append(fields["refresh_token"])
+            return 200, json.dumps({"access_token": f"t{len(seen)}", "expires_in": 1800,
+                                    "refresh_token": f"r{len(seen) + 1}"})
+        vault = {"g.oauth2": json.dumps({"token_url": "https://issuer.example/token",
+                                         "client_id": "c", "client_secret": "s",
+                                         "refresh_token": "r1"})}
+
+        class Vault:
+            def get(self, ref): return vault.get(ref)
+
+        def refuse(ref, text):
+            raise PermissionError("read-only vault")
+        clock = [NOW]
+        chain = ChainProvider(Vault(), clock=lambda: clock[0], post=post, persist=refuse)
+        for _ in range(4):
+            chain.require("g")
+            assert chain.require("g") == f"t{len(seen)}"                  # cached while valid
+            clock[0] += 3600
+        assert seen == ["r1", "r2", "r3", "r4"]
+        with pytest.raises(SecretUnreadable, match="rotated its refresh token"):
+            chain.has("g")                                                  # doctor sees it
+
+    def test_a_write_back_that_does_not_take_effect_is_reported(self):
+        """A Keychain entry shadows the file the rotation was written to: the
+        write "succeeded" and changed nothing. That is reported, not trusted."""
+        from taper.secrets import ChainProvider
+        keychain = {"g.oauth2": json.dumps({"token_url": "https://issuer.example/token",
+                                            "client_id": "c", "client_secret": "s",
+                                            "refresh_token": "r1"})}
+        files = {}
+
+        class First:
+            def get(self, ref): return keychain.get(ref)
+
+        class Second:
+            def get(self, ref): return files.get(ref)
+
+        def post(url, fields, style):
+            return 200, json.dumps({"access_token": "t", "expires_in": 60, "refresh_token": "r2"})
+        chain = ChainProvider(First(), Second(), clock=lambda: NOW, post=post,
+                              persist=lambda ref, text: files.__setitem__(ref, text))
+        assert chain.require("g") == "t"
+        assert "shadows" in chain.unsaved["g"]
+        keychain["g.oauth2"] = files["g.oauth2"]                            # stored where it is read
+        chain.require("g")
+        assert "g" not in chain.unsaved and chain.has("g")
+
+    def test_a_token_with_no_usable_lifetime_is_not_cached(self):
+        calls = []
+
+        def post(url, fields, style):
+            calls.append(1)
+            return 200, json.dumps({"access_token": f"t{len(calls)}", "expires_in": -5})
+        cfg = {"token_url": "https://x.example/t", "grant_type": "client_credentials",
+               "client_id": "a", "client_secret": "s"}
+        chain = self._chain({"k.oauth2": json.dumps(cfg)}, post)
+        assert chain.require("k") == "t1" and chain.require("k") == "t2"
+
+    def test_the_cache_follows_the_config_and_forgets_on_request(self):
+        calls = []
+
+        def post(url, fields, style):
+            calls.append(fields["client_id"])
+            return 200, json.dumps({"access_token": f"t{len(calls)}", "expires_in": 1e308})
+        cfg = {"token_url": "https://x.example/t", "grant_type": "client_credentials",
+               "client_id": "a", "client_secret": "s"}
+        vault = {"k.oauth2": json.dumps(cfg)}
+        clock = [NOW]
+        chain = self._chain(vault, post, clock=lambda: clock[0])
+        assert chain.require("k") == "t1" and chain.require("k") == "t1"
+        vault["k.oauth2"] = json.dumps({**cfg, "client_id": "b"})       # config changed
+        assert chain.require("k") == "t2" and calls == ["a", "b"]
+        chain.forget("k")
+        assert chain.require("k") == "t3"
+        clock[0] += 86400                                                # lifetime is capped
+        assert chain.require("k") == "t4"
+
+    def test_a_failed_exchange_is_not_retried_at_once(self):
+        from taper.secrets import SecretUnreadable
+        calls = []
+
+        def post(url, fields, style):
+            calls.append(1)
+            raise TimeoutError("issuer down")
+        cfg = {"token_url": "https://x.example/t", "grant_type": "client_credentials",
+               "client_id": "a", "client_secret": "s"}
+        clock = [NOW]
+        chain = self._chain({"k.oauth2": json.dumps(cfg)}, post, clock=lambda: clock[0])
+        for _ in range(3):
+            with pytest.raises(SecretUnreadable, match="could not reach"):
+                chain.require("k")
+        assert len(calls) == 1
+        clock[0] += 61
+        with pytest.raises(SecretUnreadable):
+            chain.require("k")
+        assert len(calls) == 2
+
+    def test_has_checks_the_config_without_contacting_the_issuer(self):
+        from taper.secrets import SecretUnreadable
+
+        def post(*a):
+            raise AssertionError("an issuer was contacted")
+        assert not self._chain({}, post).has("k")
+        with pytest.raises(SecretUnreadable):
+            self._chain({"k.oauth2": "{}"}, post).has("k")
+        ok = {"token_url": "https://x.example/t", "grant_type": "client_credentials",
+              "client_id": "a", "client_secret": "s"}
+        assert self._chain({"k.oauth2": json.dumps(ok)}, post).has("k")
+
+
+class TestDeclaredExecution:
+    """What the executor does with a declared plan, against stand-ins for the
+    target: a fake psycopg, and a real HTTP server on loopback."""
+
+    def test_a_declared_statement_binds_through_a_raw_cursor(self, monkeypatch):
+        import sys, types
+        seen = {"default": [], "raw": []}
+
+        class Desc:
+            def __init__(self, name): self.name = name
+
+        class Cursor:
+            description = None
+            rowcount = 1
+            def __init__(self, log): self.log = log
+            def execute(self, sql, params=None):
+                if self.log is seen["raw"] and "%s" in sql:
+                    raise AssertionError("a raw cursor was handed %s markers")
+                if self.log is seen["default"] and "$1" in sql:
+                    raise AssertionError("the default cursor was handed $1 markers")
+                self.log.append((sql, params))
+            def fetchmany(self, n): return []
+            def fetchone(self): return None
+            def close(self): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        class Conn:
+            def cursor(self): return Cursor(seen["default"])
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        fake = types.ModuleType("psycopg")
+        fake.connect = lambda dsn, connect_timeout=None: Conn()
+        fake.RawCursor = lambda conn: Cursor(seen["raw"])
+        monkeypatch.setitem(sys.modules, "psycopg", fake)
+
+        from taper.declared import DeclaredAdapter, compile_spec
+        from taper.execute import Executor
+        from taper.secrets import ChainProvider
+
+        class Fixed:
+            def get(self, ref): return "postgresql://agent@db/shop"
+        plan = DeclaredAdapter(compile_spec(_upsert_spec())).plan(
+            {"id": "ig-1", "summary": "it's 50% off?", "status": "replied"}, {})
+        result = Executor(ChainProvider(Fixed()), require_invariants=False).run(plan)
+        assert result.ok, result.stderr
+        assert seen["raw"] == [(_upsert_spec()["statement"],
+                                ("ig-1", "it's 50% off?", "replied"))]
+        assert any("set_config" in sql for sql, _ in seen["default"])
+
+    def _server(self):
+        import http.server, threading
+        hits = []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a): pass
+            def _go(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length).decode() if length else ""
+                hits.append((self.command, self.path, dict(self.headers), body))
+                if self.path.startswith("/limited"):
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"error": {"code": 4, "is_transient": true}}')
+                    return
+                if self.path.startswith("/echo"):
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(("bad token: " + self.headers.get("Authorization", "")).encode())
+                    return
+                if self.path.startswith("/redirect"):
+                    self.send_response(302)
+                    self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/landing")
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok": true}')
+            do_GET = do_POST = _go
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server, hits
+
+    def _run_http(self, url, **detail):
+        from taper.adapters.base import ExecPlan
+        from taper.execute import Executor
+        from taper.secrets import ChainProvider
+
+        class Fixed:
+            def get(self, ref): return "s3cr3t"
+        plan = ExecPlan(kind="http", secret_refs={"authorization": "t"},
+                        detail={"url": url, "method": detail.pop("method", "GET"), **detail})
+        return Executor(ChainProvider(Fixed()), timeout=5).run(plan)
+
+    def test_http_does_not_carry_a_credential_through_a_redirect(self):
+        server, hits = self._server()
+        try:
+            result = self._run_http(f"http://127.0.0.1:{server.server_port}/redirect")
+        finally:
+            server.shutdown()
+        assert not result.ok and result.exit_code == 302
+        assert [h[1] for h in hits] == ["/redirect"]              # /landing never asked
+
+    def test_an_http_error_carries_the_targets_answer(self):
+        """A 400 that means "rate limited, retry" and a 400 that means "no such
+        object" differ only in the body, so the body comes back with the
+        status - unless it quotes the credential."""
+        server, _ = self._server()
+        try:
+            limited = self._run_http(f"http://127.0.0.1:{server.server_port}/limited")
+            echoed = self._run_http(f"http://127.0.0.1:{server.server_port}/echo",
+                                    auth_scheme="Bearer")
+        finally:
+            server.shutdown()
+        assert not limited.ok and limited.exit_code == 400 and limited.stderr == "HTTP 400"
+        assert json.loads(limited.stdout)["error"]["is_transient"] is True
+        assert not echoed.ok and "s3cr3t" not in echoed.stdout + echoed.stderr
+        assert "withheld" in echoed.stdout
+
+    def test_http_sends_the_credential_in_the_declared_header_and_scheme(self):
+        server, hits = self._server()
+        try:
+            r1 = self._run_http(f"http://127.0.0.1:{server.server_port}/a",
+                                auth_header="X-Shopify-Access-Token")
+            r2 = self._run_http(f"http://127.0.0.1:{server.server_port}/b", method="POST",
+                                auth_scheme="Bearer", body='{"m":"hé"}',
+                                content_type="application/json")
+        finally:
+            server.shutdown()
+        assert r1.ok and r2.ok
+        (_, _, h1, _), (_, _, h2, b2) = hits
+        assert h1.get("X-Shopify-Access-Token") == "s3cr3t" and "Authorization" not in h1
+        assert h2.get("Authorization") == "Bearer s3cr3t"
+        assert h2.get("Content-Type") == "application/json" and b2 == '{"m":"hé"}'
+
+    def test_the_broker_reads_the_vault_secret_set_writes(self, tmp_path, monkeypatch):
+        from taper.secrets import default_provider
+        home = tmp_path / "elsewhere"
+        (home / "secrets").mkdir(parents=True)
+        (home / "secrets" / "mavsey.db").write_text("postgresql://x\n")
+        (home / "secrets" / "mavsey.db").chmod(0o600)
+        monkeypatch.setenv("TAPER_HOME", str(home))
+        monkeypatch.setenv("HOME", str(tmp_path / "someone"))
+        assert default_provider().get("mavsey.db") == "postgresql://x"
+
+    def test_a_malformed_credential_never_reaches_an_error_message(self):
+        from taper.adapters.base import ExecPlan
+        from taper.execute import Executor
+        from taper.secrets import ChainProvider
+
+        class Bad:
+            def get(self, ref): return "s3cr3t\r\nX-Injected: 1"
+        plan = ExecPlan(kind="http", secret_refs={"authorization": "t"},
+                        detail={"url": "https://127.0.0.1:9/x", "method": "GET",
+                                "auth_scheme": "Bearer"})
+        result = Executor(ChainProvider(Bad()), timeout=2).run(plan)
+        assert not result.ok and "s3cr3t" not in result.stderr + result.stdout
+        assert "'t'" in result.stderr

@@ -25,6 +25,7 @@ import json
 import os
 import subprocess
 import tempfile
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -260,23 +261,41 @@ class Executor:
                     params = plan.detail.get("statement_params")
                     if params is None:
                         cur.execute(statement)
+                    elif plan.detail.get("param_style") == "numeric":
+                        # A declared statement numbers its markers. psycopg's
+                        # default cursor reads %s and refuses $1 with a
+                        # parameter count mismatch, so every declared write
+                        # failed against a real server while every fake
+                        # passed. A raw cursor on the same connection is the
+                        # same transaction, with the settings above in force.
+                        # verified-by: tests/test_taper.py::TestDeclaredExecution::test_a_declared_statement_binds_through_a_raw_cursor
+                        raw = psycopg.RawCursor(conn)
+                        try:
+                            raw.execute(statement, tuple(params))
+                            return self._sql_result(raw, max_rows, report)
+                        finally:
+                            raw.close()
                     else:
                         cur.execute(statement, tuple(params))
-                    if cur.description is None:
-                        return Result(True, 0, f"{cur.rowcount} rows affected", "",
-                                      invariants=report)
-                    rows = cur.fetchmany(max_rows)
-                    columns = [d.name for d in cur.description]
-                    body = json.dumps(
-                        {"columns": columns, "rows": [list(map(_jsonable, r)) for r in rows],
-                         "truncated": cur.rowcount > max_rows},
-                        default=str)
-                    out, cut = _truncate(body)
-                    return Result(True, 0, out, "", cut, invariants=report)
+                    return self._sql_result(cur, max_rows, report)
         except Exception as exc:                       # noqa: BLE001
             # The database refused. That is the boundary doing its job — surface
             # it verbatim so the agent can adapt, and so the audit log records it.
             return Result(False, 1, "", f"{type(exc).__name__}: {exc}")
+
+    @staticmethod
+    def _sql_result(cur, max_rows: int, report) -> Result:
+        if cur.description is None:
+            return Result(True, 0, f"{cur.rowcount} rows affected", "",
+                          invariants=report)
+        rows = cur.fetchmany(max_rows)
+        columns = [d.name for d in cur.description]
+        body = json.dumps(
+            {"columns": columns, "rows": [list(map(_jsonable, r)) for r in rows],
+             "truncated": cur.rowcount > max_rows},
+            default=str)
+        out, cut = _truncate(body)
+        return Result(True, 0, out, "", cut, invariants=report)
 
     def _connect(self, psycopg, plan):
         """The connection, as a context manager. The one seam Tower uses:
@@ -297,22 +316,60 @@ class Executor:
         headers = {"User-Agent": "taper/0.1"}
 
         ref = plan.secret_refs.get("authorization")
+        value = None
         if ref:
-            headers["Authorization"] = self.secrets.require(ref)
+            value = self.secrets.require(ref)
+            # A line break in a header value is refused by http.client with
+            # the value quoted in the exception - the credential, in the text
+            # that goes back to the agent. Check first; say which ref, never what.
+            # verified-by: tests/test_taper.py::TestDeclaredExecution::test_a_malformed_credential_never_reaches_an_error_message
+            if any(c in value for c in "\r\n\x00"):
+                return Result(False, -1, "", f"the credential {ref!r} is not a valid "
+                              f"header value (it contains a line break); fix it in the vault")
+            scheme = plan.detail.get("auth_scheme")
+            headers[plan.detail.get("auth_header") or "Authorization"] = \
+                f"{scheme} {value}" if scheme else value
 
         body = plan.detail.get("body")
+        if body is not None and plan.detail.get("content_type"):
+            headers["Content-Type"] = plan.detail["content_type"]
         request = urllib.request.Request(
             url, method=method, headers=headers,
-            data=body.encode() if body else None)
+            data=body.encode("utf-8") if body is not None else None)
+        # Redirects are not followed. urllib's default handler re-sends the
+        # request, Authorization header included, to wherever Location points:
+        # the credential is bound to the resolved host by the plan and would
+        # be re-bound to any host by a 302. The 3xx comes back as the result.
+        # verified-by: tests/test_taper.py::TestDeclaredExecution::test_http_does_not_carry_a_credential_through_a_redirect
+        opener = urllib.request.build_opener(_NoRedirect)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with opener.open(request, timeout=self.timeout) as response:
                 text, cut = _truncate(response.read().decode("utf-8", "replace"))
                 return Result(True, response.status, text, "", cut)
         except urllib.error.HTTPError as exc:
-            text, _ = _truncate(exc.read().decode("utf-8", "replace"))
-            return Result(False, exc.code, text, str(exc))
+            text, cut = _truncate(exc.read().decode("utf-8", "replace"))
+            if exc.code == 401 and ref and hasattr(self.secrets, "forget"):
+                # A minted token the target no longer accepts is dropped, so
+                # the next call mints a fresh one rather than reusing it.
+                self.secrets.forget(ref)
+            # The target's own error body goes back with the status: "rate
+            # limited" and "no such message" are both HTTP 400 at some APIs,
+            # and only the body tells a caller whether to retry. A body that
+            # quotes the credential is withheld, as an exception message is.
+            # verified-by: tests/test_taper.py::TestDeclaredExecution::test_an_http_error_carries_the_targets_answer
+            if value and value in text:
+                text = "(the answer was withheld: it quoted the credential)"
+            return Result(False, exc.code, text, f"HTTP {exc.code}", cut)
         except Exception as exc:                       # noqa: BLE001
-            return Result(False, -1, "", f"{type(exc).__name__}: {exc}")
+            message = f"{type(exc).__name__}: {exc}"
+            if value and value in message:
+                message = f"{type(exc).__name__}: (message withheld: it quoted the credential)"
+            return Result(False, -1, "", message)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 def _ask_invariants(cur, probe: dict) -> dict:

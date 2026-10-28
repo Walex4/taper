@@ -3,6 +3,57 @@
 The first section is what `release.yml` attaches to the GitHub release, so it
 is written to be read on its own.
 
+## Unreleased
+
+**Declared operations reach an API read, and free text has a place.** The
+first deployment outside the demo — an inbox agent that reads Instagram,
+Facebook and Shopify and writes one row per message — did not fit the frozen
+grammar, and DESIGN.md §7 now records why it moved and what it still refuses.
+
+- `text` fields: free text, bounded, admitted only where bound (SQL params,
+  HTTP query values, HTTP bodies); refused at load in argv, hosts, path
+  segments and database names. Not a policy attribute.
+- HTTP `query` with literal keys and encoded values; `body` as
+  `{"text": ...}` or a `{"json": ...}` template; `authorization` with a named
+  header and scheme, framing headers refused.
+- `<ref>.oauth2` in the vault: an access token minted at use from a refresh
+  token or client credentials, cached, never stored long-lived. `taper doctor`
+  counts it as present without contacting the issuer.
+- **Fixed:** declared SQL statements with `$n` markers failed against a real
+  server (psycopg's default cursor reads `%s`); they now bind through a raw
+  cursor in the same transaction.
+- **Fixed:** the HTTP executor followed redirects, carrying the credential to
+  whatever host `Location` named. Redirects are now returned, not followed.
+- **Fixed:** a path field could leave its segment (`%2e%2e` decoded to `..`
+  during normalization). Refused at validation and again at planning; an
+  adapter that refuses a plan is now a recorded denial rather than an error.
+- A grant that constrains a field policy never checks (a text field) is
+  refused at mint and by the broker, rather than silently ignored. A
+  credential is bound to a literal host; a host field is held to the hostname
+  grammar.
+- **Fixed:** reads were not read-only. `default_transaction_read_only`, set
+  inside the transaction, governs the next one; reads now set
+  `transaction_read_only`. Checked against a real PostgreSQL.
+- Token exchange: rotated refresh tokens are written back, the cache follows
+  the config, a 401 drops the token, lifetimes are capped at a day, and a
+  failed exchange waits a minute before the next attempt.
+- **Fixed:** a second rotation before the first was written back sent the
+  spent refresh token again (an issuer that detects reuse revokes the grant).
+  A rotation is now keyed to the stored copy it replaces. A write-back is
+  fsynced and read back; one that did not take effect (a read-only vault, a
+  Keychain entry shadowing the file) is kept in memory, warned about, and
+  reported by `taper doctor` until it is stored.
+- An `expires_in` that is not a positive number means "do not cache", not an
+  hour.
+- An HTTP error now carries the target's answer after the status, so a caller
+  can tell "rate limited, retry" from "no such object" (both are HTTP 400 at
+  Meta). An answer that quotes the credential is withheld.
+- Concurrent callers of one `<ref>` share one exchange: a per-reference lock
+  covers the issuer call and the cache is read again under it, so a second
+  caller never mints a second token or sends a refresh token the first one
+  already rotated. Defense in depth: the broker serves one request at a time.
+- Red team: 19 new cases, 250 in all.
+
 ## v0.5.0 — 2026-10-27
 
 v0.4.0 moved authority from a sentence to a uid. This release is about proof.
