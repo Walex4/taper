@@ -3064,6 +3064,61 @@ class TestTokenExchange:
         t[0] += 3599 - 60                                          # inside the skew
         assert chain.require("gmail.token") == "ya29.2"
 
+    def test_concurrent_callers_share_one_exchange(self):
+        import threading
+        calls, started, release = [], threading.Event(), threading.Event()
+
+        def post(url, fields, style):
+            calls.append(fields["grant_type"])
+            started.set()
+            assert release.wait(5)
+            return 200, json.dumps({"access_token": f"shpat_{len(calls)}", "expires_in": 86399})
+        cfg = {"token_url": "https://shop.myshopify.com/admin/oauth/access_token",
+               "grant_type": "client_credentials", "client_id": "c", "client_secret": "s"}
+        chain = self._chain({"shop.token.oauth2": json.dumps(cfg)}, post)
+        got = []
+        first = threading.Thread(target=lambda: got.append(chain.require("shop.token")))
+        first.start()
+        assert started.wait(5)                     # the first caller is at the issuer
+        second = threading.Thread(target=lambda: got.append(chain.require("shop.token")))
+        second.start()
+        second.join(0.2)
+        assert second.is_alive()                   # waiting for it, not asking again
+        release.set()
+        first.join(5)
+        second.join(5)
+        assert calls == ["client_credentials"] and got == ["shpat_1", "shpat_1"]
+
+    def test_concurrent_callers_never_replay_a_rotated_refresh_token(self):
+        import threading
+        sent, started, release = [], threading.Event(), threading.Event()
+
+        def post(url, fields, style):
+            sent.append(fields["refresh_token"])
+            started.set()
+            assert release.wait(5)
+            n = len(sent)
+            return 200, json.dumps({"access_token": f"at{n}", "expires_in": 3600,
+                                    "refresh_token": f"rt{n + 1}"})
+        cfg = {"token_url": "https://issuer.example/token", "client_id": "c",
+               "client_secret": "s", "refresh_token": "rt1"}
+        t = [NOW]
+        chain = self._chain({"g.token.oauth2": json.dumps(cfg)}, post, clock=lambda: t[0])
+        got = []
+        a = threading.Thread(target=lambda: got.append(chain.require("g.token")))
+        a.start()
+        assert started.wait(5)
+        b = threading.Thread(target=lambda: got.append(chain.require("g.token")))
+        b.start()
+        b.join(0.2)
+        release.set()
+        a.join(5)
+        b.join(5)
+        # The second caller took the first one's token; rt1 was sent once.
+        assert sent == ["rt1"] and got == ["at1", "at1"]
+        t[0] += 3600                               # expired: the next exchange uses rt2
+        assert chain.require("g.token") == "at2" and sent == ["rt1", "rt2"]
+
     def test_client_credentials_and_a_wrapped_answer(self):
         def post(url, fields, style):
             assert fields["grant_type"] == "client_credentials" and "refresh_token" not in fields

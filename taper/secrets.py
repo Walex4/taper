@@ -16,6 +16,7 @@ import math
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -216,6 +217,14 @@ class ChainProvider:
         # live process keeps working from memory; has() reports it, so
         # `taper doctor` shows it before a restart would lose the token.
         self.unsaved: dict[str, str] = {}
+        # One exchange per reference at a time. The broker serves one request
+        # at a time today, but a second caller that arrived while the first
+        # was asking the issuer would otherwise ask again: two tokens for one
+        # need, and with a rotating refresh token the slower call spends a
+        # token the faster one already replaced. The lock covers the network
+        # call; the cache is read again under it.
+        self._locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
 
     def get(self, ref: str) -> Optional[str]:
         for provider in self.providers:
@@ -248,15 +257,26 @@ class ChainProvider:
     def require(self, ref: str) -> str:
         value = self.get(ref)
         if value is None:
-            found = self._config_text(ref)
-            if found is not None:
-                return self._exchange(ref, *found)
+            if self._config_text(ref) is not None:
+                with self._lock_for(ref):
+                    # Read again under the lock: a caller that held it may
+                    # have rotated the config and cached a token for it.
+                    found = self._config_text(ref)
+                    if found is not None:
+                        return self._exchange(ref, *found)
             raise SecretNotFound(
                 f"no secret for {ref!r}; add it with "
                 f"`taper secret set {ref}` or place it in ~/.taper/secrets/{ref}",
                 ref=ref,
             )
         return value
+
+    def _lock_for(self, ref: str) -> threading.Lock:
+        with self._locks_guard:
+            lock = self._locks.get(ref)
+            if lock is None:
+                lock = self._locks[ref] = threading.Lock()
+            return lock
 
     def _config_text(self, ref: str) -> Optional[tuple[str, str]]:
         """(the config to use, sha256 of the stored copy), or None.
@@ -294,6 +314,8 @@ class ChainProvider:
         verified-by: tests/test_taper.py::TestTokenExchange::test_the_cache_follows_the_config_and_forgets_on_request
         verified-by: tests/test_taper.py::TestTokenExchange::test_a_second_rotation_before_write_back_never_replays_a_spent_token
         verified-by: tests/test_taper.py::TestTokenExchange::test_a_write_back_that_does_not_take_effect_is_reported
+        verified-by: tests/test_taper.py::TestTokenExchange::test_concurrent_callers_share_one_exchange
+        verified-by: tests/test_taper.py::TestTokenExchange::test_concurrent_callers_never_replay_a_rotated_refresh_token
         """
         if stored_digest is None:
             stored_digest = _digest(config_text)
